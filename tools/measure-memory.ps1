@@ -16,7 +16,7 @@ param(
 )
 
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-$all = Get-CimInstance Win32_Process | Select-Object ProcessId, ParentProcessId, Name
+$all = Get-CimInstance Win32_Process | Select-Object ProcessId, ParentProcessId, Name, CommandLine
 $roots = if ($ProcessId -gt 0) { @($ProcessId) } else { @($all | Where-Object { $_.Name -eq "$Name.exe" } | ForEach-Object { $_.ProcessId }) }
 if ($roots.Count -eq 0) { Write-Error "没有找到进程 $Name"; exit 1 }
 
@@ -36,8 +36,15 @@ Get-CimInstance Win32_PerfFormattedData_PerfProc_Process | ForEach-Object { $per
 $rows = foreach ($id in $tree) {
   $p = Get-Process -Id $id -ErrorAction SilentlyContinue
   if ($p) {
+    # WebView2 子进程的类型写在命令行的 --type 和 --utility-sub-type 里；没有 --type 的是浏览器主进程。
+    $cmd = ($all | Where-Object { $_.ProcessId -eq $id }).CommandLine
+    $kind = if ($p.ProcessName -ne "msedgewebview2") { "应用" }
+      elseif ($cmd -match "--utility-sub-type=([\w.]+)") { $Matches[1] -replace "\.mojom\.", ":" }
+      elseif ($cmd -match "--type=([\w-]+)") { $Matches[1] }
+      else { "browser" }
     [pscustomobject]@{
       进程 = $p.ProcessName
+      类型 = $kind
       PID = $id
       专用工作集MB = [math]::Round(($perf[$id] -as [double]) / 1MB, 1)
       工作集MB = [math]::Round($p.WorkingSet64 / 1MB, 1)

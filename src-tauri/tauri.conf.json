@@ -12,12 +12,18 @@
   "app": {
     "windows": [
       {
-        "label": "main",
-        "title": "拈来",
+        "label": "panel",
+        "title": "拈来 · G0",
         "width": 420,
-        "height": 560,
-        "center": true,
-        "resizable": true
+        "height": 520,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "visible": false,
+        "focus": false,
+        "focusable": false,
+        "resizable": false,
+        "shadow": false
       }
     ],
     "security": {
