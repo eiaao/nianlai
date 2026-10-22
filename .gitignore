@@ -1,0 +1,8 @@
+# 内部文档是单独的私有仓库（Gitea），不进公开仓库
+internal/
+CLAUDE.local.md
+
+__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db
