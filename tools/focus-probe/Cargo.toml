@@ -1,0 +1,18 @@
+[package]
+name = "focus-probe"
+version = "0.1.0"
+edition = "2024"
+description = "G0 焦点诊断小工具：实时显示前台窗口、焦点控件和插入符，并在屏幕上框出焦点控件"
+publish = false
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Gdi",
+  "Win32_Security",
+  "Win32_System_LibraryLoader",
+  "Win32_System_Threading",
+  "Win32_UI_Accessibility",
+  "Win32_UI_HiDpi",
+  "Win32_UI_WindowsAndMessaging",
+] }
