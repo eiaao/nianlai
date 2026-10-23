@@ -99,7 +99,8 @@ pub fn capture() -> Target {
 }
 
 pub fn no_activate(panel: &WebviewWindow, enabled: bool) -> Result<()> {
-    panel.set_focusable(!enabled).map_err(|e| e.to_string())?;
+    // 不能调 tao 的 set_focusable：面板由我们自己显示，tao 仍认为窗口隐藏，
+    // 它重算样式时会顺手 ShowWindow(SW_HIDE)，切到搜索模式时面板就消失了。
     unsafe {
         let window = hwnd(handle(panel)?);
         let style = GetWindowLongPtrW(window, GWL_EXSTYLE);

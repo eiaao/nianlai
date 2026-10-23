@@ -34,6 +34,10 @@ fn search_ready(app: AppHandle, session: u64) -> Result<(), String> {
 }
 #[tauri::command]
 fn hide_panel(app: AppHandle, session: u64) -> Result<(), String> {
+    app.state::<Controller>().logger.event(
+        "hide_source",
+        json!({"session":session,"source":"frontend"}),
+    );
     panel::dispatch(&app, Action::Hide { session })
 }
 #[tauri::command]
@@ -52,6 +56,9 @@ fn report_painted(app: AppHandle, session: u64) -> Result<(), String> {
 }
 #[tauri::command]
 fn quit_prototype(app: AppHandle) -> Result<(), String> {
+    app.state::<Controller>()
+        .logger
+        .event("quit_source", json!({"source":"frontend"}));
     panel::dispatch(&app, Action::QuitFrontend)
 }
 
@@ -59,6 +66,9 @@ fn register_hotkeys(app: &AppHandle, logger: &log::Logger, automatic: bool) -> R
     let exit: Shortcut = "Ctrl+Alt+Shift+Q".parse().map_err(|e| format!("{e}"))?;
     if let Err(error) = app.global_shortcut().on_shortcut(exit, |app, _, event| {
         if event.state == ShortcutState::Pressed {
+            app.state::<Controller>()
+                .logger
+                .event("quit_source", json!({"source":"hotkey"}));
             let _ = panel::dispatch(app, Action::Quit);
         }
     }) {
@@ -153,6 +163,11 @@ pub fn run() {
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
+                if let Some(controller) = window.app_handle().try_state::<Controller>() {
+                    controller
+                        .logger
+                        .event("quit_source", json!({"source":"window_close"}));
+                }
                 let _ = panel::dispatch(window.app_handle(), Action::Quit);
             }
         })

@@ -36,6 +36,7 @@ enum Command {
 }
 struct Context {
     sender: mpsc::SyncSender<HookEvent>,
+    window: usize,
     bounds: RECT,
     hotkey: (u16, Modifiers),
     replay: mpsc::SyncSender<ReplayKey>,
@@ -286,7 +287,12 @@ unsafe extern "system" fn mouse(code: i32, wparam: WPARAM, lparam: LPARAM) -> LR
                     || mouse.pt.y < r.top
                     || mouse.pt.y >= r.bottom
                 {
-                    let _ = context.sender.try_send(HookEvent::Outside);
+                    let current = super::window::rect(context.window).unwrap_or_default();
+                    let _ = context.sender.try_send(HookEvent::Outside {
+                        point: [mouse.pt.x, mouse.pt.y],
+                        bounds: [r.left, r.top, r.right, r.bottom],
+                        current: [current.left, current.top, current.right, current.bottom],
+                    });
                 }
             }
         });
@@ -320,7 +326,7 @@ impl Hooks {
         let overflow = dropped.clone();
         let thread = thread::Builder::new().name("panel-hooks".into()).spawn(move || unsafe {
             CONTEXT.with(|context| *context.borrow_mut() = Some(Context {
-                sender, bounds, hotkey: (vk, shortcut.mods), replay: replay_sender,
+                sender, window, bounds, hotkey: (vk, shortcut.mods), replay: replay_sender,
                 dropped: overflow, pending: None, swallowed: [false; 256], release_action: [None; 256],
             }));
             let mut message = MSG::default();
@@ -329,7 +335,8 @@ impl Hooks {
             let mut keyboard_hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard), module, 0).ok();
             let mouse_hook = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse), module, 0).ok();
             let installed = keyboard_hook.is_some() && mouse_hook.is_some();
-            logger.event("hooks_installed", json!({"session":session,"keyboard_hook":keyboard_hook.is_some(),"mouse_hook":mouse_hook.is_some()}));
+            logger.event("hooks_installed", json!({"session":session,"keyboard_hook":keyboard_hook.is_some(),"mouse_hook":mouse_hook.is_some(),
+                "bounds":[bounds.left, bounds.top, bounds.right, bounds.bottom]}));
             let _ = ready.send(if installed { Ok(GetCurrentThreadId()) } else { Err("低层钩子安装失败".to_owned()) });
             if installed {
                 loop {

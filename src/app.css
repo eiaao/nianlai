@@ -52,6 +52,5 @@ footer { border-top: 1px solid var(--border); padding: 8px 12px; }
 .mode i { width: 6px; height: 6px; background: var(--muted); border-radius: 50%; }
 .mode i.search { background: var(--accent); }
 .timing { margin-left: auto; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.quit { flex-shrink: 0; background: transparent; border: 0; padding: 4px 0 4px 4px; color: var(--muted); font-size: 11px; }
-.quit:hover, .quit:focus-visible { color: var(--accent); }
+.quit { flex-shrink: 0; color: var(--muted); font-size: 11px; white-space: nowrap; }
 .result { margin: 0 0 6px; color: var(--accent); font-size: 11px; }

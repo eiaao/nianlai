@@ -196,7 +196,8 @@
     <div class="status">
       <span class="mode"><i class:search={mode === "search"}></i>{mode === "quick" ? "快速取用" : "搜索模式"}</span>
       <span class="timing" title="快捷键到显示 / 显示到前端首帧">{timing ? timing.hotkeyToShowMs.toFixed(1) : "—"} / {timing?.showToPaintMs?.toFixed(1) ?? "—"} ms</span>
-      <button class="quit" onpointerdown={(event) => event.preventDefault()} onclick={() => command("quit_prototype")}>退出样机</button>
+      <!-- 面板常压在输入框上方，按钮容易被误点，退出只留快捷键。 -->
+      <span class="quit">退出：Ctrl+Alt+Shift+Q</span>
     </div>
   </footer>
 </main>

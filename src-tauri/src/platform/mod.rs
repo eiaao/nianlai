@@ -43,7 +43,12 @@ pub struct ReplayKey {
 pub enum HookEvent {
     Key(&'static str),
     Search(Instant),
-    Outside,
+    // 点击坐标、安装钩子时记下的面板范围、点击当时面板的实际范围，用于排查误判。
+    Outside {
+        point: [i32; 2],
+        bounds: [i32; 4],
+        current: [i32; 4],
+    },
 }
 
 #[derive(Clone, Copy, Serialize)]

@@ -285,6 +285,7 @@ impl Panel {
         if automatic.is_none() {
             let session = self.session;
             let app = app.clone();
+            let hook_logger = logger.clone();
             self.hooks = Some(Hooks::install(
                 window::handle(&self.window)?,
                 self.hotkey.ok_or("呼出键尚未注册")?,
@@ -297,7 +298,18 @@ impl Panel {
                             session,
                             started: Some(started),
                         },
-                        HookEvent::Outside => Action::Hide { session },
+                        HookEvent::Outside {
+                            point,
+                            bounds,
+                            current,
+                        } => {
+                            hook_logger.event(
+                                "hide_source",
+                                json!({"session":session,"source":"outside_click",
+                                    "point":point,"bounds":bounds,"current":current}),
+                            );
+                            Action::Hide { session }
+                        }
                     };
                     let _ = dispatch(&app, action);
                 },
@@ -547,6 +559,7 @@ impl Panel {
                             json!({"send_input":paste::cancel_alt_menu()}),
                         );
                     }
+                    self.log(logger, "hide_source", json!({"source":"hotkey"}));
                     self.hide(logger)?;
                 }
             }
@@ -587,6 +600,7 @@ impl Panel {
             Action::Key { session, key } if self.current(session) && self.mode == Mode::Quick => {
                 self.emit("panel:key", json!({"key":key}));
                 if key == "Escape" {
+                    self.log(logger, "hide_source", json!({"source":"escape_key"}));
                     self.hide(logger)?;
                 }
             }
@@ -605,6 +619,11 @@ impl Panel {
                     self.foreground_taken = true;
                     self.prepare_search()?;
                 } else {
+                    self.log(
+                        logger,
+                        "hide_source",
+                        json!({"source":"search_activation_failed"}),
+                    );
                     self.hide(logger)?;
                 }
             }
