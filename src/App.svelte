@@ -3,7 +3,8 @@
   import { invoke } from "@tauri-apps/api/core";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
-  type Sample = { id: number; text: string };
+  type HistoryItem = { id: number; kind: string; preview: string; file_names: string[]; source: string; copied_ms: number; copy_count: number; partial: boolean };
+  type HistorySnapshot = { items: HistoryItem[]; total: number; recording: boolean; last_recorded_ms: number | null };
   type SessionEvent = { session: number };
   type Timing = SessionEvent & { hotkeyToShowMs: number; showToPaintMs?: number };
   type PasteResult = SessionEvent & {
@@ -14,7 +15,7 @@
     layer3: { conclusion: string };
     selected_to_result_ms: number;
   };
-  let samples = $state<Sample[]>([]);
+  let history = $state<HistorySnapshot>({ items: [], total: 0, recording: false, last_recorded_ms: null });
   let query = $state("");
   let mode = $state<"quick" | "search">("quick");
   let selected = $state(0);
@@ -27,7 +28,8 @@
   let list: HTMLUListElement;
   let timing = $state<Timing | null>(null);
   let message = $state("");
-  const filtered = $derived(samples.filter((sample) => sample.text.toLocaleLowerCase().includes(query.toLocaleLowerCase())));
+  const filtered = $derived(history.items.filter((item) => [item.preview, ...item.file_names].some((text) => text.toLocaleLowerCase().includes(query.toLocaleLowerCase()))));
+  const time = (millis: number) => new Date(millis).toLocaleTimeString("zh-CN", { hour12: false });
 
   async function command(name: string, args: Record<string, unknown> = {}) {
     try { await invoke(name, args); }
@@ -98,6 +100,27 @@
     let disposed = false;
     const unlisten: UnlistenFn[] = [];
     const frames = new Set<number>();
+    let fetching = false;
+    let refreshPending = false;
+    async function refreshHistory() {
+      refreshPending = true;
+      if (fetching) return;
+      fetching = true;
+      try {
+        while (refreshPending && visible && !disposed) {
+          refreshPending = false;
+          const current = session;
+          const snapshot = await invoke<HistorySnapshot>("get_history");
+          if (!disposed && visible && current === session) {
+            const selectedId = filtered[selected]?.id;
+            history = snapshot;
+            const index = filtered.findIndex((item) => item.id === selectedId);
+            selected = index >= 0 ? index : 0;
+          }
+        }
+      } catch { if (!disposed) message = "读取历史失败，请查看 G0 日志。"; }
+      finally { fetching = false; }
+    }
     function frame(callback: () => void) {
       const id = requestAnimationFrame(() => { frames.delete(id); if (!disposed) callback(); });
       frames.add(id);
@@ -107,18 +130,20 @@
       if (disposed) stop(); else unlisten.push(stop);
     }
     async function initialize() {
-      await subscribe<Timing>("panel:shown", (payload) => {
+      await subscribe<Timing & { history: HistorySnapshot }>("panel:shown", (payload) => {
         if (payload.session < session) return;
         session = payload.session;
         visible = true;
         mode = "quick";
         query = "";
+        // 每次呼出都从最新一条开始；只有面板开着时来了新复制，才保持原来的选中项。
+        history = payload.history;
         selected = 0;
         busy = false;
         composing = false;
         compositionEnded = -Infinity;
         input?.blur();
-        timing = payload;
+        timing = { session: payload.session, hotkeyToShowMs: payload.hotkeyToShowMs };
         const current = session;
         frame(() => frame(() => {
           if (visible && session === current) void command("report_painted", { session: current });
@@ -126,6 +151,9 @@
       });
       await subscribe<SessionEvent & { key: string }>("panel:key", (payload) => {
         if (visible && payload.session === session && mode === "quick") navigate(payload.key);
+      });
+      await subscribe<SessionEvent>("panel:history-changed", (payload) => {
+        if (visible && payload.session === session) void refreshHistory();
       });
       await subscribe<SessionEvent & { mode: "search" }>("panel:mode", async (payload) => {
         if (!visible || payload.session !== session) return;
@@ -168,7 +196,6 @@
         evidence.push(`${payload.selected_to_result_ms.toFixed(0)} ms`);
         message = evidence.join(" · ");
       });
-      samples = await invoke<Sample[]>("get_samples");
       if (!disposed) await command("frontend_ready");
     }
     void initialize().catch(() => { message = "初始化失败，请重启样机并查看日志。"; });
@@ -180,13 +207,14 @@
 
 <main aria-label="拈来剪贴板样机">
   <header>
-    <div class="heading"><strong>拈来</strong><span>G0 · 样机二</span><span class="count">{filtered.length} 条示例</span></div>
+    <div class="heading"><strong>拈来</strong><span>G0 · 样机三</span><span class="count">{query ? `${filtered.length} / ` : ""}{history.total} 条</span></div>
+    <div class="recording" class:inactive={!history.recording} role="status">{history.recording ? "记录中" : "未在记录"}{history.last_recorded_ms ? ` · 上次 ${time(history.last_recorded_ms)}` : ""}{history.total > 300 ? " · 显示最近 300 条" : ""}</div>
     <input
       bind:this={input}
       bind:value={query}
       type="search"
-      aria-label="搜索示例文本"
-      placeholder={mode === "quick" ? "直接打字或按 / 搜索" : "搜索示例文本"}
+      aria-label="搜索预览和文件名"
+      placeholder={mode === "quick" ? "直接打字或按 / 搜索" : "搜索预览和文件名"}
       readonly={mode === "quick"}
       tabindex={mode === "quick" ? -1 : 0}
       spellcheck="false"
@@ -199,8 +227,8 @@
     <div class="hint">{mode === "quick" ? "↑ ↓ 选择 · 1–9 取用 · Enter 粘贴 · Shift+Enter 复制 · Esc 收起" : "↑ ↓ 选择 · Ctrl+1–9 取用 · Enter 粘贴 · Shift+Enter 复制 · Esc 返回"}</div>
   </header>
 
-  <ul bind:this={list} aria-label="示例文本" aria-busy={busy}>
-    {#each filtered as sample, index (sample.id)}
+  <ul bind:this={list} aria-label="剪贴板历史" aria-busy={busy}>
+    {#each filtered as item, index (item.id)}
       <li>
         <button
           class="entry"
@@ -213,11 +241,16 @@
           onclick={() => choose(index)}
         >
           <span class="badge" aria-hidden="true">{index < 9 ? index + 1 : "·"}</span>
-          <span class="preview">{sample.text}</span>
+          <span class="entry-content">
+            <span class="entry-type">{item.kind}</span>
+            <span class="preview">{item.preview || "（空文本）"}</span>
+            <span class="metadata">{item.source} · {time(item.copied_ms)}{item.copy_count > 1 ? ` · 复制 ${item.copy_count} 次` : ""}</span>
+            {#if item.partial}<span class="partial">部分格式未保存</span>{/if}
+          </span>
         </button>
       </li>
     {:else}
-      <li class="empty">没有匹配的示例文本</li>
+      <li class="empty">{query ? "没有匹配的历史" : "复制内容后会显示在这里"}</li>
     {/each}
   </ul>
 

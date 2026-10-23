@@ -1,12 +1,12 @@
 use crate::{
     autocycle,
+    history::{History, Snapshot},
     log::{Logger, now_ms},
     paste::{
         keys::Table,
         request::{Mode as PasteMode, Request},
     },
     platform::{self, HookEvent, Hooks, REPLAY_WAIT, Target, paste, webview, window},
-    samples,
 };
 use serde_json::{Value, json};
 use std::{
@@ -42,9 +42,12 @@ struct AutoVisible {
 pub struct Controller {
     inner: Mutex<Panel>,
     pub logger: Logger,
+    // 字段按声明顺序析构：没走 shutdown 就退出时（例如启动失败），也要先停采集再停剪贴板线程。
+    capture: Mutex<Option<platform::capture::Service>>,
     clipboard: platform::clipboard::Service,
     keys: Arc<Table>,
     stopping: Arc<AtomicBool>,
+    history: Arc<Mutex<History>>,
 }
 struct Panel {
     window: WebviewWindow,
@@ -68,6 +71,7 @@ struct Panel {
 }
 
 pub enum Action {
+    HistoryChanged,
     Toggle {
         started: Instant,
         target: Target,
@@ -137,13 +141,20 @@ impl Controller {
         logger: Logger,
         plan: Option<autocycle::Plan>,
     ) -> platform::Result<Self> {
-        let clipboard = platform::clipboard::Service::start(logger.clone())?;
+        let mut history = History::new(platform::hash::sha256);
+        if std::env::var("NIANLAI_G0_SAMPLES").as_deref() == Ok("1") {
+            history.seed_samples()?;
+        }
+        let history = Arc::new(Mutex::new(history));
+        let clipboard = platform::clipboard::Service::start(logger.clone(), history.clone())?;
         let keys = Arc::new(Table::load(&logger));
         Ok(Self {
             logger,
             clipboard,
             keys,
             stopping: Arc::new(AtomicBool::new(false)),
+            history,
+            capture: Mutex::new(None),
             inner: Mutex::new(Panel {
                 window,
                 mode: Mode::Hidden,
@@ -169,8 +180,28 @@ impl Controller {
     pub fn set_hotkey(&self, hotkey: Shortcut) {
         self.inner.lock().unwrap().hotkey = Some(hotkey);
     }
+    pub fn start_capture(&self, app: &AppHandle, automatic: bool) -> platform::Result<()> {
+        let app = app.clone();
+        let changed = Arc::new(move || {
+            let _ = dispatch(&app, Action::HistoryChanged);
+        });
+        *self.capture.lock().unwrap() = Some(platform::capture::Service::start(
+            self.logger.clone(),
+            self.history.clone(),
+            &self.clipboard,
+            automatic,
+            changed,
+        )?);
+        Ok(())
+    }
+    pub fn history_snapshot(&self) -> Snapshot {
+        self.history.lock().unwrap().snapshot()
+    }
     pub fn shutdown(&self) {
         self.stopping.store(true, Ordering::Release);
+        if let Some(capture) = self.capture.lock().unwrap().take() {
+            capture.shutdown();
+        }
         if let Ok(mut panel) = self.inner.lock() {
             panel.auto_stop.take();
             if let Err(error) = panel.replay_search(&self.logger, false, "shutdown") {
@@ -222,11 +253,13 @@ impl Panel {
     fn current(&self, session: u64) -> bool {
         session == self.session && self.mode != Mode::Hidden
     }
-    fn shown_event(&self) {
+    fn shown_event(&self, app: &AppHandle) {
         if let (Some(started), Some(shown)) = (self.started, self.shown) {
+            // 历史随呼出事件一起发：前端不用再取一次，呼出后马上按键也拿到的是最新列表。
+            let history = app.state::<Controller>().history_snapshot();
             self.emit(
                 "panel:shown",
-                json!({"hotkeyToShowMs":shown.duration_since(started).as_secs_f64()*1000.0}),
+                json!({"hotkeyToShowMs":shown.duration_since(started).as_secs_f64()*1000.0,"history":history}),
             );
         }
     }
@@ -344,7 +377,7 @@ impl Panel {
                 },
             )?);
         }
-        self.shown_event();
+        self.shown_event(app);
         Ok(())
     }
     fn hide_auto(
@@ -532,6 +565,9 @@ impl Panel {
             }
         }
         match action {
+            Action::HistoryChanged if self.mode != Mode::Hidden => {
+                self.emit("panel:history-changed", json!({}));
+            }
             Action::AutoShow {
                 cycle,
                 hidden_since,
@@ -623,7 +659,7 @@ impl Panel {
                         self.memory.clone(),
                     )?;
                 } else {
-                    self.shown_event();
+                    self.shown_event(app);
                 }
             }
             Action::Key { session, key } if self.current(session) && self.mode == Mode::Quick => {
@@ -675,10 +711,11 @@ impl Panel {
                 mode,
                 started,
             } if self.current(session) && !self.pasting => {
-                let sample = samples::all()
-                    .into_iter()
-                    .find(|sample| sample.id == id)
-                    .ok_or("无效条目")?;
+                let Some(content) = app.state::<Controller>().history.lock().unwrap().get(id)
+                else {
+                    self.emit("panel:error", json!({"message":"这条记录已不在历史里"}));
+                    return Ok(());
+                };
                 let owner = window::handle(&self.window)?;
                 let foreground = window::foreground();
                 let external_switch = self.hooks.as_ref().is_some_and(Hooks::external_switch)
@@ -686,7 +723,8 @@ impl Panel {
                 let request = Request {
                     target: self.target.clone(),
                     panel: owner,
-                    text: sample.text,
+                    record_id: id,
+                    content,
                     mode,
                     started,
                     external_switch,
@@ -752,10 +790,18 @@ impl Panel {
                 // 证据收集期间可能已经再次呼出，日志要用这次粘贴自己的会话号和目标，不能用当前的。
                 result["session"] = json!(session);
                 logger.event("paste", result.clone());
+                if result["clipboard_written"] == true && self.mode != Mode::Hidden {
+                    self.emit("panel:history-changed", json!({}));
+                }
                 if session == self.session {
                     self.pasting = false;
                     if result["clipboard_written"] == false {
-                        self.emit("panel:error", json!({"message":"写入剪贴板失败，请重试。"}));
+                        let message = if result["reason"] == "record_missing" {
+                            "这条记录已不在历史里"
+                        } else {
+                            "写入剪贴板失败，请重试。"
+                        };
+                        self.emit("panel:error", json!({"message":message}));
                     } else {
                         self.emit("panel:paste-result", result);
                     }

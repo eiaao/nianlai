@@ -1,8 +1,16 @@
-use super::window;
-use crate::{log::Logger, platform::Result};
+use super::{formats, window};
+use crate::{
+    history::{
+        History,
+        content::{Content, Data, FILES, HTML, RTF, TEXT},
+    },
+    log::Logger,
+    platform::Result,
+};
 use serde_json::{Value, json};
 use std::{
     cell::RefCell,
+    collections::BTreeMap,
     sync::{Arc, Mutex, mpsc},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -17,7 +25,6 @@ use windows::{
             DataExchange::*,
             LibraryLoader::GetModuleHandleW,
             Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock},
-            Ole::CF_UNICODETEXT,
         },
         UI::WindowsAndMessaging::*,
     },
@@ -38,6 +45,7 @@ pub struct Observation {
     first: Option<Read>,
     destroyed: bool,
     render_failed: bool,
+    delay_failed: bool,
 }
 
 impl Observation {
@@ -54,6 +62,7 @@ impl Observation {
             }
         });
         let status = match &self.first {
+            _ if self.delay_failed => "delay_failed",
             None => "timeout",
             Some(read)
                 if read.at > sent && read.at.duration_since(sent) > Duration::from_secs(1) =>
@@ -69,22 +78,27 @@ impl Observation {
         json!({"status":status,"first_reader":self.first.as_ref().map(|read| &read.process_name),
             "is_target":self.first.as_ref().and_then(|read| read.known.then_some(read.is_target)), "relative_to_send_ms":delta,
             "timed_out":status=="timeout", "first_read_only":true,
-            "ownership_lost":self.destroyed,"render_failed":self.render_failed})
+            "ownership_lost":self.destroyed,"render_failed":self.render_failed,"delay_failed":self.delay_failed})
     }
 }
 
 struct Memory(HGLOBAL);
 impl Memory {
     fn new(bytes: &[u8]) -> Result<Self> {
+        Self::padded(bytes, 0)
+    }
+    fn padded(bytes: &[u8], padding: usize) -> Result<Self> {
         unsafe {
             let memory = Self(
-                GlobalAlloc(GMEM_MOVEABLE, bytes.len()).map_err(|_| "clipboard_allocate_failed")?,
+                GlobalAlloc(GMEM_MOVEABLE, (bytes.len() + padding).max(1))
+                    .map_err(|_| "clipboard_allocate_failed")?,
             );
             let pointer = GlobalLock(memory.0);
             if pointer.is_null() {
                 return Err("clipboard_lock_failed".into());
             }
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), pointer.cast(), bytes.len());
+            std::ptr::write_bytes(pointer.cast::<u8>().add(bytes.len()), 0, padding);
             let _ = GlobalUnlock(memory.0);
             Ok(memory)
         }
@@ -114,18 +128,35 @@ impl Drop for Open {
 }
 
 struct Pending {
-    text: Option<Memory>,
+    formats: BTreeMap<u32, (String, Data)>,
     target: u32,
     observation: Arc<Mutex<Observation>>,
 }
 thread_local! { static PENDING: RefCell<Option<Pending>> = const { RefCell::new(None) }; }
 
-fn render(record_reader: bool) {
+fn memory(name: &str, data: &Data) -> Result<Memory> {
+    match data {
+        Data::Bytes(bytes) => Memory::padded(
+            bytes,
+            match name {
+                TEXT => 2,
+                HTML | RTF => 1,
+                _ => 0,
+            },
+        ),
+        Data::Files(paths) => Memory::new(&formats::build_dropfiles(paths)?),
+    }
+}
+
+fn render(format: Option<u32>, record_reader: bool) {
     // SetClipboardData 可能触发同步消息，调用期间不持有 RefCell 的借用。
     let pending = PENDING.with(|state| state.borrow_mut().take());
     if let Some(mut pending) = pending {
         let mut reader_process = None;
-        if record_reader && !pending.observation.lock().unwrap().observed() {
+        if record_reader
+            && format.is_some_and(|id| pending.formats.contains_key(&id))
+            && !pending.observation.lock().unwrap().observed()
+        {
             let at = Instant::now();
             let mut process = 0;
             if let Ok(reader) = unsafe { GetOpenClipboardWindow() } {
@@ -141,11 +172,26 @@ fn render(record_reader: bool) {
             });
             reader_process = Some(process);
         }
-        if let Some(text) = pending.text.take()
-            && let Err(text) = text.transfer(CF_UNICODETEXT.0 as u32)
-        {
-            pending.text = Some(text);
-            pending.observation.lock().unwrap().render_failed = true;
+        let ids: Vec<_> = pending
+            .formats
+            .keys()
+            .copied()
+            .filter(|id| format.is_none_or(|requested| requested == *id))
+            .collect();
+        for id in ids {
+            let (name, data) = &pending.formats[&id];
+            if memory(name, data)
+                .and_then(|memory| {
+                    memory
+                        .transfer(id)
+                        .map_err(|_| "clipboard_render_failed".into())
+                })
+                .is_ok()
+            {
+                pending.formats.remove(&id);
+            } else {
+                pending.observation.lock().unwrap().render_failed = true;
+            }
         }
         // 先交付正文再解析进程名，避免进程查询拖住目标的 GetClipboardData。
         if let Some(process) = reader_process {
@@ -163,7 +209,7 @@ fn render_all(owner: HWND) -> bool {
         state
             .borrow()
             .as_ref()
-            .is_some_and(|pending| pending.text.is_some())
+            .is_some_and(|pending| !pending.formats.is_empty())
     }) {
         return true;
     }
@@ -179,20 +225,20 @@ fn render_all(owner: HWND) -> bool {
     }
     let _open = Open;
     if unsafe { GetClipboardOwner() }.ok() == Some(owner) {
-        render(false);
+        render(None, false);
     }
     !PENDING.with(|state| {
         state
             .borrow()
             .as_ref()
-            .is_some_and(|pending| pending.text.is_some())
+            .is_some_and(|pending| !pending.formats.is_empty())
     })
 }
 
 unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     match message {
-        WM_RENDERFORMAT if wp.0 as u32 == CF_UNICODETEXT.0 as u32 => {
-            render(true);
+        WM_RENDERFORMAT => {
+            render(Some(wp.0 as u32), true);
             LRESULT(0)
         }
         WM_RENDERALLFORMATS => {
@@ -213,17 +259,37 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wp: WPARAM, lp: LP
 
 fn write(
     owner: HWND,
-    text: &str,
+    record_id: usize,
+    content: &Content,
+    history: &Mutex<History>,
     target: u32,
     delayed: bool,
     observation: Arc<Mutex<Observation>>,
 ) -> Result<()> {
-    let bytes: Vec<u8> = text
-        .encode_utf16()
-        .chain(Some(0))
-        .flat_map(u16::to_ne_bytes)
-        .collect();
-    let text = Memory::new(&bytes)?;
+    let mut pending = BTreeMap::new();
+    for (name, format) in &content.formats {
+        pending.insert(
+            formats::register(name)?,
+            (name.clone(), format.data.clone()),
+        );
+    }
+    if content.formats.contains_key(FILES) {
+        pending.insert(
+            formats::register("Preferred DropEffect")?,
+            (
+                "Preferred DropEffect".into(),
+                Data::Bytes(1u32.to_le_bytes().to_vec().into()),
+            ),
+        );
+    }
+    let immediate = if delayed {
+        Vec::new()
+    } else {
+        pending
+            .iter()
+            .map(|(id, (name, data))| Ok((*id, memory(name, data)?)))
+            .collect::<Result<Vec<_>>>()?
+    };
     let names = [
         w!("Clipboard Viewer Ignore"),
         w!("ExcludeClipboardContentFromMonitorProcessing"),
@@ -252,6 +318,13 @@ fn write(
         thread::sleep(Duration::from_millis(5));
     }
     let _open = Open;
+    if !history
+        .lock()
+        .unwrap()
+        .before_write(record_id, content.fingerprint, Instant::now())
+    {
+        return Err("record_missing".into());
+    }
     unsafe {
         EmptyClipboard().map_err(|_| "clipboard_empty_failed")?;
     }
@@ -261,31 +334,51 @@ fn write(
             .map_err(|_| "clipboard_marker_failed")?;
     }
     if delayed {
-        unsafe {
-            // 延迟渲染成功时也返回 NULL；windows-rs 的非空句柄包装会将它当成错误。
-            SetLastError(WIN32_ERROR(0));
-            let _ = SetClipboardData(CF_UNICODETEXT.0 as u32, None);
-            if GetLastError().0 != 0 {
-                return Err("clipboard_delay_failed".into());
-            }
-        }
+        let ids: Vec<_> = pending.keys().copied().collect();
+        let evidence = observation.clone();
         PENDING.with(|state| {
             *state.borrow_mut() = Some(Pending {
-                text: Some(text),
+                formats: pending,
                 target,
                 observation,
             })
         });
+        for id in ids {
+            unsafe {
+                // 延迟渲染成功时也返回 NULL；windows-rs 的非空句柄包装会将它当成错误。
+                SetLastError(WIN32_ERROR(0));
+                let _ = SetClipboardData(id, None);
+                if GetLastError().0 == 0 {
+                    continue;
+                }
+            }
+            // 剪贴板已经清空，不能一边报“写入失败”一边留下这条内容：改为当场写入全部格式，
+            // 第 2 层证据如实记为不可用。
+            evidence.lock().unwrap().delay_failed = true;
+            render(None, false);
+            if PENDING.with(|state| {
+                state
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|pending| !pending.formats.is_empty())
+            }) {
+                return Err("clipboard_render_failed".into());
+            }
+            break;
+        }
     } else {
-        text.transfer(CF_UNICODETEXT.0 as u32)
-            .map_err(|_| "clipboard_text_failed")?;
+        for (id, memory) in immediate {
+            memory.transfer(id).map_err(|_| "clipboard_format_failed")?;
+        }
     }
+    history.lock().unwrap().reuse(record_id);
     Ok(())
 }
 
 enum Command {
     Write {
-        text: String,
+        record_id: usize,
+        content: Arc<Content>,
         target: u32,
         delayed: bool,
         observation: Arc<Mutex<Observation>>,
@@ -303,7 +396,7 @@ struct Inner {
 pub struct Service(Arc<Inner>);
 
 impl Service {
-    pub fn start(logger: Logger) -> Result<Self> {
+    pub fn start(logger: Logger, history: Arc<Mutex<History>>) -> Result<Self> {
         let (sender, commands) = mpsc::channel();
         let (ready, receiver) = mpsc::sync_channel(1);
         let thread = thread::Builder::new()
@@ -366,7 +459,8 @@ impl Service {
                         while let Ok(command) = commands.try_recv() {
                             match command {
                                 Command::Write {
-                                    text,
+                                    record_id,
+                                    content,
                                     target,
                                     delayed,
                                     observation,
@@ -374,7 +468,9 @@ impl Service {
                                 } => {
                                     let _ = reply.send(write(
                                         owner,
-                                        &text,
+                                        record_id,
+                                        &content,
+                                        &history,
                                         target,
                                         delayed,
                                         observation,
@@ -433,11 +529,22 @@ impl Service {
         .map_err(|_| "clipboard_post_failed".into())
     }
 
-    pub fn write(&self, text: &str, target: u32, delayed: bool) -> Result<Arc<Mutex<Observation>>> {
+    pub fn owner(&self) -> usize {
+        self.0.owner
+    }
+
+    pub fn write(
+        &self,
+        record_id: usize,
+        content: Arc<Content>,
+        target: u32,
+        delayed: bool,
+    ) -> Result<Arc<Mutex<Observation>>> {
         let observation = Arc::new(Mutex::new(Observation::default()));
         let (reply, receiver) = mpsc::sync_channel(1);
         self.command(Command::Write {
-            text: text.to_owned(),
+            record_id,
+            content,
             target,
             delayed,
             observation: observation.clone(),

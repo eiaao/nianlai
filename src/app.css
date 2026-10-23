@@ -34,6 +34,12 @@ header { padding: 14px 14px 8px; }
 .heading strong { font-size: 17px; font-weight: 650; }
 .heading span, .hint, .timing { color: var(--muted); font-size: 11px; }
 .count { margin-left: auto; }
+.recording { color: var(--accent); font-size: 11px; margin: -5px 0 9px; }
+.recording.inactive, .partial { color: #b45e2a; }
+.entry-content { min-width: 0; flex: 1; }
+.entry-type { display: block; color: var(--accent); font-size: 11px; margin-bottom: 3px; }
+.metadata, .partial { display: block; font-size: 10px; line-height: 1.5; margin-top: 4px; overflow-wrap: anywhere; }
+.metadata { color: var(--muted); }
 input { width: 100%; height: 38px; padding: 8px 11px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); outline: none; }
 input:focus { border-color: var(--accent); }
 input::placeholder { color: var(--muted); }

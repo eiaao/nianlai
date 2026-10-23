@@ -1,4 +1,6 @@
 mod autocycle;
+mod capture;
+mod history;
 mod log;
 mod panel;
 mod paste;
@@ -12,8 +14,8 @@ use tauri::{AppHandle, Manager};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
 #[tauri::command]
-fn get_samples() -> Vec<samples::Sample> {
-    samples::all()
+fn get_history(app: AppHandle) -> history::Snapshot {
+    app.state::<Controller>().history_snapshot()
 }
 #[tauri::command]
 fn frontend_ready(app: AppHandle) -> Result<(), String> {
@@ -103,8 +105,13 @@ fn register_hotkeys(app: &AppHandle, logger: &log::Logger, automatic: bool) -> R
     {
         let attempt = (|| -> Result<Shortcut, String> {
             let shortcut: Shortcut = accelerator.parse().map_err(|e| format!("{e}"))?;
-            if shortcut == exit {
-                return Err("呼出键不能占用退出键".into());
+            if shortcut == exit
+                || shortcut
+                    == "Ctrl+Alt+Shift+L"
+                        .parse::<Shortcut>()
+                        .map_err(|e| e.to_string())?
+            {
+                return Err("呼出键不能占用退出键或采集调试键".into());
             }
             if !platform::hook::supported(&shortcut) {
                 return Err("此呼出键不受钩子支持".into());
@@ -150,7 +157,7 @@ pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
-            get_samples,
+            get_history,
             frontend_ready,
             start_search,
             search_ready,
@@ -168,6 +175,13 @@ pub fn run() {
             let plan = autocycle::Plan::from_env(&logger);
             let automatic = plan.is_some();
             app.manage(Controller::new(window, logger.clone(), plan)?);
+            if let Err(error) = app
+                .state::<Controller>()
+                .start_capture(app.handle(), automatic)
+            {
+                // 采集起不来时面板和粘贴照常可用，界面上显示“未在记录”。
+                logger.event("capture_start_failed", json!({"error":error}));
+            }
             if let Err(error) = register_hotkeys(app.handle(), &logger, automatic) {
                 logger.flush();
                 return Err(error.into());

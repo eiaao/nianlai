@@ -1,4 +1,7 @@
+pub mod capture;
 pub mod clipboard;
+pub mod formats;
+pub mod hash;
 pub mod hook;
 pub mod paste;
 pub mod uia;

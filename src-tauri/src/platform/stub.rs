@@ -100,7 +100,30 @@ pub mod clipboard {
     #[derive(Clone)]
     pub struct Service;
     impl Service {
-        pub fn start(_: Logger) -> Result<Self> {
+        pub fn start(
+            _: Logger,
+            _: std::sync::Arc<std::sync::Mutex<crate::history::History>>,
+        ) -> Result<Self> {
+            Ok(Self)
+        }
+        pub fn shutdown(&self) {}
+    }
+}
+pub mod hash {
+    pub fn sha256(_: &[u8]) -> super::Result<crate::history::content::Fingerprint> {
+        Err("G0 仅支持 Windows".into())
+    }
+}
+pub mod capture {
+    pub struct Service;
+    impl Service {
+        pub fn start(
+            _: super::Logger,
+            _: std::sync::Arc<std::sync::Mutex<crate::history::History>>,
+            _: &super::clipboard::Service,
+            _: bool,
+            _: std::sync::Arc<dyn Fn() + Send + Sync>,
+        ) -> super::Result<Self> {
             Ok(Self)
         }
         pub fn shutdown(&self) {}

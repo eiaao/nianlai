@@ -317,7 +317,12 @@ fn copy(
     report: &mut Value,
     reason: &'static str,
 ) -> Result<Outcome, String> {
-    clipboard.write(&request.text, request.target.process, false)?;
+    clipboard.write(
+        request.record_id,
+        request.content.clone(),
+        request.target.process,
+        false,
+    )?;
     report["clipboard_written"] = json!(true);
     report["reason"] = json!(reason);
     Ok(conclude(request.mode, false, false, true))
@@ -364,8 +369,14 @@ fn perform(
     if !ready {
         return copy(request, clipboard, report, "preflight_timeout");
     }
-    let probe = uia::Probe::start(request.target.process, request.text.clone());
-    let before = probe.baseline();
+    let probe = request
+        .content
+        .text_value()
+        .map(|text| uia::Probe::start(request.target.process, text));
+    let before = probe
+        .as_ref()
+        .map(|probe| probe.baseline())
+        .unwrap_or_default();
     report["layer3"] = json!(before);
     if stopping.load(Ordering::Acquire) {
         return Err("request_cancelled".into());
@@ -374,7 +385,12 @@ fn perform(
     if !checks(request).all() {
         return copy(request, clipboard, report, "conditions_changed");
     }
-    let observation = clipboard.write(&request.text, request.target.process, true)?;
+    let observation = clipboard.write(
+        request.record_id,
+        request.content.clone(),
+        request.target.process,
+        true,
+    )?;
     report["clipboard_written"] = json!(true);
     if stopping.load(Ordering::Acquire) || !checks(request).all() {
         report["clipboard_materialized"] = json!(clipboard.materialize());
@@ -413,8 +429,12 @@ fn perform(
         return Ok(Outcome::CopiedOnly);
     }
     on_sent();
-    probe.sent(sent_at);
-    let layer3 = probe.finish(before, sent_at);
+    let layer3 = if let Some(probe) = probe {
+        probe.sent(sent_at);
+        probe.finish(before, sent_at)
+    } else {
+        before
+    };
     let confirmed = layer3.conclusion == "confirmed";
     report["layer3"] = json!(layer3);
     while sent_at.elapsed() < Duration::from_secs(1)
@@ -435,6 +455,7 @@ pub fn execute(
     on_sent: &dyn Fn(),
 ) -> Value {
     let mut report = json!({"paste_result":null,"reason":null,"clipboard_written":false,
+        "record_id":request.record_id,"written_formats":[],
         "process_name":request.target.process_name,"window_class":request.target.window_class,
         "focus_class":request.target.focus_class,"focus_unknown":request.target.focus==0,
         "key_rule":null,"actual_key":null,"preflight":null,"integrity":null,
@@ -445,6 +466,22 @@ pub fn execute(
         Err(reason) => report["reason"] = json!(reason),
     }
     report["selected_to_result_ms"] = json!(request.started.elapsed().as_secs_f64() * 1000.0);
+    if report["clipboard_written"] == true {
+        let mut names: Vec<_> = request.content.formats.keys().cloned().collect();
+        if request
+            .content
+            .formats
+            .contains_key(crate::history::content::FILES)
+        {
+            names.push("Preferred DropEffect".into());
+        }
+        names.extend(
+            crate::capture::MARKERS
+                .iter()
+                .map(|name| (*name).to_owned()),
+        );
+        report["written_formats"] = json!(names);
+    }
     report
 }
 

@@ -1,6 +1,6 @@
-use crate::platform::Target;
+use crate::{history::content::Content, platform::Target};
 use serde::{Deserialize, Serialize};
-use std::time::Instant;
+use std::{sync::Arc, time::Instant};
 
 #[derive(Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -33,7 +33,8 @@ pub fn conclude(mode: Mode, sent: bool, confirmed: bool, degraded: bool) -> Outc
 pub struct Request {
     pub target: Target,
     pub panel: usize,
-    pub text: String,
+    pub record_id: usize,
+    pub content: Arc<Content>,
     pub mode: Mode,
     pub started: Instant,
     pub external_switch: bool,

@@ -218,7 +218,7 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
             return true;
         }
         let mods = modifiers();
-        let exit = vk == 0x51 && mods == (Modifiers::CONTROL | Modifiers::ALT | Modifiers::SHIFT);
+        let exit = matches!(vk, 0x51 | 0x4c) && mods == (Modifiers::CONTROL | Modifiers::ALT | Modifiers::SHIFT);
         if mods.contains(Modifiers::SUPER)
             || (vk == 0x09 && mods.contains(Modifiers::ALT))
             || (vk == context.hotkey.0 && mods == context.hotkey.1)
