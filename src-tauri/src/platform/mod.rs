@@ -15,6 +15,7 @@ pub struct Target {
     pub process: u32,
     pub caret: Option<Caret>,
     pub process_name: String,
+    pub window_class: String,
     pub focus_class: String,
 }
 

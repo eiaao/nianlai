@@ -12,6 +12,7 @@ pub struct Hooks;
 impl Hooks {
     pub fn install(
         _: usize,
+        _: usize,
         _: Shortcut,
         _: Logger,
         _: u64,
@@ -24,6 +25,9 @@ impl Hooks {
     }
     pub fn remove_keyboard(&self) -> Result<ReplayBatch> {
         Ok(ReplayBatch::default())
+    }
+    pub fn external_switch(&self) -> bool {
+        false
     }
 }
 pub mod hook {
@@ -52,8 +56,8 @@ pub mod window {
     pub fn show_auto(_: &WebviewWindow) -> Result<()> {
         Err("G0 仅支持 Windows".into())
     }
-    pub fn hide(panel: &WebviewWindow) -> Result<()> {
-        panel.hide().map_err(|e| e.to_string())
+    pub fn hide(_: &WebviewWindow) -> Result<()> {
+        Ok(())
     }
     pub fn activate(_: usize) -> ForegroundResult {
         ForegroundResult {
@@ -81,8 +85,25 @@ pub mod paste {
     pub fn replay(_: &[ReplayKey], _: usize, _: Instant) -> usize {
         0
     }
-    pub fn paste(_: usize, _: &Target, _: &str, _: bool) -> serde_json::Value {
-        serde_json::json!({"paste_result":"unsupported"})
+    pub fn execute(
+        _: crate::paste::request::Request,
+        _: &crate::paste::keys::Table,
+        _: &super::clipboard::Service,
+        _: &std::sync::atomic::AtomicBool,
+        _: &dyn Fn(),
+    ) -> serde_json::Value {
+        serde_json::json!({"paste_result":null,"clipboard_written":false,"reason":"unsupported"})
+    }
+}
+pub mod clipboard {
+    use super::*;
+    #[derive(Clone)]
+    pub struct Service;
+    impl Service {
+        pub fn start(_: Logger) -> Result<Self> {
+            Ok(Self)
+        }
+        pub fn shutdown(&self) {}
     }
 }
 pub mod webview {

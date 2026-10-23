@@ -1,6 +1,7 @@
 mod autocycle;
 mod log;
 mod panel;
+mod paste;
 mod platform;
 mod samples;
 
@@ -41,8 +42,21 @@ fn hide_panel(app: AppHandle, session: u64) -> Result<(), String> {
     panel::dispatch(&app, Action::Hide { session })
 }
 #[tauri::command]
-fn paste_sample(app: AppHandle, session: u64, id: usize) -> Result<(), String> {
-    panel::dispatch(&app, Action::Paste { session, id })
+fn paste_item(
+    app: AppHandle,
+    session: u64,
+    id: usize,
+    mode: paste::request::Mode,
+) -> Result<(), String> {
+    panel::dispatch(
+        &app,
+        Action::Paste {
+            session,
+            id,
+            mode,
+            started: Instant::now(),
+        },
+    )
 }
 #[tauri::command]
 fn report_painted(app: AppHandle, session: u64) -> Result<(), String> {
@@ -141,7 +155,7 @@ pub fn run() {
             start_search,
             search_ready,
             hide_panel,
-            paste_sample,
+            paste_item,
             report_painted,
             quit_prototype
         ])
@@ -153,7 +167,7 @@ pub fn run() {
             platform::webview::initialize(&window)?;
             let plan = autocycle::Plan::from_env(&logger);
             let automatic = plan.is_some();
-            app.manage(Controller::new(window, logger.clone(), plan));
+            app.manage(Controller::new(window, logger.clone(), plan)?);
             if let Err(error) = register_hotkeys(app.handle(), &logger, automatic) {
                 logger.flush();
                 return Err(error.into());

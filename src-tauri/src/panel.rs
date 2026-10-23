@@ -1,12 +1,20 @@
 use crate::{
     autocycle,
     log::{Logger, now_ms},
+    paste::{
+        keys::Table,
+        request::{Mode as PasteMode, Request},
+    },
     platform::{self, HookEvent, Hooks, REPLAY_WAIT, Target, paste, webview, window},
     samples,
 };
 use serde_json::{Value, json};
 use std::{
-    sync::{Arc, Mutex, mpsc},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     time::{Duration, Instant},
 };
 use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
@@ -34,6 +42,9 @@ struct AutoVisible {
 pub struct Controller {
     inner: Mutex<Panel>,
     pub logger: Logger,
+    clipboard: platform::clipboard::Service,
+    keys: Arc<Table>,
+    stopping: Arc<AtomicBool>,
 }
 struct Panel {
     window: WebviewWindow,
@@ -101,6 +112,12 @@ pub enum Action {
     Paste {
         session: u64,
         id: usize,
+        mode: PasteMode,
+        started: Instant,
+    },
+    // 粘贴键已发出：证据还在后台收集，此时就允许再次呼出。
+    PasteSent {
+        session: u64,
     },
     PasteFinished {
         session: u64,
@@ -115,9 +132,18 @@ pub enum Action {
 }
 
 impl Controller {
-    pub fn new(window: WebviewWindow, logger: Logger, plan: Option<autocycle::Plan>) -> Self {
-        Self {
+    pub fn new(
+        window: WebviewWindow,
+        logger: Logger,
+        plan: Option<autocycle::Plan>,
+    ) -> platform::Result<Self> {
+        let clipboard = platform::clipboard::Service::start(logger.clone())?;
+        let keys = Arc::new(Table::load(&logger));
+        Ok(Self {
             logger,
+            clipboard,
+            keys,
+            stopping: Arc::new(AtomicBool::new(false)),
             inner: Mutex::new(Panel {
                 window,
                 mode: Mode::Hidden,
@@ -138,12 +164,13 @@ impl Controller {
                 auto_stop: None,
                 auto_visible: None,
             }),
-        }
+        })
     }
     pub fn set_hotkey(&self, hotkey: Shortcut) {
         self.inner.lock().unwrap().hotkey = Some(hotkey);
     }
     pub fn shutdown(&self) {
+        self.stopping.store(true, Ordering::Release);
         if let Ok(mut panel) = self.inner.lock() {
             panel.auto_stop.take();
             if let Err(error) = panel.replay_search(&self.logger, false, "shutdown") {
@@ -155,6 +182,7 @@ impl Controller {
             }
             panel.hooks.take();
         }
+        self.clipboard.shutdown();
         self.logger.event("shutdown", json!({}));
         self.logger.flush();
     }
@@ -288,6 +316,7 @@ impl Panel {
             let hook_logger = logger.clone();
             self.hooks = Some(Hooks::install(
                 window::handle(&self.window)?,
+                self.target.window,
                 self.hotkey.ok_or("呼出键尚未注册")?,
                 logger.clone(),
                 session,
@@ -486,7 +515,7 @@ impl Panel {
     fn act(&mut self, app: &AppHandle, logger: &Logger, action: Action) -> platform::Result<()> {
         if self.auto_enabled {
             let command = match &action {
-                Action::Paste { .. } => Some("paste_sample"),
+                Action::Paste { .. } => Some("paste_item"),
                 Action::Search { .. } => Some("start_search"),
                 Action::SearchReady { .. } => Some("search_ready"),
                 Action::Hide { .. } => Some("hide_panel"),
@@ -640,25 +669,97 @@ impl Panel {
             Action::Hide { session } if self.current(session) => {
                 self.hide(logger)?;
             }
-            Action::Paste { session, id } if self.current(session) && !self.pasting => {
+            Action::Paste {
+                session,
+                id,
+                mode,
+                started,
+            } if self.current(session) && !self.pasting => {
                 let sample = samples::all()
                     .into_iter()
                     .find(|sample| sample.id == id)
                     .ok_or("无效条目")?;
-                let allow_paste = self.hide(logger)?;
-                self.pasting = true;
-                let target = self.target.clone();
                 let owner = window::handle(&self.window)?;
+                let foreground = window::foreground();
+                let external_switch = self.hooks.as_ref().is_some_and(Hooks::external_switch)
+                    || (foreground != owner && foreground != self.target.window);
+                let request = Request {
+                    target: self.target.clone(),
+                    panel: owner,
+                    text: sample.text,
+                    mode,
+                    started,
+                    external_switch,
+                    restore_focus: self.foreground_taken || foreground == owner,
+                };
+                let hooks = self.hooks.take();
+                self.mode = Mode::Hidden;
+                self.awaiting_search = false;
+                window::hide(&self.window)?;
+                self.emit("panel:hidden", json!({}));
+                webview::set_visible(
+                    &self.window,
+                    false,
+                    logger.clone(),
+                    self.session,
+                    self.memory.clone(),
+                )?;
+                self.log(logger, "hide_source", json!({"source":"paste"}));
+                self.log(logger, "hidden", json!({}));
+                self.pasting = true;
+                let controller = app.state::<Controller>();
+                let clipboard = controller.clipboard.clone();
+                let keys = controller.keys.clone();
+                let stopping = controller.stopping.clone();
+                let worker_logger = logger.clone();
                 let app = app.clone();
-                std::thread::spawn(move || {
-                    let result = paste::paste(owner, &target, &sample.text, allow_paste);
-                    let _ = dispatch(&app, Action::PasteFinished { session, result });
-                });
+                if std::thread::Builder::new()
+                    .name("paste-request".into())
+                    .spawn(move || {
+                        if let Some(hooks) = hooks {
+                            match hooks.remove_keyboard() {
+                                Ok(batch) if batch.started.is_some() || !batch.keys.is_empty() || batch.dropped > 0 => {
+                                    worker_logger.event("search_replay", json!({"session":session,
+                                        "replayed_keys":0,"dropped_keys":batch.dropped+batch.keys.len(),
+                                        "wait_ms":batch.started.map(|at| at.elapsed().as_secs_f64()*1000.0),
+                                        "search_box_ready":false,"reason":"paste"}));
+                                }
+                                Err(_) => worker_logger.event("replay_cleanup_failed", json!({"session":session,"reason":"hook_cleanup_failed"})),
+                                _ => {}
+                            }
+                            // 不在这里再读切换标记：面板隐藏后系统自动激活的窗口会被误记成用户切走。
+                            drop(hooks);
+                        }
+                        let sent = || {
+                            let _ = dispatch(&app, Action::PasteSent { session });
+                        };
+                        let result = paste::execute(request, &keys, &clipboard, &stopping, &sent);
+                        let _ = dispatch(&app, Action::PasteFinished { session, result });
+                    })
+                    .is_err()
+                {
+                    self.pasting = false;
+                    return Err("粘贴线程启动失败".into());
+                }
             }
-            Action::PasteFinished { session, result } if session == self.session => {
+            Action::PasteSent { session } if session == self.session => {
                 self.pasting = false;
-                self.log(logger, "paste", result.clone());
-                self.emit("panel:paste-result", result);
+            }
+            Action::PasteFinished {
+                session,
+                mut result,
+            } => {
+                // 证据收集期间可能已经再次呼出，日志要用这次粘贴自己的会话号和目标，不能用当前的。
+                result["session"] = json!(session);
+                logger.event("paste", result.clone());
+                if session == self.session {
+                    self.pasting = false;
+                    if result["clipboard_written"] == false {
+                        self.emit("panel:error", json!({"message":"写入剪贴板失败，请重试。"}));
+                    } else {
+                        self.emit("panel:paste-result", result);
+                    }
+                }
             }
             Action::Painted { session, received } if self.current(session) && !self.painted => {
                 if let (Some(started), Some(shown)) = (self.started, self.shown) {
@@ -679,6 +780,9 @@ impl Panel {
                 }
             }
             Action::Quit | Action::QuitFrontend => {
+                app.state::<Controller>()
+                    .stopping
+                    .store(true, Ordering::Release);
                 self.auto_stop.take();
                 if self.mode != Mode::Hidden
                     && let Err(error) = self.hide(logger)

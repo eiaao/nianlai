@@ -8,7 +8,7 @@ use std::{
     cell::RefCell,
     sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc,
     },
     thread::{self, JoinHandle},
@@ -19,6 +19,7 @@ use windows::Win32::{
     Foundation::{HINSTANCE, LPARAM, LRESULT, RECT, WPARAM},
     System::{LibraryLoader::GetModuleHandleW, Threading::GetCurrentThreadId},
     UI::{
+        Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent},
         Input::KeyboardAndMouse::{GetAsyncKeyState, MAPVK_VK_TO_CHAR, MapVirtualKeyW},
         WindowsAndMessaging::*,
     },
@@ -37,6 +38,8 @@ enum Command {
 struct Context {
     sender: mpsc::SyncSender<HookEvent>,
     window: usize,
+    target: usize,
+    switched: Arc<AtomicBool>,
     bounds: RECT,
     hotkey: (u16, Modifiers),
     replay: mpsc::SyncSender<ReplayKey>,
@@ -67,6 +70,27 @@ pub struct Hooks {
     commands: mpsc::Sender<Command>,
     replay: mpsc::Receiver<ReplayKey>,
     dropped: Arc<AtomicUsize>,
+    switched: Arc<AtomicBool>,
+}
+
+unsafe extern "system" fn foreground_changed(
+    _: HWINEVENTHOOK,
+    _: u32,
+    hwnd: windows::Win32::Foundation::HWND,
+    _: i32,
+    _: i32,
+    _: u32,
+    _: u32,
+) {
+    CONTEXT.with(|context| {
+        if let Some(context) = context.borrow().as_ref()
+            && !hwnd.is_invalid()
+            && hwnd.0 as usize != context.window
+            && hwnd.0 as usize != context.target
+        {
+            context.switched.store(true, Ordering::Release);
+        }
+    });
 }
 
 // 覆盖全局快捷键插件可注册的常用键；未知键在注册前回退，避免钩子阻断呼出键。
@@ -235,6 +259,8 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
                 0x39 | 0x69 => Some("9"),
                 _ => None,
             }
+        } else if mods == Modifiers::SHIFT && vk == 0x0D {
+            Some("Shift+Enter")
         } else {
             None
         };
@@ -242,7 +268,18 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
             // 确认与关闭等到抬起再投递，避免卸钩后把 Enter 抬起漏给目标控件。
             if matches!(
                 name,
-                "Enter" | "Escape" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"
+                "Enter"
+                    | "Shift+Enter"
+                    | "Escape"
+                    | "1"
+                    | "2"
+                    | "3"
+                    | "4"
+                    | "5"
+                    | "6"
+                    | "7"
+                    | "8"
+                    | "9"
             ) {
                 context.release_action[vk as usize] = Some(name);
             } else {
@@ -303,6 +340,7 @@ unsafe extern "system" fn mouse(code: i32, wparam: WPARAM, lparam: LPARAM) -> LR
 impl Hooks {
     pub fn install(
         window: usize,
+        target: usize,
         shortcut: Shortcut,
         logger: Logger,
         session: u64,
@@ -324,9 +362,11 @@ impl Hooks {
         let (command_sender, commands) = mpsc::channel();
         let dropped = Arc::new(AtomicUsize::new(0));
         let overflow = dropped.clone();
+        let switched = Arc::new(AtomicBool::new(false));
+        let switched_context = switched.clone();
         let thread = thread::Builder::new().name("panel-hooks".into()).spawn(move || unsafe {
             CONTEXT.with(|context| *context.borrow_mut() = Some(Context {
-                sender, window, bounds, hotkey: (vk, shortcut.mods), replay: replay_sender,
+                sender, window, target, switched:switched_context, bounds, hotkey: (vk, shortcut.mods), replay: replay_sender,
                 dropped: overflow, pending: None, swallowed: [false; 256], release_action: [None; 256],
             }));
             let mut message = MSG::default();
@@ -334,7 +374,9 @@ impl Hooks {
             let module = GetModuleHandleW(None).ok().map(|m| HINSTANCE(m.0));
             let mut keyboard_hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard), module, 0).ok();
             let mouse_hook = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse), module, 0).ok();
-            let installed = keyboard_hook.is_some() && mouse_hook.is_some();
+            let foreground_hook = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND,
+                None, Some(foreground_changed), 0, 0, WINEVENT_OUTOFCONTEXT);
+            let installed = keyboard_hook.is_some() && mouse_hook.is_some() && !foreground_hook.is_invalid();
             logger.event("hooks_installed", json!({"session":session,"keyboard_hook":keyboard_hook.is_some(),"mouse_hook":mouse_hook.is_some(),
                 "bounds":[bounds.left, bounds.top, bounds.right, bounds.bottom]}));
             let _ = ready.send(if installed { Ok(GetCurrentThreadId()) } else { Err("低层钩子安装失败".to_owned()) });
@@ -372,6 +414,7 @@ impl Hooks {
             }
             if let Some(hook) = keyboard_hook { let _ = UnhookWindowsHookEx(hook); }
             if let Some(hook) = mouse_hook { let _ = UnhookWindowsHookEx(hook); }
+            if !foreground_hook.is_invalid() { let _ = UnhookWinEvent(foreground_hook); }
             CONTEXT.with(|context| *context.borrow_mut() = None);
             logger.event("hooks_removed", json!({"session":session,"keyboard_hook":false,"mouse_hook":false}));
         }).map_err(|e| e.to_string())?;
@@ -383,6 +426,7 @@ impl Hooks {
                 commands: command_sender,
                 replay,
                 dropped,
+                switched,
             }),
             Err(error) => {
                 let _ = thread.join();
@@ -390,6 +434,10 @@ impl Hooks {
                 Err(error)
             }
         }
+    }
+
+    pub fn external_switch(&self) -> bool {
+        self.switched.load(Ordering::Acquire)
     }
 
     fn command(&self, command: Command) -> Result<()> {

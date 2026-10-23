@@ -6,6 +6,14 @@
   type Sample = { id: number; text: string };
   type SessionEvent = { session: number };
   type Timing = SessionEvent & { hotkeyToShowMs: number; showToPaintMs?: number };
+  type PasteResult = SessionEvent & {
+    paste_result: "copied" | "sent" | "confirmed" | "copied_only";
+    reason: string | null;
+    actual_key: string | null;
+    layer2: { status: string; timed_out: boolean } | null;
+    layer3: { conclusion: string };
+    selected_to_result_ms: number;
+  };
   let samples = $state<Sample[]>([]);
   let query = $state("");
   let mode = $state<"quick" | "search">("quick");
@@ -37,11 +45,11 @@
     selected = Math.max(0, Math.min(filtered.length - 1, selected + offset));
   }
 
-  async function choose(index = selected) {
+  async function choose(index = selected, pasteMode: "paste" | "copy" = "paste") {
     if (!visible || busy || !filtered[index]) return;
     selected = index;
     busy = true;
-    await command("paste_sample", { session, id: filtered[index].id });
+    await command("paste_item", { session, id: filtered[index].id, mode: pasteMode });
   }
 
   function navigate(key: string) {
@@ -53,6 +61,7 @@
       case "Home": selected = 0; break;
       case "End": selected = Math.max(0, filtered.length - 1); break;
       case "Enter": void choose(); break;
+      case "Shift+Enter": void choose(selected, "copy"); break;
       case "Escape": void command("hide_panel", { session }); break;
       default: if (/^[1-9]$/.test(key)) void choose(Number(key) - 1);
     }
@@ -61,6 +70,11 @@
   function keydown(event: KeyboardEvent) {
     if (!visible || mode !== "search") return;
     if (event.isComposing || composing || event.keyCode === 229) return;
+    if (event.ctrlKey && !event.altKey && !event.metaKey && /^[1-9]$/.test(event.key)) {
+      event.preventDefault();
+      if (performance.now() - compositionEnded >= 50) void choose(Number(event.key) - 1);
+      return;
+    }
     if ((event.ctrlKey && ["f", "p", "r", "+", "-", "=", "0"].includes(event.key.toLowerCase())) || event.key === "F5" || event.key === "F7") {
       event.preventDefault();
       if (event.key.toLowerCase() === "f") input?.focus({ preventScroll: true });
@@ -69,7 +83,7 @@
     if (!event.ctrlKey && !event.altKey && !event.metaKey && (event.target === input || event.key === "Escape") && ["Escape", "Enter", "ArrowUp", "ArrowDown"].includes(event.key)) {
       event.preventDefault();
       if (performance.now() - compositionEnded < 50) return;
-      navigate(event.key);
+      navigate(event.key === "Enter" && event.shiftKey ? "Shift+Enter" : event.key);
     }
   }
 
@@ -131,12 +145,28 @@
       });
       await subscribe<Timing>("panel:timing", (payload) => { if (payload.session === session) timing = payload; });
       await subscribe<SessionEvent & { message: string }>("panel:error", (payload) => {
-        if (payload.session === session) message = payload.message;
+        if (payload.session === session) { message = payload.message; busy = false; }
       });
-      await subscribe<SessionEvent & { paste_result: string }>("panel:paste-result", (payload) => {
+      await subscribe<PasteResult>("panel:paste-result", (payload) => {
         if (payload.session !== session) return;
         busy = false;
-        message = payload.paste_result === "sent" ? "已发送粘贴指令" : payload.paste_result === "clipboard_failed" ? "写入剪贴板失败，请重试" : "已复制，请到目标位置粘贴";
+        const labels = {
+          copied: "已复制",
+          sent: payload.layer2?.timed_out ? "已发送粘贴指令，可能没粘进去" : "已发送粘贴指令",
+          confirmed: "确认已粘贴",
+          copied_only: payload.reason === "target_may_be_elevated"
+            ? "目标程序以管理员身份运行，已复制，请手动粘贴" : "已复制，请到目标位置粘贴",
+        };
+        const evidence: string[] = [labels[payload.paste_result]];
+        if (payload.actual_key) {
+          evidence.push(payload.actual_key);
+          const read = payload.layer2?.status;
+          evidence.push(read === "target_read" ? "目标读取 ✓" : read === "other_process_first"
+            ? "其他程序先读" : read === "before_send" ? "发键前已读取" : "目标读取未确认");
+          evidence.push(payload.layer3.conclusion === "confirmed" ? "内容确认 ✓" : "内容未确认");
+        }
+        evidence.push(`${payload.selected_to_result_ms.toFixed(0)} ms`);
+        message = evidence.join(" · ");
       });
       samples = await invoke<Sample[]>("get_samples");
       if (!disposed) await command("frontend_ready");
@@ -150,7 +180,7 @@
 
 <main aria-label="拈来剪贴板样机">
   <header>
-    <div class="heading"><strong>拈来</strong><span>G0 · 样机一</span><span class="count">{filtered.length} 条示例</span></div>
+    <div class="heading"><strong>拈来</strong><span>G0 · 样机二</span><span class="count">{filtered.length} 条示例</span></div>
     <input
       bind:this={input}
       bind:value={query}
@@ -166,7 +196,7 @@
       oncompositionstart={() => { composing = true; }}
       oncompositionend={() => { composing = false; compositionEnded = performance.now(); }}
     />
-    <div class="hint">{mode === "quick" ? "↑ ↓ 选择 · 1–9 取用 · Enter 粘贴 · Esc 收起" : "输入关键词 · ↑ ↓ 选择 · Enter 粘贴 · Esc 返回"}</div>
+    <div class="hint">{mode === "quick" ? "↑ ↓ 选择 · 1–9 取用 · Enter 粘贴 · Shift+Enter 复制 · Esc 收起" : "↑ ↓ 选择 · Ctrl+1–9 取用 · Enter 粘贴 · Shift+Enter 复制 · Esc 返回"}</div>
   </header>
 
   <ul bind:this={list} aria-label="示例文本" aria-busy={busy}>

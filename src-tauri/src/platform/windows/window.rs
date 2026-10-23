@@ -45,6 +45,7 @@ pub fn capture() -> Target {
             return target;
         }
         target.thread = GetWindowThreadProcessId(window, Some(&mut target.process));
+        target.window_class = class_name(target.window);
         let mut info = GUITHREADINFO {
             cbSize: size_of::<GUITHREADINFO>() as u32,
             ..Default::default()
@@ -74,7 +75,20 @@ pub fn capture() -> Target {
                 }
             }
         }
-        if let Ok(process) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, target.process) {
+        target.process_name = process_name(target.process);
+        target
+    }
+}
+
+pub fn class_name(window: usize) -> String {
+    let mut class = [0u16; 256];
+    let length = unsafe { GetClassNameW(hwnd(window), &mut class) };
+    String::from_utf16_lossy(&class[..length.max(0) as usize])
+}
+
+pub fn process_name(id: u32) -> String {
+    unsafe {
+        if let Ok(process) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, id) {
             let mut buffer = [0u16; 32768];
             let mut length = buffer.len() as u32;
             if QueryFullProcessImageNameW(
@@ -86,15 +100,17 @@ pub fn capture() -> Target {
             .is_ok()
             {
                 let full = String::from_utf16_lossy(&buffer[..length as usize]);
-                target.process_name = Path::new(&full)
+                let name = Path::new(&full)
                     .file_name()
                     .unwrap_or_default()
                     .to_string_lossy()
                     .into_owned();
+                let _ = CloseHandle(process);
+                return name;
             }
             let _ = CloseHandle(process);
         }
-        target
+        String::new()
     }
 }
 
