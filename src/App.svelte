@@ -1,10 +1,10 @@
 <script lang="ts">
-  import { onMount, tick } from "svelte";
+  import { onMount, tick, untrack } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
   type HistoryItem = { id: number; kind: string; preview: string; file_names: string[]; source: string; copied_ms: number; copy_count: number; partial: boolean };
-  type HistorySnapshot = { items: HistoryItem[]; total: number; recording: boolean; last_recorded_ms: number | null };
+  type HistorySnapshot = { items: HistoryItem[]; total: number; recording: boolean; last_recorded_ms: number | null; store_status: string | null };
   type SessionEvent = { session: number };
   type Timing = SessionEvent & { hotkeyToShowMs: number; showToPaintMs?: number };
   type PasteResult = SessionEvent & {
@@ -13,9 +13,10 @@
     actual_key: string | null;
     layer2: { status: string; timed_out: boolean } | null;
     layer3: { conclusion: string };
+    as_text: { conversion: "paths" | "image_path" | "plain_text" | null; error?: string } | null;
     selected_to_result_ms: number;
   };
-  let history = $state<HistorySnapshot>({ items: [], total: 0, recording: false, last_recorded_ms: null });
+  let history = $state<HistorySnapshot>({ items: [], total: 0, recording: false, last_recorded_ms: null, store_status: null });
   let query = $state("");
   let mode = $state<"quick" | "search">("quick");
   let selected = $state(0);
@@ -28,7 +29,68 @@
   let list: HTMLUListElement;
   let timing = $state<Timing | null>(null);
   let message = $state("");
-  const filtered = $derived(history.items.filter((item) => [item.preview, ...item.file_names].some((text) => text.toLocaleLowerCase().includes(query.toLocaleLowerCase()))));
+  let searchItems = $state<HistoryItem[]>([]);
+  let searchedQuery = $state("");
+  let searchRevision = $state(0);
+  // 只在 search() 里递增。真实按键的 input 事件在 bind:value 和委托的 oninput 两个监听器之间会先跑微任务、
+  // 发出搜索；若在 oninput 里再递增，刚发出的请求就过期了，回复全被丢掉，列表一直空着。
+  let searchRequest = 0;
+  let previousQuery = "";
+  let previousSession = -1;
+  const filtered = $derived(mode === "search" ? searchItems : history.items);
+
+  async function search(value: string) {
+    const requestId = ++searchRequest;
+    const currentSession = session;
+    const reset = value !== previousQuery || currentSession !== previousSession;
+    previousQuery = value;
+    previousSession = currentSession;
+    if (reset) { selected = 0; searchItems = []; }
+    try {
+      const reply = await invoke<{ request_id: number; items: HistoryItem[] }>("search_history", { query: value, requestId });
+      if (reply.request_id !== searchRequest || !visible || mode !== "search" || session !== currentSession) return;
+      const selectedId = filtered[selected]?.id;
+      const scrollTop = list?.scrollTop ?? 0;
+      searchItems = reply.items;
+      searchedQuery = value;
+      const index = reset ? 0 : searchItems.findIndex((item) => item.id === selectedId);
+      selected = Math.max(0, index);
+      await tick();
+      if (!reset && requestId === searchRequest && list) list.scrollTop = scrollTop;
+    } catch {
+      if (requestId === searchRequest && visible && currentSession === session) message = "搜索失败，请查看 G0 日志。";
+    }
+  }
+
+  $effect(() => {
+    const value = query;
+    const revision = searchRevision;
+    // 输入法组合中框里是拼音，先不搜；上屏后 compositionend 会再触发一次。
+    if (visible && mode === "search" && !composing) untrack(() => { void revision; void search(value); });
+  });
+
+  function highlights(text: string) {
+    const lower = (value: string) => value.replace(/[A-Z]/g, (c) => c.toLowerCase());
+    const normalized = lower(text);
+    const hits = new Set<number>();
+    if (mode === "search") for (const word of searchedQuery.split(/\s+/).filter(Boolean).map(lower)) {
+      let at = normalized.indexOf(word);
+      while (at >= 0) {
+        for (let i = at; i < at + word.length; i++) hits.add(i);
+        at = normalized.indexOf(word, at + 1);
+      }
+    }
+    const parts: { text: string; hit: boolean }[] = [];
+    let offset = 0;
+    for (const character of text) {
+      const hit = hits.has(offset);
+      const last = parts.at(-1);
+      if (last?.hit === hit) last.text += character;
+      else parts.push({ text: character, hit });
+      offset += character.length;
+    }
+    return parts;
+  }
   const time = (millis: number) => new Date(millis).toLocaleTimeString("zh-CN", { hour12: false });
 
   async function command(name: string, args: Record<string, unknown> = {}) {
@@ -47,7 +109,7 @@
     selected = Math.max(0, Math.min(filtered.length - 1, selected + offset));
   }
 
-  async function choose(index = selected, pasteMode: "paste" | "copy" = "paste") {
+  async function choose(index = selected, pasteMode: "paste" | "copy" | "text" = "paste") {
     if (!visible || busy || !filtered[index]) return;
     selected = index;
     busy = true;
@@ -64,6 +126,7 @@
       case "End": selected = Math.max(0, filtered.length - 1); break;
       case "Enter": void choose(); break;
       case "Shift+Enter": void choose(selected, "copy"); break;
+      case "Ctrl+Enter": void choose(selected, "text"); break;
       case "Escape": void command("hide_panel", { session }); break;
       default: if (/^[1-9]$/.test(key)) void choose(Number(key) - 1);
     }
@@ -75,6 +138,11 @@
     if (event.ctrlKey && !event.altKey && !event.metaKey && /^[1-9]$/.test(event.key)) {
       event.preventDefault();
       if (performance.now() - compositionEnded >= 50) void choose(Number(event.key) - 1);
+      return;
+    }
+    if (event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey && event.key === "Enter") {
+      event.preventDefault();
+      if (performance.now() - compositionEnded >= 50) navigate("Ctrl+Enter");
       return;
     }
     if ((event.ctrlKey && ["f", "p", "r", "+", "-", "=", "0"].includes(event.key.toLowerCase())) || event.key === "F5" || event.key === "F7") {
@@ -114,6 +182,7 @@
           if (!disposed && visible && current === session) {
             const selectedId = filtered[selected]?.id;
             history = snapshot;
+            if (mode === "search") searchRevision += 1;
             const index = filtered.findIndex((item) => item.id === selectedId);
             selected = index >= 0 ? index : 0;
           }
@@ -132,6 +201,7 @@
     async function initialize() {
       await subscribe<Timing & { history: HistorySnapshot }>("panel:shown", (payload) => {
         if (payload.session < session) return;
+        searchRequest += 1;
         session = payload.session;
         visible = true;
         mode = "quick";
@@ -166,6 +236,7 @@
       });
       await subscribe<SessionEvent>("panel:hidden", (payload) => {
         if (payload.session !== session) return;
+        searchRequest += 1;
         visible = false;
         mode = "quick";
         composing = false;
@@ -186,6 +257,9 @@
             ? "目标程序以管理员身份运行，已复制，请手动粘贴" : "已复制，请到目标位置粘贴",
         };
         const evidence: string[] = [labels[payload.paste_result]];
+        const conversion = payload.as_text?.conversion;
+        if (payload.as_text?.error) evidence.push("转文字失败，按原样写入");
+        else if (conversion) evidence.push({ paths: "已转为路径", image_path: "已存为 PNG，粘贴路径", plain_text: "已去掉格式" }[conversion]);
         if (payload.actual_key) {
           evidence.push(payload.actual_key);
           const read = payload.layer2?.status;
@@ -199,7 +273,7 @@
       if (!disposed) await command("frontend_ready");
     }
     void initialize().catch(() => { message = "初始化失败，请重启样机并查看日志。"; });
-    return () => { disposed = true; unlisten.forEach((stop) => stop()); frames.forEach(cancelAnimationFrame); };
+    return () => { disposed = true; searchRequest += 1; unlisten.forEach((stop) => stop()); frames.forEach(cancelAnimationFrame); };
   });
 </script>
 
@@ -207,24 +281,24 @@
 
 <main aria-label="拈来剪贴板样机">
   <header>
-    <div class="heading"><strong>拈来</strong><span>G0 · 样机三</span><span class="count">{query ? `${filtered.length} / ` : ""}{history.total} 条</span></div>
-    <div class="recording" class:inactive={!history.recording} role="status">{history.recording ? "记录中" : "未在记录"}{history.last_recorded_ms ? ` · 上次 ${time(history.last_recorded_ms)}` : ""}{history.total > 300 ? " · 显示最近 300 条" : ""}</div>
+    <div class="heading"><strong>拈来</strong><span>G0 · 样机四</span><span class="count">{query ? `${filtered.length} / ` : ""}{history.total} 条</span></div>
+    <div class="recording" class:inactive={!history.recording} role="status">{history.recording ? "记录中" : "未在记录"}{history.last_recorded_ms ? ` · 上次 ${time(history.last_recorded_ms)}` : ""}{mode === "quick" && history.total > 300 ? " · 显示最近 300 条" : ""}</div>
+    {#if history.store_status}<div class="store-status" role="status">{history.store_status}</div>{/if}
     <input
       bind:this={input}
       bind:value={query}
       type="search"
-      aria-label="搜索预览和文件名"
-      placeholder={mode === "quick" ? "直接打字或按 / 搜索" : "搜索预览和文件名"}
+      aria-label="搜索全文和文件名"
+      placeholder={mode === "quick" ? "直接打字或按 / 搜索" : "搜索全文和文件名"}
       readonly={mode === "quick"}
       tabindex={mode === "quick" ? -1 : 0}
       spellcheck="false"
       autocomplete="off"
       onpointerdown={searchPointer}
-      oninput={() => { selected = 0; }}
       oncompositionstart={() => { composing = true; }}
-      oncompositionend={() => { composing = false; compositionEnded = performance.now(); }}
+      oncompositionend={() => { composing = false; compositionEnded = performance.now(); searchRevision += 1; }}
     />
-    <div class="hint">{mode === "quick" ? "↑ ↓ 选择 · 1–9 取用 · Enter 粘贴 · Shift+Enter 复制 · Esc 收起" : "↑ ↓ 选择 · Ctrl+1–9 取用 · Enter 粘贴 · Shift+Enter 复制 · Esc 返回"}</div>
+    <div class="hint">{mode === "quick" ? "↑ ↓ 选择 · 1–9 取用 · Enter 粘贴 · Ctrl+Enter 粘贴为文本 · Shift+Enter 复制 · Esc 收起" : "↑ ↓ 选择 · Ctrl+1–9 取用 · Enter 粘贴 · Ctrl+Enter 粘贴为文本 · Shift+Enter 复制 · Esc 返回"}</div>
   </header>
 
   <ul bind:this={list} aria-label="剪贴板历史" aria-busy={busy}>
@@ -243,7 +317,7 @@
           <span class="badge" aria-hidden="true">{index < 9 ? index + 1 : "·"}</span>
           <span class="entry-content">
             <span class="entry-type">{item.kind}</span>
-            <span class="preview">{item.preview || "（空文本）"}</span>
+            <span class="preview">{#each highlights(item.preview || "（空文本）") as part}{#if part.hit}<mark>{part.text}</mark>{:else}{part.text}{/if}{/each}</span>
             <span class="metadata">{item.source} · {time(item.copied_ms)}{item.copy_count > 1 ? ` · 复制 ${item.copy_count} 次` : ""}</span>
             {#if item.partial}<span class="partial">部分格式未保存</span>{/if}
           </span>

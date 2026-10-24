@@ -86,6 +86,12 @@ pub fn class_name(window: usize) -> String {
     String::from_utf16_lossy(&class[..length.max(0) as usize])
 }
 
+pub fn process_of(window: usize) -> String {
+    let mut id = 0;
+    unsafe { GetWindowThreadProcessId(hwnd(window), Some(&mut id)) };
+    process_name(id)
+}
+
 pub fn process_name(id: u32) -> String {
     unsafe {
         if let Ok(process) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, id) {

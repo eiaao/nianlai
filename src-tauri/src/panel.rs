@@ -47,7 +47,7 @@ pub struct Controller {
     clipboard: platform::clipboard::Service,
     keys: Arc<Table>,
     stopping: Arc<AtomicBool>,
-    history: Arc<Mutex<History>>,
+    history: Arc<History>,
 }
 struct Panel {
     window: WebviewWindow,
@@ -141,11 +141,7 @@ impl Controller {
         logger: Logger,
         plan: Option<autocycle::Plan>,
     ) -> platform::Result<Self> {
-        let mut history = History::new(platform::hash::sha256);
-        if std::env::var("NIANLAI_G0_SAMPLES").as_deref() == Ok("1") {
-            history.seed_samples()?;
-        }
-        let history = Arc::new(Mutex::new(history));
+        let history = Arc::new(History::new(platform::hash::sha256, logger.clone()));
         let clipboard = platform::clipboard::Service::start(logger.clone(), history.clone())?;
         let keys = Arc::new(Table::load(&logger));
         Ok(Self {
@@ -181,11 +177,18 @@ impl Controller {
         self.inner.lock().unwrap().hotkey = Some(hotkey);
     }
     pub fn start_capture(&self, app: &AppHandle, automatic: bool) -> platform::Result<()> {
+        self.history.initialize();
         let app = app.clone();
-        let changed = Arc::new(move || {
+        let changed: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
             let _ = dispatch(&app, Action::HistoryChanged);
         });
-        *self.capture.lock().unwrap() = Some(platform::capture::Service::start(
+        changed();
+        self.history.maintenance(changed.clone());
+        let mut capture = self.capture.lock().unwrap();
+        if self.stopping.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        *capture = Some(platform::capture::Service::start(
             self.logger.clone(),
             self.history.clone(),
             &self.clipboard,
@@ -195,7 +198,14 @@ impl Controller {
         Ok(())
     }
     pub fn history_snapshot(&self) -> Snapshot {
-        self.history.lock().unwrap().snapshot()
+        self.history.snapshot()
+    }
+    pub fn search(
+        &self,
+        query: &str,
+        request_id: u64,
+    ) -> Result<crate::history::SearchReply, String> {
+        self.history.search(query, request_id)
     }
     pub fn shutdown(&self) {
         self.stopping.store(true, Ordering::Release);
@@ -214,6 +224,7 @@ impl Controller {
             panel.hooks.take();
         }
         self.clipboard.shutdown();
+        self.history.summary();
         self.logger.event("shutdown", json!({}));
         self.logger.flush();
     }
@@ -711,25 +722,27 @@ impl Panel {
                 mode,
                 started,
             } if self.current(session) && !self.pasting => {
-                let Some(content) = app.state::<Controller>().history.lock().unwrap().get(id)
-                else {
-                    self.emit("panel:error", json!({"message":"这条记录已不在历史里"}));
-                    return Ok(());
-                };
                 let owner = window::handle(&self.window)?;
                 let foreground = window::foreground();
-                let external_switch = self.hooks.as_ref().is_some_and(Hooks::external_switch)
-                    || (foreground != owner && foreground != self.target.window);
-                let request = Request {
-                    target: self.target.clone(),
-                    panel: owner,
-                    record_id: id,
-                    content,
-                    mode,
-                    started,
-                    external_switch,
-                    restore_focus: self.foreground_taken || foreground == owner,
-                };
+                let switched_to = self.hooks.as_ref().map_or(0, Hooks::switched_to);
+                let external_switch =
+                    switched_to != 0 || (foreground != owner && foreground != self.target.window);
+                if external_switch {
+                    // 排查用：记下抢走前台的窗口，只记类名和进程名，不记标题。
+                    let other = if switched_to != 0 {
+                        switched_to
+                    } else {
+                        foreground
+                    };
+                    self.log(
+                        logger,
+                        "paste_switch",
+                        json!({"detected_by":if switched_to != 0 { "foreground_event" } else { "foreground_check" },
+                            "switched_class":window::class_name(other),"switched_process":window::process_of(other)}),
+                    );
+                }
+                let target = self.target.clone();
+                let restore_focus = self.foreground_taken || foreground == owner;
                 let hooks = self.hooks.take();
                 self.mode = Mode::Hidden;
                 self.awaiting_search = false;
@@ -747,6 +760,7 @@ impl Panel {
                 self.pasting = true;
                 let controller = app.state::<Controller>();
                 let clipboard = controller.clipboard.clone();
+                let history = controller.history.clone();
                 let keys = controller.keys.clone();
                 let stopping = controller.stopping.clone();
                 let worker_logger = logger.clone();
@@ -771,7 +785,23 @@ impl Panel {
                         let sent = || {
                             let _ = dispatch(&app, Action::PasteSent { session });
                         };
-                        let result = paste::execute(request, &keys, &clipboard, &stopping, &sent);
+                        // 先按原流程还焦点，再读取大内容。读完不再还焦点，避免抢回用户在读库期间切走的窗口。
+                        let restored = (restore_focus && !external_switch).then(|| window::restore(&target));
+                        let read_started = Instant::now();
+                        let loaded = history.get(id);
+                        let exports = history.exports();
+                        let store_read_ms = read_started.elapsed().as_secs_f64() * 1000.0;
+                        let external_switch = external_switch || window::foreground() != target.window;
+                        let mut result = match loaded {
+                            Ok(Some(content)) => paste::execute(Request {
+                                target, panel: owner, record_id: id, content, mode, started,
+                                external_switch, restore_focus: false,
+                            }, &keys, &clipboard, &stopping, &sent, exports.as_deref()),
+                            Ok(None) => json!({"clipboard_written":false,"reason":"record_missing"}),
+                            Err(code) => json!({"clipboard_written":false,"reason":"store_read_failed","error_code":code}),
+                        };
+                        if let Some(restored) = restored { result["restore"] = json!(restored); }
+                        result["store_read_ms"] = json!(store_read_ms);
                         let _ = dispatch(&app, Action::PasteFinished { session, result });
                     })
                     .is_err()
@@ -798,6 +828,8 @@ impl Panel {
                     if result["clipboard_written"] == false {
                         let message = if result["reason"] == "record_missing" {
                             "这条记录已不在历史里"
+                        } else if result["reason"] == "store_read_failed" {
+                            "读取历史失败，未改写剪贴板。"
                         } else {
                             "写入剪贴板失败，请重试。"
                         };

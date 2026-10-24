@@ -159,7 +159,8 @@ fn echo_expires_at_exactly_five_seconds_and_reuse_does_not_add_event() {
     history
         .ingest(text.clone(), event(1, at), false, at)
         .unwrap();
-    assert!(history.before_write(1, text.fingerprint, at));
+    assert!(history.before_write(1, text.fingerprint, text.fingerprint, at));
+    assert!(!history.before_write(1, [0; 32], text.fingerprint, at));
     assert_eq!(
         history
             .ingest(
@@ -181,7 +182,7 @@ fn echo_expires_at_exactly_five_seconds_and_reuse_does_not_add_event() {
     );
     history.reuse(1);
     assert_eq!(history.records[0].events.len(), 2);
-    assert!(!history.before_write(999, [0; 32], at));
+    assert!(!history.before_write(999, [0; 32], [0; 32], at));
 }
 
 #[test]
@@ -311,10 +312,10 @@ fn default_count_limit_and_frontend_preview_limit_are_enforced() {
             )
             .unwrap();
     }
-    assert_eq!(history.records.len(), 1000);
+    assert_eq!(history.records.len(), 300);
     assert!(history.get(1).is_none());
     let snapshot = history.snapshot();
-    assert_eq!(snapshot.total, 1000);
+    assert_eq!(snapshot.total, 300);
     assert_eq!(snapshot.items.len(), 300);
     assert_eq!(snapshot.items[0].id, 1001);
 }

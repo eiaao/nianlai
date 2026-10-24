@@ -3,6 +3,7 @@ pub mod clipboard;
 pub mod formats;
 pub mod hash;
 pub mod hook;
+pub mod image;
 pub mod paste;
 pub mod uia;
 pub mod webview;

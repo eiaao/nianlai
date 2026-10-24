@@ -8,7 +8,7 @@ use std::{
     cell::RefCell,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicUsize, Ordering},
         mpsc,
     },
     thread::{self, JoinHandle},
@@ -39,7 +39,8 @@ struct Context {
     sender: mpsc::SyncSender<HookEvent>,
     window: usize,
     target: usize,
-    switched: Arc<AtomicBool>,
+    // 第一个切到前台的外部窗口；0 表示没切走。
+    switched: Arc<AtomicUsize>,
     bounds: RECT,
     hotkey: (u16, Modifiers),
     replay: mpsc::SyncSender<ReplayKey>,
@@ -70,7 +71,7 @@ pub struct Hooks {
     commands: mpsc::Sender<Command>,
     replay: mpsc::Receiver<ReplayKey>,
     dropped: Arc<AtomicUsize>,
-    switched: Arc<AtomicBool>,
+    switched: Arc<AtomicUsize>,
 }
 
 unsafe extern "system" fn foreground_changed(
@@ -88,7 +89,12 @@ unsafe extern "system" fn foreground_changed(
             && hwnd.0 as usize != context.window
             && hwnd.0 as usize != context.target
         {
-            context.switched.store(true, Ordering::Release);
+            let _ = context.switched.compare_exchange(
+                0,
+                hwnd.0 as usize,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
         }
     });
 }
@@ -261,6 +267,8 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
             }
         } else if mods == Modifiers::SHIFT && vk == 0x0D {
             Some("Shift+Enter")
+        } else if mods == Modifiers::CONTROL && vk == 0x0D {
+            Some("Ctrl+Enter")
         } else {
             None
         };
@@ -270,6 +278,7 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
                 name,
                 "Enter"
                     | "Shift+Enter"
+                    | "Ctrl+Enter"
                     | "Escape"
                     | "1"
                     | "2"
@@ -362,7 +371,7 @@ impl Hooks {
         let (command_sender, commands) = mpsc::channel();
         let dropped = Arc::new(AtomicUsize::new(0));
         let overflow = dropped.clone();
-        let switched = Arc::new(AtomicBool::new(false));
+        let switched = Arc::new(AtomicUsize::new(0));
         let switched_context = switched.clone();
         let thread = thread::Builder::new().name("panel-hooks".into()).spawn(move || unsafe {
             CONTEXT.with(|context| *context.borrow_mut() = Some(Context {
@@ -436,7 +445,8 @@ impl Hooks {
         }
     }
 
-    pub fn external_switch(&self) -> bool {
+    // 切走时前台到了哪个窗口；0 表示没切走。
+    pub fn switched_to(&self) -> usize {
         self.switched.load(Ordering::Acquire)
     }
 

@@ -2,7 +2,7 @@ use super::{formats, window};
 use crate::{
     history::{
         History,
-        content::{Content, Data, FILES, HTML, RTF, TEXT},
+        content::{Content, Data, FILES, Fingerprint, HTML, RTF, TEXT},
     },
     log::Logger,
     platform::Result,
@@ -257,11 +257,18 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wp: WPARAM, lp: LP
     }
 }
 
+// 历史里的那条记录。写入前要确认它还在、指纹没变；实际写入的内容降级成文字时和它不同。
+#[derive(Clone, Copy)]
+pub struct Record {
+    pub id: usize,
+    pub fingerprint: Fingerprint,
+}
+
 fn write(
     owner: HWND,
-    record_id: usize,
+    record: Record,
     content: &Content,
-    history: &Mutex<History>,
+    history: &History,
     target: u32,
     delayed: bool,
     observation: Arc<Mutex<Observation>>,
@@ -307,6 +314,16 @@ fn write(
             Memory::new(&(if index < 2 { 1u32 } else { 0u32 }).to_ne_bytes())?,
         ));
     }
+    // 登记回声要经过存储的写线程，它可能正在写一张大图；放在打开剪贴板之前，
+    // 免得占着剪贴板等数据库，挡住其他程序。
+    if !history.before_write(
+        record.id,
+        record.fingerprint,
+        content.fingerprint,
+        Instant::now(),
+    ) {
+        return Err("record_missing".into());
+    }
     let started = Instant::now();
     loop {
         if unsafe { OpenClipboard(Some(owner)) }.is_ok() {
@@ -318,13 +335,6 @@ fn write(
         thread::sleep(Duration::from_millis(5));
     }
     let _open = Open;
-    if !history
-        .lock()
-        .unwrap()
-        .before_write(record_id, content.fingerprint, Instant::now())
-    {
-        return Err("record_missing".into());
-    }
     unsafe {
         EmptyClipboard().map_err(|_| "clipboard_empty_failed")?;
     }
@@ -371,13 +381,14 @@ fn write(
             memory.transfer(id).map_err(|_| "clipboard_format_failed")?;
         }
     }
-    history.lock().unwrap().reuse(record_id);
+    drop(_open);
+    history.reuse(record.id);
     Ok(())
 }
 
 enum Command {
     Write {
-        record_id: usize,
+        record: Record,
         content: Arc<Content>,
         target: u32,
         delayed: bool,
@@ -396,7 +407,7 @@ struct Inner {
 pub struct Service(Arc<Inner>);
 
 impl Service {
-    pub fn start(logger: Logger, history: Arc<Mutex<History>>) -> Result<Self> {
+    pub fn start(logger: Logger, history: Arc<History>) -> Result<Self> {
         let (sender, commands) = mpsc::channel();
         let (ready, receiver) = mpsc::sync_channel(1);
         let thread = thread::Builder::new()
@@ -459,7 +470,7 @@ impl Service {
                         while let Ok(command) = commands.try_recv() {
                             match command {
                                 Command::Write {
-                                    record_id,
+                                    record,
                                     content,
                                     target,
                                     delayed,
@@ -468,7 +479,7 @@ impl Service {
                                 } => {
                                     let _ = reply.send(write(
                                         owner,
-                                        record_id,
+                                        record,
                                         &content,
                                         &history,
                                         target,
@@ -535,7 +546,7 @@ impl Service {
 
     pub fn write(
         &self,
-        record_id: usize,
+        record: Record,
         content: Arc<Content>,
         target: u32,
         delayed: bool,
@@ -543,7 +554,7 @@ impl Service {
         let observation = Arc::new(Mutex::new(Observation::default()));
         let (reply, receiver) = mpsc::sync_channel(1);
         self.command(Command::Write {
-            record_id,
+            record,
             content,
             target,
             delayed,

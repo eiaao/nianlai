@@ -141,7 +141,7 @@ impl Counters {
 struct Shared {
     inbox: Inbox,
     stopping: AtomicBool,
-    history: Arc<Mutex<History>>,
+    history: Arc<History>,
     own_owner: usize,
     logger: Logger,
     counters: Mutex<Counters>,
@@ -337,7 +337,7 @@ fn listener(shared: Arc<Shared>, automatic: bool, ready: mpsc::SyncSender<Result
             return;
         }
     };
-    shared.history.lock().unwrap().recording = true;
+    shared.history.set_recording(true);
     shared.logger.event("capture_listener_started", json!({"listener_attached":true,"top_level":true,"visible":false,"baseline_sequence":baseline}));
     (shared.changed)();
     let _ = ready.send(Ok(unsafe { GetCurrentThreadId() }));
@@ -349,7 +349,7 @@ fn listener(shared: Arc<Shared>, automatic: bool, ready: mpsc::SyncSender<Result
         }
         if message.message == CHECK {
             let current = unsafe { GetClipboardSequenceNumber() };
-            let processed = shared.history.lock().unwrap().latest_sequence();
+            let processed = shared.history.latest_sequence();
             let failed = CONTEXT.with(|context| {
                 context
                     .borrow_mut()
@@ -370,9 +370,7 @@ fn listener(shared: Arc<Shared>, automatic: bool, ready: mpsc::SyncSender<Result
                 });
                 let since_write = shared
                     .history
-                    .lock()
-                    .unwrap()
-                    .last_write
+                    .last_write()
                     .map(|at| at.elapsed().as_secs_f64() * 1000.0);
                 shared.counters.lock().unwrap().self_check_failures += 1;
                 shared.logger.event("capture_self_check_failed", json!({"sequence":current,"since_system_event_ms":since_system,"since_own_write_ms":since_write}));
@@ -397,7 +395,7 @@ fn listener(shared: Arc<Shared>, automatic: bool, ready: mpsc::SyncSender<Result
                         }
                     }
                 }
-                shared.history.lock().unwrap().recording = success;
+                shared.history.set_recording(success);
                 {
                     let mut counts = shared.counters.lock().unwrap();
                     if success {
@@ -437,7 +435,7 @@ fn listener(shared: Arc<Shared>, automatic: bool, ready: mpsc::SyncSender<Result
     }
     destroy_window(hwnd);
     CONTEXT.with(|context| context.borrow_mut().take());
-    shared.history.lock().unwrap().recording = false;
+    shared.history.set_recording(false);
     if !shared.stopping.load(Ordering::Acquire) {
         shared.logger.event(
             "capture_listener_failed",
@@ -462,7 +460,7 @@ pub struct Service {
 impl Service {
     pub fn start(
         logger: Logger,
-        history: Arc<Mutex<History>>,
+        history: Arc<History>,
         clipboard: &clipboard::Service,
         automatic: bool,
         changed: Arc<dyn Fn() + Send + Sync>,

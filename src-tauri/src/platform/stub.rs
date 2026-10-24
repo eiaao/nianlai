@@ -26,8 +26,8 @@ impl Hooks {
     pub fn remove_keyboard(&self) -> Result<ReplayBatch> {
         Ok(ReplayBatch::default())
     }
-    pub fn external_switch(&self) -> bool {
-        false
+    pub fn switched_to(&self) -> usize {
+        0
     }
 }
 pub mod hook {
@@ -43,6 +43,12 @@ pub mod window {
     }
     pub fn foreground() -> usize {
         0
+    }
+    pub fn class_name(_: usize) -> String {
+        String::new()
+    }
+    pub fn process_of(_: usize) -> String {
+        String::new()
     }
     pub fn capture() -> Target {
         Target::default()
@@ -91,8 +97,24 @@ pub mod paste {
         _: &super::clipboard::Service,
         _: &std::sync::atomic::AtomicBool,
         _: &dyn Fn(),
+        _: Option<&std::path::Path>,
     ) -> serde_json::Value {
         serde_json::json!({"paste_result":null,"clipboard_written":false,"reason":"unsupported"})
+    }
+}
+pub mod image {
+    pub struct Saved {
+        pub path: std::path::PathBuf,
+        pub reused: bool,
+        pub bytes: u64,
+        pub source: &'static str,
+        pub encode_ms: f64,
+    }
+    pub fn save_png(
+        _: &crate::history::content::Content,
+        _: &std::path::Path,
+    ) -> Result<Saved, &'static str> {
+        Err("unsupported")
     }
 }
 pub mod clipboard {
@@ -100,10 +122,7 @@ pub mod clipboard {
     #[derive(Clone)]
     pub struct Service;
     impl Service {
-        pub fn start(
-            _: Logger,
-            _: std::sync::Arc<std::sync::Mutex<crate::history::History>>,
-        ) -> Result<Self> {
+        pub fn start(_: Logger, _: std::sync::Arc<crate::history::History>) -> Result<Self> {
             Ok(Self)
         }
         pub fn shutdown(&self) {}
@@ -119,7 +138,7 @@ pub mod capture {
     impl Service {
         pub fn start(
             _: super::Logger,
-            _: std::sync::Arc<std::sync::Mutex<crate::history::History>>,
+            _: std::sync::Arc<crate::history::History>,
             _: &super::clipboard::Service,
             _: bool,
             _: std::sync::Arc<dyn Fn() + Send + Sync>,

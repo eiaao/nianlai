@@ -69,10 +69,9 @@ fn reader_window(shared: &Shared) -> Option<HWND> {
         }
         .ok()
     })();
-    shared.logger.event(
-        "capture_reader_window",
-        json!({"success":result.is_some()}),
-    );
+    shared
+        .logger
+        .event("capture_reader_window", json!({"success":result.is_some()}));
     result
 }
 
@@ -348,7 +347,11 @@ fn read_formats(shared: &Shared, attempt: &mut Attempt) {
         }
     }
     if attempt.data.is_empty() {
-        attempt.reason = Some(if empty { "empty" } else { "no_supported_formats" });
+        attempt.reason = Some(if empty {
+            "empty"
+        } else {
+            "no_supported_formats"
+        });
     }
 }
 
@@ -364,6 +367,9 @@ pub(super) fn run(shared: &Shared) {
         let mut outcome = "skipped";
         let mut record = json!({"record_id":null,"kind":null,"copy_count":null});
         let mut changed = false;
+        let mut write_ms = None;
+        let mut transaction_ok = None;
+        let mut store_error: Option<String> = None;
         if shared.stopping.load(Ordering::Acquire) {
             attempt.reason = Some("stopping");
         }
@@ -378,36 +384,39 @@ pub(super) fn run(shared: &Shared) {
                         owner_pid: attempt.notice.owner,
                         observed: attempt.notice.at,
                     };
+                    let write_started = Instant::now();
                     let result = if shared.stopping.load(Ordering::Acquire) {
                         None
                     } else {
-                        Some(shared.history.lock().unwrap().ingest(
-                            content,
-                            event,
-                            attempt.partial,
-                            Instant::now(),
-                        ))
+                        Some(
+                            shared
+                                .history
+                                .ingest(content, event, attempt.partial, Instant::now()),
+                        )
                     };
                     match result {
                         Some(Ok(result)) => {
+                            write_ms = Some(result.write_ms);
+                            transaction_ok = Some(result.transaction_ok);
                             outcome = result.outcome;
                             attempt.reason = result.reason;
                             changed = result.record_id.is_some();
                             record = serde_json::to_value(result).unwrap_or_default();
                         }
-                        Some(Err(_)) => attempt.reason = Some("hash_failed"),
+                        Some(Err(error)) => {
+                            write_ms = Some(write_started.elapsed().as_secs_f64() * 1000.0);
+                            transaction_ok = Some(false);
+                            store_error = Some(error);
+                            attempt.reason = Some("store_failed");
+                        }
                         None => attempt.reason = Some("stopping"),
                     }
                 }
                 Err(_) => attempt.reason = Some("hash_failed"),
             }
         }
-        if attempt.reason.is_some() && !attempt.retry_latest {
-            shared
-                .history
-                .lock()
-                .unwrap()
-                .skipped_sequence(attempt.notice.sequence);
+        if attempt.reason.is_some() && !attempt.retry_latest && store_error.is_none() {
+            shared.history.skipped_sequence(attempt.notice.sequence);
         }
         let latency = attempt.notice.at.elapsed().as_secs_f64() * 1000.0;
         {
@@ -423,7 +432,7 @@ pub(super) fn run(shared: &Shared) {
         }
         shared.logger.event("capture", json!({
             "sequence":attempt.notice.sequence,"trigger":attempt.notice.trigger,"outcome":outcome,"reason":attempt.reason,"marker":attempt.marker,
-            "enumerate_error":attempt.enumerate_error,
+            "enumerate_error":attempt.enumerate_error,"write_ms":write_ms,"transaction_ok":transaction_ok,"error_code":store_error,
             "source_process":source,"owner_process":owner,"same_process":attempt.notice.source!=0 && attempt.notice.source==attempt.notice.owner,
             "formats":attempt.all.iter().take(60).map(|(_, name)| formats::log_name(name)).collect::<Vec<_>>(),"format_count":attempt.all.len(),
             "saved_formats":attempt.saved,"missing_formats":attempt.missing,"ole_bitmap_skipped":attempt.ole_bitmap,

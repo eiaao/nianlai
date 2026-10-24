@@ -13,12 +13,22 @@ pub enum Key {
     ShiftInsert,
 }
 
+// 目标只收文字时，文件和图片改成路径再粘：Lines 每行一个，Shell 用空格分隔并给需要的路径加引号。
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TextStyle {
+    Lines,
+    Shell,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Rule {
     process: Option<String>,
     class: Option<String>,
     key: Key,
+    #[serde(default)]
+    as_text: Option<TextStyle>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
@@ -26,6 +36,7 @@ pub struct Match {
     pub source: &'static str,
     pub index: usize,
     pub key: Key,
+    pub as_text: Option<TextStyle>,
 }
 
 pub struct Table {
@@ -71,8 +82,12 @@ impl Table {
     }
 
     pub fn load(logger: &Logger) -> Self {
-        let path = std::env::var_os("LOCALAPPDATA")
-            .map(|base| Path::new(&base).join("Nianlai/g0/paste-keys.json"));
+        let path = std::env::var_os("NIANLAI_G0_DATA_DIR")
+            .map(|base| Path::new(&base).join("paste-keys.json"))
+            .or_else(|| {
+                std::env::var_os("LOCALAPPDATA")
+                    .map(|base| Path::new(&base).join("Nianlai/g0/paste-keys.json"))
+            });
         let (text, read_error) = match path.map(std::fs::read_to_string) {
             Some(Ok(text)) => (Some(text), false),
             Some(Err(error)) if error.kind() != std::io::ErrorKind::NotFound => (None, true),
@@ -104,6 +119,7 @@ impl Table {
                         source,
                         index: index + 1,
                         key: rule.key,
+                        as_text: rule.as_text,
                     };
                 }
             }
@@ -138,6 +154,45 @@ mod tests {
             table.select("code.exe", "Chrome_WidgetWin_1").key,
             Key::CtrlV
         );
+    }
+
+    #[test]
+    fn terminals_and_plain_editors_take_non_text_items_as_paths() {
+        let (table, _) = Table::from_text(None);
+        for (process, class) in [
+            ("WindowsTerminal.exe", ""),
+            ("cmd.exe", "ConsoleWindowClass"),
+            ("putty.exe", ""),
+            ("kitty.exe", ""),
+            ("mintty.exe", ""),
+        ] {
+            assert_eq!(table.select(process, class).as_text, Some(TextStyle::Shell));
+        }
+        for process in ["notepad++.exe", "Notepad.exe"] {
+            let selected = table.select(process, "");
+            assert_eq!(selected.as_text, Some(TextStyle::Lines));
+            assert_eq!(selected.key, Key::CtrlV);
+        }
+        for process in ["Feishu.exe", "explorer.exe", "WINWORD.EXE", "Code.exe"] {
+            assert_eq!(table.select(process, "").as_text, None);
+        }
+    }
+
+    #[test]
+    fn overrides_can_mark_a_target_as_text_only_and_reject_unknown_styles() {
+        let (table, error) = Table::from_text(Some(
+            r#"[{"process":"sublime_text.exe","key":"Ctrl+V","as_text":"lines"}]"#,
+        ));
+        assert!(error.is_none());
+        assert_eq!(
+            table.select("sublime_text.exe", "").as_text,
+            Some(TextStyle::Lines)
+        );
+        let (table, error) = Table::from_text(Some(
+            r#"[{"process":"x.exe","key":"Ctrl+V","as_text":"words"}]"#,
+        ));
+        assert!(error.is_some());
+        assert_eq!(table.select("x.exe", "").as_text, None);
     }
 
     #[test]

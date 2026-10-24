@@ -2,11 +2,13 @@ use crate::{history::content::Content, platform::Target};
 use serde::{Deserialize, Serialize};
 use std::{sync::Arc, time::Instant};
 
-#[derive(Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Mode {
     Paste,
     Copy,
+    // Ctrl+Enter：先把文件、图片、富文本转成文字，再照常粘贴。
+    Text,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
@@ -54,5 +56,7 @@ mod tests {
             Outcome::CopiedOnly
         );
         assert_eq!(conclude(Mode::Paste, true, true, true), Outcome::CopiedOnly);
+        assert_eq!(conclude(Mode::Text, true, false, false), Outcome::Sent);
+        assert_eq!(conclude(Mode::Text, true, true, false), Outcome::Confirmed);
     }
 }

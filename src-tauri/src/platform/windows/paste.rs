@@ -1,7 +1,9 @@
-use super::{clipboard, uia, window};
+use super::{clipboard, hash, uia, window};
 use crate::{
+    history::content::Content,
     paste::{
-        keys::{Key, Table},
+        as_text,
+        keys::{Key, Match, Table},
         request::{Mode, Outcome, Request, conclude},
     },
     platform::{REPLAY_WAIT, ReplayKey, Target},
@@ -9,7 +11,11 @@ use crate::{
 use serde_json::{Value, json};
 use std::{
     mem::size_of,
-    sync::atomic::{AtomicBool, Ordering},
+    path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -311,15 +317,23 @@ fn preflight(request: &Request, stopping: &AtomicBool) -> (bool, Value) {
     )
 }
 
+fn record(request: &Request) -> clipboard::Record {
+    clipboard::Record {
+        id: request.record_id,
+        fingerprint: request.content.fingerprint,
+    }
+}
+
 fn copy(
     request: &Request,
+    written: &Arc<Content>,
     clipboard: &clipboard::Service,
     report: &mut Value,
     reason: &'static str,
 ) -> Result<Outcome, String> {
     clipboard.write(
-        request.record_id,
-        request.content.clone(),
+        record(request),
+        written.clone(),
         request.target.process,
         false,
     )?;
@@ -328,9 +342,11 @@ fn copy(
     Ok(conclude(request.mode, false, false, true))
 }
 
+// written 是实际写进剪贴板的内容：降级成文字时和 request.content（历史里的记录）不同。
 fn perform(
     request: &Request,
-    table: &Table,
+    written: &Arc<Content>,
+    selected: Match,
     clipboard: &clipboard::Service,
     stopping: &AtomicBool,
     on_sent: &dyn Fn(),
@@ -339,27 +355,31 @@ fn perform(
     if stopping.load(Ordering::Acquire) {
         return Err("request_cancelled".into());
     }
-    let selected = table.select(&request.target.process_name, &request.target.window_class);
-    report["key_rule"] = json!(selected);
     // 只认面板隐藏前的判断；隐藏后前台由系统重新指定，交给还焦点和发键前确认处理。
     let external_switch = request.external_switch;
     if request.restore_focus && !external_switch && window::valid(&request.target) {
         report["restore"] = json!(window::restore(&request.target));
     }
     if request.mode == Mode::Copy {
-        return copy(request, clipboard, report, "user_copy");
+        return copy(request, written, clipboard, report, "user_copy");
     }
     if !window::valid(&request.target) {
-        return copy(request, clipboard, report, "invalid_target");
+        return copy(request, written, clipboard, report, "invalid_target");
     }
     if external_switch {
-        return copy(request, clipboard, report, "external_switch");
+        return copy(request, written, clipboard, report, "external_switch");
     }
     let integrity = compare_integrity(&request.target);
     let allowed = integrity["status"] == "allowed";
     report["integrity"] = integrity;
     if !allowed {
-        return copy(request, clipboard, report, "target_may_be_elevated");
+        return copy(
+            request,
+            written,
+            clipboard,
+            report,
+            "target_may_be_elevated",
+        );
     }
     let (ready, confirmation) = preflight(request, stopping);
     report["preflight"] = confirmation;
@@ -367,10 +387,9 @@ fn perform(
         return Err("request_cancelled".into());
     }
     if !ready {
-        return copy(request, clipboard, report, "preflight_timeout");
+        return copy(request, written, clipboard, report, "preflight_timeout");
     }
-    let probe = request
-        .content
+    let probe = written
         .text_value()
         .map(|text| uia::Probe::start(request.target.process, text));
     let before = probe
@@ -383,11 +402,11 @@ fn perform(
     }
     // UIA 和打开剪贴板期间用户可能改变焦点，所以在写入与发键前分别复核。
     if !checks(request).all() {
-        return copy(request, clipboard, report, "conditions_changed");
+        return copy(request, written, clipboard, report, "conditions_changed");
     }
     let observation = clipboard.write(
-        request.record_id,
-        request.content.clone(),
+        record(request),
+        written.clone(),
         request.target.process,
         true,
     )?;
@@ -453,26 +472,42 @@ pub fn execute(
     clipboard: &clipboard::Service,
     stopping: &AtomicBool,
     on_sent: &dyn Fn(),
+    exports: Option<&Path>,
 ) -> Value {
     let mut report = json!({"paste_result":null,"reason":null,"clipboard_written":false,
         "record_id":request.record_id,"written_formats":[],
         "process_name":request.target.process_name,"window_class":request.target.window_class,
         "focus_class":request.target.focus_class,"focus_unknown":request.target.focus==0,
-        "key_rule":null,"actual_key":null,"preflight":null,"integrity":null,
+        "key_rule":null,"as_text":null,"actual_key":null,"preflight":null,"integrity":null,
         "send_input":0,"expected_events":0,"layer2":null,"layer3":uia::Evidence::default(),
         "selected_to_send_ms":null,"selected_to_result_ms":null});
-    match perform(&request, table, clipboard, stopping, on_sent, &mut report) {
+    let selected = table.select(&request.target.process_name, &request.target.window_class);
+    report["key_rule"] = json!(selected);
+    // 只收文字的目标或 Ctrl+Enter：先转成文字。图片要编码 PNG，放在发键前确认之前做。
+    let (written, conversion) = as_text::apply(
+        &request.content,
+        request.mode,
+        selected.as_text,
+        exports,
+        hash::sha256,
+    );
+    report["as_text"] = conversion;
+    match perform(
+        &request,
+        &written,
+        selected,
+        clipboard,
+        stopping,
+        on_sent,
+        &mut report,
+    ) {
         Ok(outcome) => report["paste_result"] = json!(outcome),
         Err(reason) => report["reason"] = json!(reason),
     }
     report["selected_to_result_ms"] = json!(request.started.elapsed().as_secs_f64() * 1000.0);
     if report["clipboard_written"] == true {
-        let mut names: Vec<_> = request.content.formats.keys().cloned().collect();
-        if request
-            .content
-            .formats
-            .contains_key(crate::history::content::FILES)
-        {
+        let mut names: Vec<_> = written.formats.keys().cloned().collect();
+        if written.formats.contains_key(crate::history::content::FILES) {
             names.push("Preferred DropEffect".into());
         }
         names.extend(

@@ -18,6 +18,18 @@ fn get_history(app: AppHandle) -> history::Snapshot {
     app.state::<Controller>().history_snapshot()
 }
 #[tauri::command]
+async fn search_history(
+    app: AppHandle,
+    query: String,
+    request_id: u64,
+) -> Result<history::SearchReply, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<Controller>().search(&query, request_id)
+    })
+    .await
+    .map_err(|_| "search_worker_failed".to_owned())?
+}
+#[tauri::command]
 fn frontend_ready(app: AppHandle) -> Result<(), String> {
     panel::dispatch(&app, Action::FrontendReady)
 }
@@ -158,6 +170,7 @@ pub fn run() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             get_history,
+            search_history,
             frontend_ready,
             start_search,
             search_ready,
@@ -175,13 +188,18 @@ pub fn run() {
             let plan = autocycle::Plan::from_env(&logger);
             let automatic = plan.is_some();
             app.manage(Controller::new(window, logger.clone(), plan)?);
-            if let Err(error) = app
-                .state::<Controller>()
-                .start_capture(app.handle(), automatic)
-            {
-                // 采集起不来时面板和粘贴照常可用，界面上显示“未在记录”。
-                logger.event("capture_start_failed", json!({"error":error}));
-            }
+            let handle = app.handle().clone();
+            let capture_logger = logger.clone();
+            std::thread::Builder::new()
+                .name("history-startup".into())
+                .spawn(move || {
+                    if let Err(error) = handle
+                        .state::<Controller>()
+                        .start_capture(&handle, automatic)
+                    {
+                        capture_logger.event("capture_start_failed", json!({"error":error}));
+                    }
+                })?;
             if let Err(error) = register_hotkeys(app.handle(), &logger, automatic) {
                 logger.flush();
                 return Err(error.into());

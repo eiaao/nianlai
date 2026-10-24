@@ -26,18 +26,16 @@ pub fn now_ms() -> u64 {
 
 impl Logger {
     pub fn new() -> io::Result<Self> {
-        let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
-        #[cfg(windows)]
-        let base =
-            base.ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "LOCALAPPDATA 未设置"))?;
-        #[cfg(not(windows))]
-        let base = base.unwrap_or_else(std::env::temp_dir);
-        let base = base.join("Nianlai").join("g0");
-        std::fs::create_dir_all(&base)?;
-        let mut file: File = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(base.join("panel-log.jsonl"))?;
+        let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
+        let base = std::env::var_os("NIANLAI_G0_DATA_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| base.join("Nianlai").join("g0"));
+        let open = |base: &std::path::Path| -> io::Result<File> {
+            std::fs::create_dir_all(base)?;
+            OpenOptions::new().create(true).append(true).open(base.join("panel-log.jsonl"))
+        };
+        // 指定数据目录不可写时，仍要让内存模式启动并留下不含路径的诊断。
+        let mut file = open(&base).or_else(|_| open(&std::env::temp_dir().join("NianlaiG0Logs").join(std::process::id().to_string())))?;
         let (sender, receiver) = mpsc::channel();
         std::thread::Builder::new()
             .name("panel-log".into())
