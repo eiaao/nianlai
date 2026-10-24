@@ -6,9 +6,12 @@ use rusqlite::{OptionalExtension, Row};
 use std::{collections::BTreeMap, sync::Arc};
 
 pub fn version(c: &Connection) -> Result<u32> {
-    let version = c.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    let version = migrations::user_version(c)?;
     if version > VERSION {
-        return Err(Error::NewerVersion(version));
+        return Err(Error::NewerSchema {
+            found: version,
+            supported: VERSION,
+        });
     }
     Ok(version)
 }
@@ -20,57 +23,14 @@ pub fn readonly(path: &Path) -> Result<Connection> {
     }
     Ok(c)
 }
-pub fn initialize(c: &Connection) -> Result<()> {
-    let current = version(c)?;
-    if current == 0 {
-        // 不把未知的无版本数据库当作空库升级。
-        let tables: i64 = c.query_row(
-            "SELECT count(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'",
-            [],
-            |r| r.get(0),
-        )?;
-        if tables != 0 {
-            return Err(Error::Invalid("unversioned_database"));
-        }
-        c.execute_batch("BEGIN IMMEDIATE;
-            CREATE TABLE contents (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                fingerprint BLOB NOT NULL UNIQUE CHECK(length(fingerprint)=32),
-                kind TEXT NOT NULL, preview TEXT NOT NULL, file_names TEXT NOT NULL,
-                bytes INTEGER NOT NULL CHECK(bytes>=0), partial INTEGER NOT NULL,
-                sort_ms INTEGER NOT NULL, source TEXT NOT NULL, copy_count INTEGER NOT NULL,
-                sort_order INTEGER NOT NULL DEFAULT 0,
-                search_text TEXT NOT NULL);
-            CREATE INDEX content_order ON contents(sort_ms DESC,sort_order DESC);
-            CREATE INDEX content_revision ON contents(sort_order DESC);
-            CREATE TABLE formats (
-                content_id INTEGER NOT NULL REFERENCES contents(id) ON DELETE CASCADE,
-                name TEXT NOT NULL, fingerprint BLOB NOT NULL CHECK(length(fingerprint)=32),
-                bytes INTEGER NOT NULL CHECK(bytes>=0), encoding INTEGER NOT NULL CHECK(encoding IN (0,1)),
-                data BLOB NOT NULL, PRIMARY KEY(content_id,name));
-            CREATE TABLE copy_events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                content_id INTEGER NOT NULL REFERENCES contents(id) ON DELETE CASCADE,
-                time_ms INTEGER NOT NULL, source_process TEXT NOT NULL, owner_process TEXT NOT NULL,
-                owner_pid INTEGER NOT NULL, sequence INTEGER NOT NULL);
-            CREATE INDEX event_content ON copy_events(content_id,time_ms,id);
-            CREATE VIRTUAL TABLE search_index USING fts5(search_text, content='contents', content_rowid='id', tokenize='trigram');
-            CREATE TRIGGER content_insert AFTER INSERT ON contents BEGIN
-                INSERT INTO search_index(rowid,search_text) VALUES(new.id,new.search_text);
-            END;
-            CREATE TRIGGER content_delete AFTER DELETE ON contents BEGIN
-                INSERT INTO search_index(search_index,rowid,search_text) VALUES('delete',old.id,old.search_text);
-            END;
-            CREATE TRIGGER content_search_update AFTER UPDATE OF search_text ON contents BEGIN
-                INSERT INTO search_index(search_index,rowid,search_text) VALUES('delete',old.id,old.search_text);
-                INSERT INTO search_index(rowid,search_text) VALUES(new.id,new.search_text);
-            END;
-            PRAGMA user_version=1;
-            COMMIT;")?;
-    }
+// 建表和升级都在 migrations 里；这里只负责“打开一个可写库”的固定流程。返回迁移前的版本（没迁移为 None）。
+pub fn initialize(c: &mut Connection, directory: &Path) -> Result<Option<u32>> {
+    let migrated_from = migrations::migrate(c, migrations::STEPS, &mut |c, from| {
+        migrations::backup(c, directory, from).map(drop)
+    })?;
     structure(c)?;
     c.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;")?;
-    Ok(())
+    Ok(migrated_from)
 }
 
 pub fn structure(c: &Connection) -> Result<()> {

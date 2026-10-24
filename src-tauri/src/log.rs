@@ -21,6 +21,20 @@ enum Message {
     Flush(mpsc::SyncSender<()>),
 }
 
+pub const COMPATIBILITY_FILE: &str = "panel-log.jsonl";
+
+// 应用与守护者共用文件名，日期取事件的 UTC 时间。
+pub fn daily_file_name(millis: u64) -> String {
+    format!("panel-{}.jsonl", day_stamp(millis))
+}
+
+// 指定目录不可写时共用同一种退路，按进程号隔离。
+pub fn fallback_directory() -> PathBuf {
+    std::env::temp_dir()
+        .join("NianlaiLogs")
+        .join(std::process::id().to_string())
+}
+
 pub fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -51,7 +65,7 @@ fn open_append(path: &Path) -> io::Result<File> {
 struct DailyWriter {
     directory: PathBuf,
     max_bytes: u64,
-    day: String,
+    file_name: String,
     file: Option<File>,
     compatibility: bool,
     compatibility_file: Option<File>,
@@ -63,7 +77,7 @@ impl DailyWriter {
         let mut writer = Self {
             directory,
             max_bytes,
-            day: String::new(),
+            file_name: String::new(),
             file: None,
             compatibility,
             compatibility_file: None,
@@ -74,18 +88,18 @@ impl DailyWriter {
     }
 
     fn current_path(&self) -> PathBuf {
-        self.directory.join(format!("panel-{}.jsonl", self.day))
+        self.directory.join(&self.file_name)
     }
 
     fn compatibility_path(&self) -> PathBuf {
-        self.directory.join("panel-log.jsonl")
+        self.directory.join(COMPATIBILITY_FILE)
     }
 
     fn open_day(&mut self, time: u64) -> io::Result<()> {
-        let day = day_stamp(time);
-        if self.day != day {
+        let file_name = daily_file_name(time);
+        if self.file_name != file_name {
             self.file.take();
-            self.day = day;
+            self.file_name = file_name;
         }
         if self.file.is_none() {
             self.file = Some(open_append(&self.current_path())?);
@@ -144,7 +158,7 @@ impl DailyWriter {
             } else {
                 entry.metadata()?
             };
-            let date = if name == "panel-log.jsonl" {
+            let date = if name == COMPATIBILITY_FILE {
                 day_stamp(
                     metadata
                         .modified()?
@@ -209,9 +223,7 @@ impl Logger {
         let (mut writer, fallback) = match open(directories.logs.clone()) {
             Ok(writer) => (writer, false),
             Err(_) => {
-                let directory = std::env::temp_dir()
-                    .join("NianlaiLogs")
-                    .join(std::process::id().to_string());
+                let directory = fallback_directory();
                 let writer = open(directory.clone())?;
                 directories.logs = directory;
                 (writer, true)

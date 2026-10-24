@@ -1,5 +1,6 @@
 pub mod capture;
 pub mod clipboard;
+pub mod dialog;
 pub mod formats;
 pub mod hash;
 pub mod hook;

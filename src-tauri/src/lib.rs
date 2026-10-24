@@ -5,6 +5,7 @@ mod log;
 mod panel;
 mod paste;
 mod platform;
+mod recovery;
 mod resuspend;
 mod samples;
 mod settings;
@@ -196,6 +197,10 @@ fn register_hotkeys(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // 守护者在这里就结束，不初始化 Tauri；真正的应用（--child）继续往下走。
+    if let Some(code) = recovery::guard() {
+        std::process::exit(code);
+    }
     let app = tauri::Builder::default()
         .plugin(tray::single_instance())
         .plugin(tray::autostart())
@@ -227,6 +232,7 @@ pub fn run() {
                 json!({
                     "platform":std::env::consts::OS,
                     "version":env!("CARGO_PKG_VERSION"),
+                    "guarded":recovery::is_child(),
                 }),
             );
             logger.event(
