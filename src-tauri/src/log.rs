@@ -24,29 +24,34 @@ pub fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
+pub const FILE: &str = "panel-log.jsonl";
+// 日志目录：NIANLAI_G0_DATA_DIR，否则 %LOCALAPPDATA%\Nianlai\g0（没有 LOCALAPPDATA 就用临时目录）。守护者也写这里。
+pub fn directory() -> PathBuf {
+    let base = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    std::env::var_os("NIANLAI_G0_DATA_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| base.join("Nianlai").join("g0"))
+}
+// 指定目录不可写时的退路，按进程号分开。
+pub fn fallback_directory() -> PathBuf {
+    std::env::temp_dir()
+        .join("NianlaiG0Logs")
+        .join(std::process::id().to_string())
+}
+
 impl Logger {
     pub fn new() -> io::Result<Self> {
-        let base = std::env::var_os("LOCALAPPDATA")
-            .map(PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir);
-        let base = std::env::var_os("NIANLAI_G0_DATA_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| base.join("Nianlai").join("g0"));
         let open = |base: &std::path::Path| -> io::Result<File> {
             std::fs::create_dir_all(base)?;
             OpenOptions::new()
                 .create(true)
                 .append(true)
-                .open(base.join("panel-log.jsonl"))
+                .open(base.join(FILE))
         };
         // 指定数据目录不可写时，仍要让内存模式启动并留下不含路径的诊断。
-        let mut file = open(&base).or_else(|_| {
-            open(
-                &std::env::temp_dir()
-                    .join("NianlaiG0Logs")
-                    .join(std::process::id().to_string()),
-            )
-        })?;
+        let mut file = open(&directory()).or_else(|_| open(&fallback_directory()))?;
         let (sender, receiver) = mpsc::channel();
         std::thread::Builder::new()
             .name("panel-log".into())

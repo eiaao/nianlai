@@ -5,6 +5,7 @@ mod log;
 mod panel;
 mod paste;
 mod platform;
+mod recovery;
 mod resuspend;
 mod samples;
 mod tray;
@@ -187,6 +188,10 @@ fn register_hotkeys(app: &AppHandle, logger: &log::Logger, automatic: bool) -> R
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // 守护者在这里就结束，不初始化 Tauri；真正的应用（--child）继续往下走。
+    if let Some(code) = recovery::guard() {
+        std::process::exit(code);
+    }
     let app = tauri::Builder::default()
         .plugin(tray::single_instance())
         .plugin(tray::autostart())
@@ -205,7 +210,10 @@ pub fn run() {
         ])
         .setup(|app| {
             let logger = log::Logger::new()?;
-            logger.event("startup", json!({"platform":std::env::consts::OS}));
+            logger.event(
+                "startup",
+                json!({"platform":std::env::consts::OS,"guarded":recovery::is_child()}),
+            );
             let window = app.get_webview_window("panel").ok_or("panel 窗口不存在")?;
             platform::window::no_activate(&window, true)?;
             platform::webview::initialize(&window)?;

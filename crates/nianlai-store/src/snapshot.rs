@@ -164,24 +164,9 @@ pub fn snapshot(directory: &Path) -> Result<SnapshotReport> {
     let file = directory
         .join("snapshots")
         .join(format!("history-{}.db", stamp()));
-    let stage = file.with_extension("pending");
-    let result = (|| -> Result<()> {
-        let c = schema::readonly(&directory.join("history.db"))?;
-        c.execute(
-            "VACUUM INTO ?1",
-            [stage.to_str().ok_or(Error::Invalid("path_encoding"))?],
-        )?;
-        fs::OpenOptions::new()
-            .write(true)
-            .open(&stage)?
-            .sync_all()?;
-        fs::rename(&stage, &file)?;
-        Ok(())
-    })();
-    if let Err(error) = result {
-        let _ = fs::remove_file(&stage);
-        return Err(error);
-    }
+    let c = schema::readonly(&directory.join("history.db"))?;
+    copy_database(&c, &file)?;
+    drop(c);
     let files = snapshots(directory)?;
     let deleted = files.len().saturating_sub(7);
     for old in files.iter().take(deleted) {
@@ -194,6 +179,29 @@ pub fn snapshot(directory: &Path) -> Result<SnapshotReport> {
         retained: files.len() - deleted,
         deleted,
     })
+}
+
+// 把连接上的库完整复制到 destination：VACUUM INTO 给出一个一致的读快照（WAL 里已提交的内容也在），
+// 先写到 .pending 再 fsync、改名，所以目标位置要么没有文件、要么是完整文件。迁移前备份也走这里。
+pub(crate) fn copy_database(c: &Connection, destination: &Path) -> Result<()> {
+    let stage = destination.with_extension("pending");
+    let result = (|| -> Result<()> {
+        c.execute(
+            "VACUUM INTO ?1",
+            [stage.to_str().ok_or(Error::Invalid("path_encoding"))?],
+        )?;
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&stage)?
+            .sync_all()?;
+        fs::rename(&stage, destination)?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        let _ = fs::remove_file(&stage);
+        return Err(error);
+    }
+    Ok(())
 }
 
 pub fn restore(directory: &Path, source: &Path) -> Result<PathBuf> {

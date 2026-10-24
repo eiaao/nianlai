@@ -1,10 +1,12 @@
 pub mod content;
 pub mod hash;
+mod migrations;
 mod schema;
 mod search;
 mod snapshot;
 mod write;
 
+pub use migrations::VERSION;
 pub use search::{Search, SearchMode};
 pub use snapshot::{SnapshotReport, check, restore, snapshot, snapshot_due, validate_snapshot};
 pub use write::Store;
@@ -17,7 +19,6 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
-pub const VERSION: u32 = 1;
 pub const CACHE_LIMIT: usize = 300;
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -32,7 +33,8 @@ pub fn application_guard(directory: &Path) -> Result<std::fs::File> {
 pub enum Error {
     Sqlite(i32),
     Io(std::io::ErrorKind),
-    NewerVersion(u32),
+    // 库由更新版本的拈来创建：found 是库里的 user_version，supported 是本程序能打开的最高版本。
+    NewerSchema { found: u32, supported: u32 },
     Invalid(&'static str),
     Busy,
     Closed,
@@ -141,6 +143,8 @@ impl Ingest {
 #[derive(Clone, Default, Debug, Serialize)]
 pub struct OpenReport {
     pub version: u32,
+    // 这次打开时从哪个版本迁移上来的；没有迁移为 None。
+    pub migrated_from: Option<u32>,
     pub open_ms: f64,
     pub load_ms: f64,
     pub counts: Counts,
@@ -206,3 +210,5 @@ pub(crate) fn writable(path: &Path) -> Result<Connection> {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod upgrade_tests;

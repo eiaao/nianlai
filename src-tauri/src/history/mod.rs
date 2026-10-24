@@ -124,12 +124,13 @@ impl History {
                 *self.store.write().unwrap() = Some(store);
             }
             Err(error) => {
-                *self.status.lock().unwrap() =
-                    Some(if matches!(error, nianlai_store::Error::NewerVersion(_)) {
-                        "数据版本较新，未能打开"
+                *self.status.lock().unwrap() = Some(
+                    if matches!(error, nianlai_store::Error::NewerSchema { .. }) {
+                        "这个数据目录由更新版本的拈来创建，请升级后再打开"
                     } else {
                         "历史库异常，未落盘"
-                    });
+                    },
+                );
                 self.logger.event(
                     "store_open_failed",
                     json!({"location":location,"error_code":error.to_string()}),
