@@ -3,14 +3,14 @@ use content::{Content, Data, FILES, HTML};
 use hash::sha256;
 use std::{collections::BTreeMap, fs, path::PathBuf, sync::Arc, time::Duration};
 
-struct Temp(PathBuf);
+pub(crate) struct Temp(pub(crate) PathBuf);
 impl Temp {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let path = std::env::temp_dir().join(format!("nianlai-store-test-{}", snapshot::stamp()));
         fs::create_dir(&path).unwrap();
         Self(path)
     }
-    fn store(&self) -> Store {
+    pub(crate) fn store(&self) -> Store {
         Store::open(&self.0, sha256).unwrap()
     }
 }
@@ -71,7 +71,10 @@ fn create_reopen_and_refuse_future_version_without_touching_file() {
     let before = fs::read(temp.0.join("history.db")).unwrap();
     assert!(matches!(
         Store::open(&temp.0, sha256),
-        Err(Error::NewerVersion(2))
+        Err(Error::NewerSchema {
+            found: 2,
+            supported: VERSION
+        })
     ));
     assert_eq!(before, fs::read(temp.0.join("history.db")).unwrap());
 }

@@ -84,8 +84,8 @@ impl Store {
                     }
                     std::fs::create_dir_all(&path)?;
                     let lock = lock(&path)?;
-                    let connection = writable(&db)?;
-                    schema::initialize(&connection)?;
+                    let mut connection = writable(&db)?;
+                    let migrated_from = schema::initialize(&mut connection, &path)?;
                     let counts = schema::counts(&connection)?;
                     let sort_order = connection.query_row(
                         "SELECT coalesce(max(sort_order),0) FROM contents",
@@ -108,6 +108,7 @@ impl Store {
                     };
                     let report = OpenReport {
                         version: VERSION,
+                        migrated_from,
                         open_ms,
                         load_ms: load.elapsed().as_secs_f64() * 1000.0,
                         counts,
