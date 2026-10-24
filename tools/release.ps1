@@ -13,24 +13,35 @@
   跳过正式版构建，直接打包已有程序；仍同步版本并安装前端依赖。
   不核验已有程序的内嵌版本；构建信息明确记录跳过构建和程序文件时间。
 .PARAMETER OutDir
-  输出目录，默认是仓库根目录的 dist；相对路径始终相对于仓库根目录。
+  输出目录，默认是仓库根目录的 release；相对路径始终相对于仓库根目录。
+  不得指向前端资源目录及其子目录，或仓库根目录、src、src-tauri。
 .PARAMETER AllowDirty
   允许工作区有未提交改动；构建信息会记录最终是否存在未提交改动。
 .EXAMPLE
   powershell -NoProfile -ExecutionPolicy Bypass -File tools\release.ps1
 .EXAMPLE
-  powershell -NoProfile -ExecutionPolicy Bypass -File tools\release.ps1 -SkipBuild -OutDir dist\自测
+  powershell -NoProfile -ExecutionPolicy Bypass -File tools\release.ps1 -SkipBuild -OutDir release\自测
 #>
 [CmdletBinding()]
 param(
     [string]$Version,
     [switch]$SkipBuild,
-    [ValidateNotNullOrEmpty()][string]$OutDir = 'dist',
+    [ValidateNotNullOrEmpty()][string]$OutDir = 'release',
     [switch]$AllowDirty
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+# 使用说明中的产品默认值集中在此处，方便与设置和托盘行为同步。
+$script:UsageDefaults = @{
+    Hotkey = 'Ctrl+`（反引号键）'
+    SettingsFile = '%APPDATA%\Nianlai\settings.json'
+    DataDirectory = '%LOCALAPPDATA%\Nianlai\data'
+    LogDirectory = '%LOCALAPPDATA%\Nianlai\logs'
+    Exit = '托盘图标右键“退出”，或 Ctrl+Alt+Shift+Q。'
+    Instance = '只运行一个实例，再次双击会呼出已在运行的面板。'
+    AutoStart = '开机自启：在托盘菜单里勾选。'
+}
 $script:Utf8Bom = New-Object System.Text.UTF8Encoding($true)
 $script:Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 try { [Console]::OutputEncoding = $script:Utf8NoBom } catch { }
@@ -52,10 +63,39 @@ function Assert-Command([string]$Name) {
     }
 }
 
+function Resolve-ReleasePath([string]$Path, [string]$BasePath) {
+    if ([IO.Path]::IsPathRooted($Path)) {
+        return [IO.Path]::GetFullPath($Path)
+    }
+    return [IO.Path]::GetFullPath((Join-Path $BasePath $Path))
+}
+
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..')).TrimEnd('\', '/')
 $staging = $null
 Push-Location -LiteralPath $repoRoot
 try {
+    # 必须先校验目录，再同步版本、安装依赖或构建，避免危险参数产生任何文件改动。
+    $configPath = Join-Path $repoRoot 'src-tauri\tauri.conf.json'
+    $config = [IO.File]::ReadAllText($configPath) | ConvertFrom-Json
+    if (-not $config.PSObject.Properties['build'] -or $null -eq $config.build -or
+        -not $config.build.PSObject.Properties['frontendDist'] -or
+        $config.build.frontendDist -isnot [string] -or [string]::IsNullOrWhiteSpace($config.build.frontendDist)) {
+        throw 'tauri.conf.json 的 build.frontendDist 必须指定前端资源目录。'
+    }
+    $outputPath = Resolve-ReleasePath $OutDir $repoRoot
+    $normalizedOutput = $outputPath.TrimEnd('\', '/')
+    $frontendPath = (Resolve-ReleasePath $config.build.frontendDist (Split-Path -Parent $configPath)).TrimEnd('\', '/')
+    $frontendPrefix = $frontendPath + [IO.Path]::DirectorySeparatorChar
+    if ([string]::Equals($normalizedOutput, $frontendPath, [StringComparison]::OrdinalIgnoreCase) -or
+        $normalizedOutput.StartsWith($frontendPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+        throw '输出目录不能等于前端资源目录（frontendDist），也不能位于其内部。'
+    }
+    foreach ($protectedPath in @($repoRoot, (Join-Path $repoRoot 'src'), (Join-Path $repoRoot 'src-tauri'))) {
+        if ([string]::Equals($normalizedOutput, $protectedPath, [StringComparison]::OrdinalIgnoreCase)) {
+            throw '输出目录不能是仓库根目录、src 或 src-tauri。'
+        }
+    }
+
     $gitRoot = & git rev-parse --show-toplevel
     Assert-Command '读取 Git 工作区'
     if ([IO.Path]::GetFullPath($gitRoot).TrimEnd('\', '/') -ne $repoRoot) {
@@ -92,7 +132,6 @@ try {
     if ($packageVersion.Count -ne 1 -or -not ($packageText | ConvertFrom-Json).version) {
         throw 'package.json 必须包含唯一的应用 version 字段。'
     }
-    $config = [IO.File]::ReadAllText((Join-Path $repoRoot 'src-tauri\tauri.conf.json')) | ConvertFrom-Json
     if ($config.PSObject.Properties.Name -contains 'version') {
         throw '请移除 tauri.conf.json 的 version 字段，让 Tauri 使用 Cargo.toml 的版本。'
     }
@@ -134,11 +173,6 @@ try {
     $gitStatus = @(& git status --porcelain=v1 --untracked-files=all)
     Assert-Command '记录最终 Git 状态'
 
-    $outputPath = if ([IO.Path]::IsPathRooted($OutDir)) {
-        [IO.Path]::GetFullPath($OutDir)
-    } else {
-        [IO.Path]::GetFullPath((Join-Path $repoRoot $OutDir))
-    }
     [IO.Directory]::CreateDirectory($outputPath) | Out-Null
     $staging = Join-Path $outputPath ('.nianlai-release-' + [Guid]::NewGuid().ToString('N'))
     $payload = Join-Path $staging 'payload'
@@ -152,10 +186,13 @@ try {
 运行前需要 Microsoft Edge WebView2 运行时（Windows 11 通常已自带）；若缺失，请先安装微软的 WebView2 Evergreen 运行时。
 首次运行若遇到 Windows SmartScreen 提示，请在确认文件来源后选择“更多信息 → 仍要运行”。此版本未签名。
 
-使用：默认按 Alt+V 呼出面板；若快捷键被占用则尝试 Ctrl+Shift+F12，亦可用 NIANLAI_HOTKEY 环境变量指定呼出键。
-退出程序请按 Ctrl+Alt+Shift+Q。
-数据目录：默认 %LOCALAPPDATA%\Nianlai\g0\data，诊断日志位于 %LOCALAPPDATA%\Nianlai\g0\panel-log.jsonl。
-若设置了 NIANLAI_G0_DATA_DIR 环境变量，历史数据和日志使用该变量指定的目录。
+使用：默认按 $($script:UsageDefaults.Hotkey) 呼出面板，可在设置文件里改。
+设置文件：$($script:UsageDefaults.SettingsFile)
+数据目录：$($script:UsageDefaults.DataDirectory)
+日志目录：$($script:UsageDefaults.LogDirectory)
+退出：$($script:UsageDefaults.Exit)
+$($script:UsageDefaults.Instance)
+$($script:UsageDefaults.AutoStart)
 便携版表示无需安装，历史数据仍保存在上述用户目录中。
 "@
     Write-ReleaseText (Join-Path $payload '使用说明.txt') ($instructions + "`r`n")

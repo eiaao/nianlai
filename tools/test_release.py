@@ -37,8 +37,8 @@ class ReleaseTests(unittest.TestCase):
         self.package = self.repo / "package.json"
         self.package.write_text(json.dumps({"name": "nianlai", "version": VERSION}), encoding="utf-8")
         self.config = self.repo / "src-tauri/tauri.conf.json"
-        self.config.write_text('{"productName":"Nianlai","bundle":{"active":true}}', encoding="utf-8")
-        (self.repo / ".gitignore").write_text("dist/\nbin/\nbuild-output/\ncommands.log\n", encoding="utf-8")
+        self.config.write_text('{"productName":"Nianlai","build":{"frontendDist":"../dist"},"bundle":{"active":true}}', encoding="utf-8")
+        (self.repo / ".gitignore").write_text("dist/\nrelease/\nbin/\nbuild-output/\ncommands.log\n", encoding="utf-8")
         self.binary = self.repo / "build-output/release/nianlai.exe"
         self.binary.parent.mkdir(parents=True)
         self.binary.write_bytes(b"MZ\x00\x00portable-release-test")
@@ -97,6 +97,21 @@ class ReleaseTests(unittest.TestCase):
         path = self.repo / "commands.log"
         return path.read_text(encoding="utf-8") if path.exists() else ""
 
+    def assert_rejected_output(self, directory, message="输出目录"):
+        def snapshot():
+            return {
+                path.relative_to(self.repo): path.read_bytes() if path.is_file() else None
+                for path in self.repo.rglob("*")
+                if ".git" not in path.relative_to(self.repo).parts
+            }
+
+        before = snapshot()
+        output = self.release("-SkipBuild", "-AllowDirty", "-Version", "0.2.0", "-OutDir", str(directory), success=False)
+        self.assertIn(message, output)
+        self.assertEqual(snapshot(), before)
+        self.assertEqual(self.commands(), "")
+        self.assertFalse((self.repo / "release").exists())
+
     def verify_artifacts(self, directory, version=VERSION):
         archive = directory / f"nianlai-{version}-windows-x64-portable.zip"
         checksum = directory / f"nianlai-{version}.sha256"
@@ -105,8 +120,15 @@ class ReleaseTests(unittest.TestCase):
             self.assertEqual(set(contents.namelist()), {"nianlai.exe", "使用说明.txt"})
             self.assertEqual(contents.read("nianlai.exe"), self.binary.read_bytes())
             instructions = contents.read("使用说明.txt").decode("utf-8-sig")
-            for text in ("WebView2", "SmartScreen", "更多信息 → 仍要运行", r"%LOCALAPPDATA%\Nianlai\g0\data", "Ctrl+Alt+Shift+Q"):
+            for text in (
+                "WebView2", "SmartScreen", "更多信息 → 仍要运行", "Ctrl+`（反引号键）", "可在设置文件里改",
+                r"%APPDATA%\Nianlai\settings.json", r"%LOCALAPPDATA%\Nianlai\data",
+                r"%LOCALAPPDATA%\Nianlai\logs", "托盘图标右键“退出”", "Ctrl+Alt+Shift+Q",
+                "只运行一个实例", "再次双击会呼出已在运行的面板", "开机自启", "在托盘菜单里勾选",
+            ):
                 self.assertIn(text, instructions)
+            for text in ("Alt+V", "Ctrl+Shift+F12", "NIANLAI_HOTKEY", "NIANLAI_G0_DATA_DIR", "\\g0\\"):
+                self.assertNotIn(text, instructions)
         self.assertEqual(checksum.read_text(encoding="utf-8-sig").strip(), hashlib.sha256(archive.read_bytes()).hexdigest() + " *" + archive.name)
         self.assertEqual(info["version"], version)
         self.assertEqual(info["git_commit"], self.commit)
@@ -128,34 +150,78 @@ class ReleaseTests(unittest.TestCase):
 
     def test_skip_build_packages_shared_target_and_defaults(self):
         self.release("-SkipBuild")
-        info = self.verify_artifacts(self.repo / "dist")
+        info = self.verify_artifacts(self.repo / "release")
         self.assertTrue(info["skip_build"])
         self.assertFalse(info["git_dirty"])
+        self.assertFalse((self.repo / "dist").exists())
         self.assertIn("pnpm install --frozen-lockfile", self.commands())
         self.assertNotIn("tauri build", self.commands())
 
     def test_build_invocation(self):
         self.release()
-        info = self.verify_artifacts(self.repo / "dist")
+        info = self.verify_artifacts(self.repo / "release")
         self.assertFalse(info["skip_build"])
         self.assertEqual(self.commands().count("pnpm tauri build --no-bundle"), 1)
 
     def test_version_override_and_relative_output_with_spaces(self):
         version = "0.2.0-rc.2+test.1"
         before = self.config.read_bytes()
-        self.release("-SkipBuild", "-Version", version, "-OutDir", "dist/输出 文件")
-        info = self.verify_artifacts(self.repo / "dist/输出 文件", version)
+        self.release("-SkipBuild", "-Version", version, "-OutDir", "release/输出 文件")
+        info = self.verify_artifacts(self.repo / "release/输出 文件", version)
         self.assertTrue(info["git_dirty"])
         self.assertIn('version = "' + version + '"', self.manifest.read_text(encoding="utf-8-sig"))
         self.assertIn('example = { version = "1.2.3" }', self.manifest.read_text(encoding="utf-8-sig"))
         self.assertEqual(json.loads(self.package.read_text(encoding="utf-8-sig"))["version"], version)
         self.assertEqual(self.config.read_bytes(), before)
 
+    def test_rejects_frontend_output_directory_and_descendants(self):
+        (self.repo / "dist").mkdir()
+        (self.repo / "dist/保留.txt").write_text("保留前端构建产物", encoding="utf-8")
+        for directory in (
+            "dist", "dist/portable", "release/../dist/portable", "DIST/portable/",
+            self.repo / "dist", self.repo / "dist/portable",
+        ):
+            with self.subTest(directory=str(directory)):
+                self.assert_rejected_output(directory)
+
+    def test_rejects_custom_frontend_output_directory(self):
+        self.config.write_text(json.dumps({"build": {"frontendDist": "../网页 输出"}}), encoding="utf-8")
+        for directory in ("网页 输出", "网页 输出/portable", self.repo / "网页 输出/portable"):
+            with self.subTest(directory=str(directory)):
+                self.assert_rejected_output(directory)
+
+    def test_rejects_absolute_frontend_output_directory(self):
+        frontend = self.repo / "网页 输出"
+        self.config.write_text(json.dumps({"build": {"frontendDist": str(frontend)}}), encoding="utf-8")
+        for directory in (frontend, frontend / "portable"):
+            with self.subTest(directory=str(directory)):
+                self.assert_rejected_output(directory)
+
+    def test_rejects_protected_output_directories(self):
+        for directory in (".", self.repo, "src", "src-tauri", "SRC/", "src-tauri/..", self.repo / "src-tauri"):
+            with self.subTest(directory=str(directory)):
+                self.assert_rejected_output(directory)
+
+    def test_allows_frontend_prefix_neighbor(self):
+        self.release("-SkipBuild", "-OutDir", "dist-portable")
+        self.verify_artifacts(self.repo / "dist-portable")
+
+    def test_allows_absolute_output_directory(self):
+        directory = self.repo / "release/绝对 输出"
+        self.release("-SkipBuild", "-OutDir", str(directory))
+        self.verify_artifacts(directory)
+
+    def test_rejects_missing_or_invalid_frontend_directory(self):
+        for config in ({}, {"build": {}}, {"build": {"frontendDist": ""}}, {"build": {"frontendDist": ["../dist"]}}):
+            with self.subTest(config=config):
+                self.config.write_text(json.dumps(config), encoding="utf-8")
+                self.assert_rejected_output("release", message="frontendDist")
+
     def test_rejects_untracked_changes(self):
         (self.repo / "未提交.txt").write_text("未提交", encoding="utf-8")
         self.release("-SkipBuild", success=False)
         self.assertEqual(self.commands(), "")
-        self.assertFalse((self.repo / "dist").exists())
+        self.assertFalse((self.repo / "release").exists())
 
     def test_rejects_staged_changes(self):
         self.package.write_text('{"name":"nianlai","version":"0.2.0"}', encoding="utf-8")
@@ -168,7 +234,7 @@ class ReleaseTests(unittest.TestCase):
         self.release("-SkipBuild", success=False)
         self.assertEqual(self.commands(), "")
         self.release("-SkipBuild", "-AllowDirty")
-        info = self.verify_artifacts(self.repo / "dist")
+        info = self.verify_artifacts(self.repo / "release")
         self.assertTrue(info["git_dirty"])
         self.assertEqual(json.loads(self.package.read_text(encoding="utf-8-sig"))["version"], VERSION)
 
@@ -183,12 +249,12 @@ class ReleaseTests(unittest.TestCase):
     def test_missing_binary_does_not_create_archive(self):
         self.binary.unlink()
         self.release("-SkipBuild", success=False)
-        self.assertFalse((self.repo / "dist").exists())
+        self.assertFalse((self.repo / "release").exists())
         self.assertNotIn("tauri build", self.commands())
 
     def test_rejects_second_tauri_version_source(self):
         before = self.manifest.read_bytes(), self.package.read_bytes()
-        self.config.write_text('{"version":"0.0.0"}', encoding="utf-8")
+        self.config.write_text('{"version":"0.0.0","build":{"frontendDist":"../dist"}}', encoding="utf-8")
         self.release("-SkipBuild", "-AllowDirty", "-Version", "0.2.0", success=False)
         self.assertEqual((self.manifest.read_bytes(), self.package.read_bytes()), before)
         self.assertEqual(self.commands(), "")
@@ -197,13 +263,13 @@ class ReleaseTests(unittest.TestCase):
         # 第一次安装成功，只有正式构建步骤失败，已有旧程序也不得继续打包。
         self.stub("pnpm", 'if "%1"=="tauri" exit /b 23\r\nexit /b 0')
         self.release(success=False)
-        self.assertFalse((self.repo / "dist").exists())
+        self.assertFalse((self.repo / "release").exists())
 
     def test_failed_install_stops_before_build(self):
         self.env["NIANLAI_RELEASE_TEST_FAIL"] = "pnpm"
         self.release(success=False)
         self.assertNotIn("tauri build", self.commands())
-        self.assertFalse((self.repo / "dist").exists())
+        self.assertFalse((self.repo / "release").exists())
 
 
 if __name__ == "__main__":
