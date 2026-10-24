@@ -25,6 +25,7 @@
   let busy = $state(false);
   let composing = false;
   let compositionEnded = -Infinity;
+  let firstInput: { session: number; readyAt: number } | null = null;
   let input: HTMLInputElement;
   let list: HTMLUListElement;
   let timing = $state<Timing | null>(null);
@@ -157,6 +158,14 @@
     }
   }
 
+  // 诊断：补发后搜索框收到的第一个输入，是直接上屏（insertText）还是进了输入法（insertCompositionText）。只报类型，不报内容。
+  function reportFirstInput(event: InputEvent) {
+    if (firstInput?.session !== session) return;
+    const afterReadyMs = performance.now() - firstInput.readyAt;
+    firstInput = null;
+    void invoke("report_search_input", { session, inputType: event.inputType, composing: event.isComposing, afterReadyMs }).catch(() => {});
+  }
+
   function searchPointer(event: PointerEvent) {
     if (mode === "quick") {
       event.preventDefault();
@@ -229,9 +238,15 @@
         if (!visible || payload.session !== session) return;
         mode = payload.mode;
         await tick();
-        if (!disposed && visible && payload.session === session) {
-          input.focus({ preventScroll: true });
-          if (document.activeElement === input) await command("search_ready", { session });
+        if (disposed || !visible || payload.session !== session) return;
+        input.focus({ preventScroll: true });
+        // 输入法要等 Blink 把“这是搜索框”报给浏览器进程、TSF 切到可编辑文档后才接管按键；没有用户手势时
+        // 这份报告要等下一帧。等两帧再让后端补发首键，否则首字母可能绕过输入法直接上屏。
+        await new Promise<void>((resolve) => frame(resolve));
+        await new Promise<void>((resolve) => frame(resolve));
+        if (!disposed && visible && payload.session === session && document.activeElement === input) {
+          firstInput = { session: payload.session, readyAt: performance.now() };
+          await command("search_ready", { session });
         }
       });
       await subscribe<SessionEvent>("panel:hidden", (payload) => {
@@ -295,6 +310,7 @@
       spellcheck="false"
       autocomplete="off"
       onpointerdown={searchPointer}
+      onbeforeinput={reportFirstInput}
       oncompositionstart={() => { composing = true; }}
       oncompositionend={() => { composing = false; compositionEnded = performance.now(); searchRevision += 1; }}
     />

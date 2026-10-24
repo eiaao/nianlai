@@ -1,7 +1,9 @@
 use serde::Serialize;
 use std::time::{Duration, Instant};
 
-pub const REPLAY_WAIT: Duration = Duration::from_millis(500);
+// 切到搜索模式时补发首键的总等待上限。前端聚焦后还要等两帧让输入法接管，
+// 实测最慢的一次补发已到 464 ms，500 ms 不够余量，超时整批按键会被丢弃。
+pub const REPLAY_WAIT: Duration = Duration::from_millis(800);
 pub const REPLAY_CAPACITY: usize = 32;
 
 pub type Result<T> = std::result::Result<T, String>;

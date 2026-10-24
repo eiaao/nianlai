@@ -83,6 +83,25 @@ fn report_painted(app: AppHandle, session: u64) -> Result<(), String> {
         },
     )
 }
+// 只记输入类型：insertText 表示首字直接上屏，insertCompositionText 表示进了输入法。不记内容。
+#[tauri::command]
+fn report_search_input(
+    app: AppHandle,
+    session: u64,
+    input_type: String,
+    composing: bool,
+    after_ready_ms: f64,
+) {
+    let input_type: String = input_type
+        .chars()
+        .filter(char::is_ascii_alphabetic)
+        .take(40)
+        .collect();
+    app.state::<Controller>().logger.event(
+        "search_first_input",
+        json!({"session":session,"input_type":input_type,"composing":composing,"after_ready_ms":after_ready_ms}),
+    );
+}
 #[tauri::command]
 fn quit_prototype(app: AppHandle) -> Result<(), String> {
     app.state::<Controller>()
@@ -178,6 +197,7 @@ pub fn run() {
             hide_panel,
             paste_item,
             report_painted,
+            report_search_input,
             quit_prototype
         ])
         .setup(|app| {

@@ -1,6 +1,6 @@
 [
   { "process": "WindowsTerminal.exe", "class": "CASCADIA_HOSTING_WINDOW_CLASS", "key": "Ctrl+Shift+V", "as_text": "shell" },
-  { "class": "ConsoleWindowClass", "key": "Ctrl+Shift+V", "as_text": "shell" },
+  { "class": "ConsoleWindowClass", "key": "Ctrl+V", "as_text": "shell" },
   { "process": "putty.exe", "key": "Shift+Insert", "as_text": "shell" },
   { "process": "kitty.exe", "key": "Shift+Insert", "as_text": "shell" },
   { "process": "mintty.exe", "key": "Shift+Insert", "as_text": "shell" },

@@ -143,9 +143,10 @@ mod tests {
                 .index,
             1
         );
+        // 旧控制台默认没开 InterceptCopyPaste，Ctrl+Shift+V 会变成 ^V；Ctrl+V 才粘贴。
         assert_eq!(
             table.select("cmd.exe", "ConsoleWindowClass").key,
-            Key::CtrlShiftV
+            Key::CtrlV
         );
         for process in ["putty.exe", "kitty.exe", "mintty.exe"] {
             assert_eq!(table.select(process, "").key, Key::ShiftInsert);
