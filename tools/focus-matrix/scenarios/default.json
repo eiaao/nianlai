@@ -1,0 +1,690 @@
+{
+  "version": 1,
+  "timeouts": {
+    "startup_ms": 30000,
+    "shown_ms": 3000,
+    "search_ms": 3000,
+    "paste_ms": 6000,
+    "settle_ms": 1500,
+    "trial_ms": 20000
+  },
+  "scenarios": [
+    {
+      "id": "helper",
+      "name": "原生 EDIT 基准窗口",
+      "row": 1,
+      "enabled": true,
+      "note": "",
+      "requirements": {
+        "quick": "required",
+        "search": "required"
+      },
+      "target": {
+        "kind": "helper",
+        "program": null,
+        "args": [],
+        "process": "focus-matrix.exe",
+        "window_class": "NianlaiFocusMatrix",
+        "control": {
+          "class": null,
+          "control_type": null
+        },
+        "field": "",
+        "exclusive": false,
+        "single_line": false,
+        "fullscreen": false,
+        "second_monitor": false
+      },
+      "prepare": [
+        {
+          "action": "clear"
+        }
+      ],
+      "cleanup": [],
+      "expected": "{before}{pasted}",
+      "samples": [
+        {
+          "sample": 1,
+          "query": "world!"
+        },
+        {
+          "sample": 2,
+          "query": "second line: clipboard"
+        }
+      ],
+      "quick_digits": [
+        1,
+        2,
+        3
+      ],
+      "search_digit": 1
+    },
+    {
+      "id": "notepad",
+      "name": "记事本临时文件",
+      "row": 1,
+      "enabled": true,
+      "note": "",
+      "requirements": {
+        "quick": "required",
+        "search": "required"
+      },
+      "target": {
+        "kind": "file",
+        "program": "%WINDIR%\\System32\\notepad.exe",
+        "args": [
+          "{file}"
+        ],
+        "process": "notepad.exe",
+        "window_class": "Notepad",
+        "control": {
+          "class": null,
+          "control_type": 50004
+        },
+        "field": "",
+        "exclusive": true,
+        "single_line": false,
+        "fullscreen": false,
+        "second_monitor": false
+      },
+      "prepare": [
+        {
+          "action": "clear"
+        }
+      ],
+      "cleanup": [
+        {
+          "action": "key",
+          "chord": "Ctrl+S"
+        }
+      ],
+      "expected": "{pasted}",
+      "samples": [
+        {
+          "sample": 1,
+          "query": "world!"
+        },
+        {
+          "sample": 2,
+          "query": "second line: clipboard"
+        }
+      ],
+      "quick_digits": [
+        1,
+        2,
+        3
+      ],
+      "search_digit": 1
+    },
+    {
+      "id": "chrome-input",
+      "name": "Chrome 网页 input",
+      "row": 1,
+      "enabled": true,
+      "note": "",
+      "requirements": {
+        "quick": "required",
+        "search": "required"
+      },
+      "target": {
+        "kind": "web",
+        "program": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+        "args": [
+          "--user-data-dir={profile}",
+          "--host-resolver-rules=MAP * ~NOTFOUND",
+          "--proxy-server=http://127.0.0.1:9",
+          "--no-first-run",
+          "--no-default-browser-check",
+          "--disable-sync",
+          "--disable-extensions",
+          "--disable-background-networking",
+          "--force-renderer-accessibility",
+          "--new-window",
+          "{url}"
+        ],
+        "process": "chrome.exe",
+        "window_class": "Chrome_WidgetWin_1",
+        "control": {
+          "class": null,
+          "control_type": null
+        },
+        "field": "input",
+        "exclusive": false,
+        "single_line": true,
+        "fullscreen": false,
+        "second_monitor": false,
+        "address_control": {
+          "class": "OmniboxViewViews",
+          "control_type": 50004
+        }
+      },
+      "prepare": [
+        {
+          "action": "clear"
+        }
+      ],
+      "cleanup": [],
+      "expected": "{pasted}",
+      "samples": [
+        {
+          "sample": 1,
+          "query": "world!"
+        },
+        {
+          "sample": 11,
+          "query": "sample item 11。"
+        }
+      ],
+      "quick_digits": [
+        1,
+        2,
+        3
+      ],
+      "search_digit": 1
+    },
+    {
+      "id": "chrome-textarea",
+      "name": "Chrome 网页 textarea",
+      "row": 1,
+      "enabled": true,
+      "note": "",
+      "requirements": {
+        "quick": "required",
+        "search": "required"
+      },
+      "target": {
+        "kind": "web",
+        "program": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+        "args": [
+          "--user-data-dir={profile}",
+          "--host-resolver-rules=MAP * ~NOTFOUND",
+          "--proxy-server=http://127.0.0.1:9",
+          "--no-first-run",
+          "--no-default-browser-check",
+          "--disable-sync",
+          "--disable-extensions",
+          "--disable-background-networking",
+          "--force-renderer-accessibility",
+          "--new-window",
+          "{url}"
+        ],
+        "process": "chrome.exe",
+        "window_class": "Chrome_WidgetWin_1",
+        "control": {
+          "class": null,
+          "control_type": null
+        },
+        "field": "textarea",
+        "exclusive": false,
+        "single_line": false,
+        "fullscreen": false,
+        "second_monitor": false,
+        "address_control": {
+          "class": "OmniboxViewViews",
+          "control_type": 50004
+        }
+      },
+      "prepare": [
+        {
+          "action": "clear"
+        }
+      ],
+      "cleanup": [],
+      "expected": "{pasted}",
+      "samples": [
+        {
+          "sample": 1,
+          "query": "world!"
+        },
+        {
+          "sample": 2,
+          "query": "second line: clipboard"
+        }
+      ],
+      "quick_digits": [
+        1,
+        2,
+        3
+      ],
+      "search_digit": 1
+    },
+    {
+      "id": "chrome-editable",
+      "name": "Chrome 网页 editable",
+      "row": 1,
+      "enabled": true,
+      "note": "",
+      "requirements": {
+        "quick": "required",
+        "search": "required"
+      },
+      "target": {
+        "kind": "web",
+        "program": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+        "args": [
+          "--user-data-dir={profile}",
+          "--host-resolver-rules=MAP * ~NOTFOUND",
+          "--proxy-server=http://127.0.0.1:9",
+          "--no-first-run",
+          "--no-default-browser-check",
+          "--disable-sync",
+          "--disable-extensions",
+          "--disable-background-networking",
+          "--force-renderer-accessibility",
+          "--new-window",
+          "{url}"
+        ],
+        "process": "chrome.exe",
+        "window_class": "Chrome_WidgetWin_1",
+        "control": {
+          "class": null,
+          "control_type": null
+        },
+        "field": "editable",
+        "exclusive": false,
+        "single_line": false,
+        "fullscreen": false,
+        "second_monitor": false,
+        "address_control": {
+          "class": "OmniboxViewViews",
+          "control_type": 50004
+        }
+      },
+      "prepare": [
+        {
+          "action": "clear"
+        }
+      ],
+      "cleanup": [],
+      "expected": "{pasted}",
+      "samples": [
+        {
+          "sample": 1,
+          "query": "world!"
+        },
+        {
+          "sample": 2,
+          "query": "second line: clipboard"
+        }
+      ],
+      "quick_digits": [
+        1,
+        2,
+        3
+      ],
+      "search_digit": 1
+    },
+    {
+      "id": "chrome-address",
+      "name": "Chrome 地址栏",
+      "row": 2,
+      "enabled": true,
+      "note": "",
+      "requirements": {
+        "quick": "required",
+        "search": "best_effort"
+      },
+      "target": {
+        "kind": "address",
+        "program": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+        "args": [
+          "--user-data-dir={profile}",
+          "--host-resolver-rules=MAP * ~NOTFOUND",
+          "--proxy-server=http://127.0.0.1:9",
+          "--no-first-run",
+          "--no-default-browser-check",
+          "--disable-sync",
+          "--disable-extensions",
+          "--disable-background-networking",
+          "--force-renderer-accessibility",
+          "--new-window",
+          "{url}"
+        ],
+        "process": "chrome.exe",
+        "window_class": "Chrome_WidgetWin_1",
+        "control": {
+          "class": "OmniboxViewViews",
+          "control_type": 50004
+        },
+        "field": "input",
+        "exclusive": false,
+        "single_line": true,
+        "fullscreen": false,
+        "second_monitor": false,
+        "address_control": {
+          "class": "OmniboxViewViews",
+          "control_type": 50004
+        }
+      },
+      "prepare": [],
+      "cleanup": [],
+      "expected": "{pasted}",
+      "samples": [
+        {
+          "sample": 1,
+          "query": "world!"
+        },
+        {
+          "sample": 11,
+          "query": "sample item 11。"
+        }
+      ],
+      "quick_digits": [
+        1,
+        2,
+        3
+      ],
+      "search_digit": 1
+    },
+    {
+      "id": "chrome-bookmark",
+      "name": "Chrome 收藏夹气泡",
+      "row": 2,
+      "enabled": true,
+      "note": "",
+      "requirements": {
+        "quick": "required",
+        "search": "best_effort"
+      },
+      "target": {
+        "kind": "bookmark",
+        "program": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+        "args": [
+          "--user-data-dir={profile}",
+          "--host-resolver-rules=MAP * ~NOTFOUND",
+          "--proxy-server=http://127.0.0.1:9",
+          "--no-first-run",
+          "--no-default-browser-check",
+          "--disable-sync",
+          "--disable-extensions",
+          "--disable-background-networking",
+          "--force-renderer-accessibility",
+          "--new-window",
+          "{url}"
+        ],
+        "process": "chrome.exe",
+        "window_class": "Chrome_WidgetWin_1",
+        "control": {
+          "class": null,
+          "control_type": 50004
+        },
+        "field": "input",
+        "exclusive": false,
+        "single_line": true,
+        "fullscreen": false,
+        "second_monitor": false,
+        "address_control": {
+          "class": "OmniboxViewViews",
+          "control_type": 50004
+        }
+      },
+      "prepare": [],
+      "cleanup": [
+        {
+          "action": "key",
+          "chord": "Esc"
+        }
+      ],
+      "expected": "{pasted}",
+      "samples": [
+        {
+          "sample": 1,
+          "query": "world!"
+        },
+        {
+          "sample": 11,
+          "query": "sample item 11。"
+        }
+      ],
+      "quick_digits": [
+        1,
+        2,
+        3
+      ],
+      "search_digit": 1
+    },
+    {
+      "id": "explorer-rename",
+      "name": "资源管理器重命名",
+      "row": 3,
+      "enabled": true,
+      "note": "",
+      "requirements": {
+        "quick": "required",
+        "search": "best_effort"
+      },
+      "target": {
+        "kind": "explorer",
+        "program": "%WINDIR%\\explorer.exe",
+        "args": [
+          "/select,{file}"
+        ],
+        "process": "explorer.exe",
+        "window_class": "CabinetWClass",
+        "control": {
+          "class": null,
+          "control_type": 50004
+        },
+        "field": "",
+        "exclusive": false,
+        "single_line": true,
+        "fullscreen": false,
+        "second_monitor": false
+      },
+      "prepare": [],
+      "cleanup": [
+        {
+          "action": "key",
+          "chord": "Esc"
+        }
+      ],
+      "expected": "{pasted}{before_ext}",
+      "samples": [
+        {
+          "sample": 11,
+          "query": "sample item 11。"
+        },
+        {
+          "sample": 12,
+          "query": "sample item 12。"
+        }
+      ],
+      "quick_digits": [
+        1,
+        2,
+        3
+      ],
+      "search_digit": 1
+    },
+    {
+      "id": "edge-fullscreen",
+      "name": "Edge 全屏网页 textarea",
+      "row": 8,
+      "enabled": true,
+      "note": "",
+      "requirements": {
+        "quick": "required",
+        "search": "required"
+      },
+      "target": {
+        "kind": "web",
+        "program": "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+        "args": [
+          "--user-data-dir={profile}",
+          "--host-resolver-rules=MAP * ~NOTFOUND",
+          "--proxy-server=http://127.0.0.1:9",
+          "--no-first-run",
+          "--no-default-browser-check",
+          "--disable-sync",
+          "--disable-extensions",
+          "--disable-background-networking",
+          "--force-renderer-accessibility",
+          "--new-window",
+          "--start-fullscreen",
+          "{url}"
+        ],
+        "process": "msedge.exe",
+        "window_class": "Chrome_WidgetWin_1",
+        "control": {
+          "class": null,
+          "control_type": null
+        },
+        "field": "textarea",
+        "exclusive": false,
+        "single_line": false,
+        "fullscreen": true,
+        "second_monitor": false,
+        "address_control": {
+          "class": "OmniboxViewViews",
+          "control_type": 50004
+        }
+      },
+      "prepare": [
+        {
+          "action": "clear"
+        }
+      ],
+      "cleanup": [],
+      "expected": "{pasted}",
+      "samples": [
+        {
+          "sample": 1,
+          "query": "world!"
+        },
+        {
+          "sample": 2,
+          "query": "second line: clipboard"
+        }
+      ],
+      "quick_digits": [
+        1,
+        2,
+        3
+      ],
+      "search_digit": 1
+    },
+    {
+      "id": "chrome-second",
+      "name": "Chrome 第二屏网页 textarea",
+      "row": 8,
+      "enabled": true,
+      "note": "",
+      "requirements": {
+        "quick": "required",
+        "search": "required"
+      },
+      "target": {
+        "kind": "web",
+        "program": "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+        "args": [
+          "--user-data-dir={profile}",
+          "--host-resolver-rules=MAP * ~NOTFOUND",
+          "--proxy-server=http://127.0.0.1:9",
+          "--no-first-run",
+          "--no-default-browser-check",
+          "--disable-sync",
+          "--disable-extensions",
+          "--disable-background-networking",
+          "--force-renderer-accessibility",
+          "--new-window",
+          "{url}"
+        ],
+        "process": "chrome.exe",
+        "window_class": "Chrome_WidgetWin_1",
+        "control": {
+          "class": null,
+          "control_type": null
+        },
+        "field": "textarea",
+        "exclusive": false,
+        "single_line": false,
+        "fullscreen": false,
+        "second_monitor": true,
+        "address_control": {
+          "class": "OmniboxViewViews",
+          "control_type": 50004
+        }
+      },
+      "prepare": [
+        {
+          "action": "clear"
+        }
+      ],
+      "cleanup": [],
+      "expected": "{pasted}",
+      "samples": [
+        {
+          "sample": 1,
+          "query": "world!"
+        },
+        {
+          "sample": 2,
+          "query": "second line: clipboard"
+        }
+      ],
+      "quick_digits": [
+        1,
+        2,
+        3
+      ],
+      "search_digit": 1
+    },
+    {
+      "id": "wps-writer",
+      "name": "WPS 文字（未验证）",
+      "row": 5,
+      "enabled": false,
+      "note": "未验证；将 program 改为本机 wps.exe 的完整路径，关闭所有 WPS 文档后再显式 --only wps-writer。UIA 类型可能需要调整。",
+      "requirements": {
+        "quick": "required",
+        "search": "required"
+      },
+      "target": {
+        "kind": "file",
+        "program": "C:\\Program Files\\Kingsoft\\WPS Office\\wps.exe",
+        "args": [
+          "{file}"
+        ],
+        "process": "wps.exe",
+        "window_class": "OpusApp",
+        "control": {
+          "class": null,
+          "control_type": null
+        },
+        "field": "",
+        "exclusive": true,
+        "single_line": false,
+        "fullscreen": false,
+        "second_monitor": false
+      },
+      "prepare": [
+        {
+          "action": "clear"
+        }
+      ],
+      "cleanup": [
+        {
+          "action": "key",
+          "chord": "Ctrl+S"
+        }
+      ],
+      "expected": "{pasted}",
+      "samples": [
+        {
+          "sample": 1,
+          "query": "world!"
+        },
+        {
+          "sample": 2,
+          "query": "second line: clipboard"
+        }
+      ],
+      "quick_digits": [
+        1,
+        2,
+        3
+      ],
+      "search_digit": 1
+    }
+  ]
+}

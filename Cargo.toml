@@ -1,0 +1,10 @@
+[workspace]
+members = ["src-tauri", "tools/focus-probe", "tools/focus-matrix", "crates/nianlai-store", "tools/g0-store"]
+resolver = "3"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true
