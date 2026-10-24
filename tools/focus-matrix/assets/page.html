@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; form-action 'none'; connect-src 'none'">
+<title>NLFM loading</title>
+<style>
+body { font: 18px system-ui; margin: 40px; background: #f4f5f7; color: #17202a }
+input,textarea,[contenteditable] { display:block; width:80%; margin:12px 0 25px; padding:16px; border:2px solid #64748b; background:white; }
+textarea,[contenteditable] { min-height:120px; white-space:pre-wrap }
+</style>
+<h1>拈来 G0 焦点试验 · 本地隔离网页</h1>
+<form id="form"><label>单行输入<input id="input" aria-label="input" autocomplete="off" spellcheck="false"></label>
+<label>多行输入<textarea id="textarea" aria-label="textarea" spellcheck="false"></textarea></label>
+<label>可编辑区域<div id="editable" contenteditable="true" spellcheck="false" role="textbox" aria-label="editable"></div></label>
+<button type="submit">提交计数（不发送网络请求）</button></form>
+<script>
+"use strict";
+function normalize(s) { return s.replace(/\r\n/g, "\n").replace(/\r/g, "\n"); }
+function fnv(s) {
+  s = normalize(s);
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 0x01000193) >>> 0;
+  return h.toString(16).padStart(8, "0");
+}
+const params = new URLSearchParams(location.search);
+const token = params.get("t");
+if (!/^[a-zA-Z0-9-]+$/.test(token || "")) throw new Error("缺少本次运行标记");
+const ids = ["input","textarea","editable"];
+const fields = Object.fromEntries(ids.map(id => [id, document.getElementById(id)]));
+const counts = Object.fromEntries(ids.map(id => [id, {enter:0,esc:0,digit:0,chars:0}]));
+let submits = 0, blur = 0, focus = 0;
+let old;
+try { old = JSON.parse(window.name); } catch { old = {}; }
+const loads = old && old.token === token ? Number(old.loads || 0) + 1 : 1;
+window.name = JSON.stringify({token, loads});
+function value(id) { return normalize(id === "editable" ? fields[id].innerText : fields[id].value); }
+function update() {
+  const parts = ["NLFM","t="+token,"loads="+loads,"submit="+submits,"blur="+blur,"focus_count="+focus,
+    "active="+(document.activeElement.id || "none"),"focus="+Number(document.hasFocus())];
+  for (const id of ids) {
+    const text = value(id);
+    parts.push(id+"_len="+text.length,id+"_h="+fnv(text));
+    for (const key of ["enter","esc","digit","chars"]) parts.push(id+"_"+key+"="+counts[id][key]);
+  }
+  document.title = parts.join("|")+"|END";
+}
+for (const id of ids) {
+  const el = fields[id], seed = "NLFM-"+id+"-"+token;
+  if (id === "editable") el.innerText = seed; else el.value = seed;
+  el.addEventListener("keydown", e => {
+    if (e.key === "Enter") counts[id].enter++;
+    else if (e.key === "Escape") counts[id].esc++;
+    else if (/^[0-9]$/.test(e.key)) counts[id].digit++;
+    else if (e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey) counts[id].chars++;
+    update();
+  });
+  el.addEventListener("input",update);
+}
+document.getElementById("form").addEventListener("submit",e=>{e.preventDefault();submits++;update();});
+window.addEventListener("blur",()=>{blur++;update();});
+window.addEventListener("focus",()=>{focus++;update();});
+document.addEventListener("focusin",update);
+fields[params.get("field") || "input"].focus();
+update();
+setInterval(update,50);
+</script></html>
