@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, tick, untrack } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
+  import { getVersion } from "@tauri-apps/api/app";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
   type HistoryItem = { id: number; kind: string; preview: string; file_names: string[]; source: string; copied_ms: number; copy_count: number; partial: boolean };
@@ -35,6 +36,7 @@
   let list: HTMLUListElement;
   let timing = $state<Timing | null>(null);
   let message = $state("");
+  let version = $state("");
   let searchItems = $state<HistoryItem[]>([]);
   let searchedQuery = $state("");
   let searchRevision = $state(0);
@@ -180,6 +182,7 @@
 
   onMount(() => {
     let disposed = false;
+    void getVersion().then((value) => { if (!disposed) version = value; }).catch(() => {});
     const unlisten: UnlistenFn[] = [];
     const frames = new Set<number>();
     let fetching = false;
@@ -362,5 +365,6 @@
       <!-- 面板常压在输入框上方，按钮容易被误点，退出只留快捷键。 -->
       <span class="quit">退出：Ctrl+Alt+Shift+Q</span>
     </div>
+    {#if version}<p class="version">v{version}</p>{/if}
   </footer>
 </main>
