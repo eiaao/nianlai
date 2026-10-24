@@ -96,25 +96,14 @@ impl History {
         }
     }
     pub fn initialize(&self) {
-        let specified = std::env::var_os("NIANLAI_G0_DATA_DIR");
-        let location = if specified.is_some() {
-            "环境变量指定"
-        } else {
-            "默认位置"
-        };
-        let directory = specified.map(PathBuf::from).or_else(|| {
-            std::env::var_os("LOCALAPPDATA").map(|base| PathBuf::from(base).join("Nianlai/g0/data"))
-        });
-        if let Some(path) = &directory {
-            let _ = self.directory.set(path.clone());
-        }
-        let opened = directory
-            .ok_or(nianlai_store::Error::Invalid("data_directory_missing"))
-            .and_then(|path| {
-                *self.application_guard.lock().unwrap() =
-                    Some(nianlai_store::application_guard(&path)?);
-                Store::open(&path, self.hash)
-            });
+        let location = self.logger.directories.data_source;
+        let directory = self.logger.directories.data.clone();
+        let _ = self.directory.set(directory.clone());
+        let opened = (|| {
+            *self.application_guard.lock().unwrap() =
+                Some(nianlai_store::application_guard(&directory)?);
+            Store::open(&directory, self.hash)
+        })();
         match opened {
             Ok(store) => {
                 let mut report = serde_json::to_value(store.report()).unwrap();
