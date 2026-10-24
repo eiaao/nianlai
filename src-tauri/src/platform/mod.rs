@@ -59,7 +59,7 @@ pub enum HookEvent {
 // 管理员提示停留时面板所处的模式，决定停留期间按键是放行给目标还是吞掉（M0-6b）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HintMode {
-    // 快速模式：面板不激活，目标仍有焦点，按键放行给目标。
+    // 快速模式：面板不激活，目标仍有焦点。带 Ctrl / Alt / Win 的组合键放行给目标，普通键吞掉。
     Quick,
     // 搜索模式：面板有焦点，按键吞掉，不进搜索框。
     Search,
@@ -77,9 +77,9 @@ impl HintMode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HintEnd {
     Escape,
-    // 快速模式：这个键放行给了目标（例如 Ctrl+V 里的 V）。
+    // 这个键放行给了目标：快速模式下带 Ctrl / Alt / Win 的组合键（例如 Ctrl+V 里的 V），或搜索模式下面板已被切走。
     KeyPassthrough,
-    // 搜索模式：这个键被吞掉了。
+    // 这个键被吞掉了：快速模式下的普通键（数字、字母、Enter……），或搜索模式下的非修饰键。
     KeyConsumed,
 }
 impl HintEnd {

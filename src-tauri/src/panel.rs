@@ -788,8 +788,8 @@ impl Panel {
             dwell: Some(dwell),
             ended_by: None,
         });
-        // M0-6b：让钩子按停留规则处理按键（快速模式放行给目标、搜索模式吞掉，都立即收起）。没挂上只记日志，
-        // 停留照旧（按键退回 M0-6 的处理），到点、Esc、呼出键、点面板外照样收起。
+        // M0-6b：让钩子按停留规则处理按键（快速模式组合键放行给目标、普通键吞掉；搜索模式吞掉；都立即收起）。
+        // 没挂上只记日志，停留照旧（按键退回 M0-6 的处理），到点、Esc、呼出键、点面板外照样收起。
         let (hint_keys, hint_keys_error) = self.arm_hint_keys();
         // target_foreground：停留开始时目标是否仍在前台（快速模式应为 true；搜索模式前台是面板，为 false）。
         self.log(logger, "elevated_hint_shown", json!({
@@ -1007,9 +1007,9 @@ impl Panel {
                 self.end_hint("outside_click");
                 self.hide(logger)?;
             }
-            // 管理员提示停留期间的按键（M0-6b）：快速模式下这个键已放行给目标（按下时就报）；搜索模式下已吞掉
-            // （抬起时才报，抬起也已吞掉）；还有被吞的键按着时钩子会等最后一个抬起再报。这里立即收起，焦点按原逻辑还。
-            // 停留已结束（到点、其他路径先收了）就不再处理。
+            // 管理员提示停留期间的按键（M0-6b）：放行给目标的键（快速模式的组合键，key_passthrough）按下时就报；
+            // 吞掉的键（快速模式的普通键、搜索模式的键，key_consumed；Esc）抬起时才报，抬起也已吞掉；还有被吞的键
+            // 按着时钩子会等最后一个抬起再报。这里立即收起，焦点按原逻辑还。停留已结束（到点、其他路径先收了）就不再处理。
             Action::HintKey { session, end } if self.current(session) && self.dwelling() => {
                 self.log(
                     logger,

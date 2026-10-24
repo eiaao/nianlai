@@ -73,22 +73,29 @@ struct HintKey {
     // 这个键本身是 Ctrl / Shift / Alt / Win。
     modifier: bool,
     pressed: bool,
-    // 原逻辑本来就放行的组合：Win 组合、Alt+Tab、呼出键、退出 / 采集调试键。
+    // 按下时 Ctrl、Alt、Win 至少按着一个（取钩子原有的 modifiers() 结果，不另查）。
+    chord: bool,
+    // 样机自己的全局快捷键：呼出键、退出键 / 采集调试键（原逻辑里的 exit）。原逻辑放行，由全局快捷键处理。
+    shortcut: bool,
+    // 原逻辑放行的系统组合：Win 组合、Alt+Tab。
     system: bool,
     // 原逻辑吞了这个键的按下、还没见到抬起：按住不放的重复按下和最后的抬起仍归原逻辑。
     original: bool,
     // 面板持有前台。只在搜索模式下看：停留期间用户用 Alt+Tab 之类切走了，按键本来就到不了搜索框，
-    // 照快速模式的规则放行给当前前台并收起，不吞别的程序的键。
+    // 放行给当前前台并收起，不吞别的程序的键。
     focused: bool,
 }
 
 // 管理员提示停留期间按键怎么处理（M0-6b）。earlier 是停留规则先前对这个键按下的处置；
 // 返回处理方式和这个键之后的处置记录。
-// 快速模式：Esc 吞掉、抬起时收起；其他非修饰键放行给目标（Ctrl+V 直接粘进管理员窗口）并在按下时就请求收起。
+// 快速模式：按着 Ctrl / Alt / Win 的组合键（Ctrl+V、Ctrl+Z、Alt+Tab……）放行给目标并在按下时就请求收起，
+// 所以照提示按 Ctrl+V 能直接粘进管理员窗口；普通键（数字、字母、Enter、方向键、空格、Shift+字母……）吞掉、
+// 抬起时收起，想换一条按 2 不会把“2”打进目标；不带 Ctrl / Alt / Win 的 Esc 吞掉、抬起时收起。
 // 搜索模式：Esc 和其他非修饰键都吞掉（不进搜索框）、抬起时收起，焦点由收起按原逻辑还；面板已不在前台时
-// 照快速模式放行。
+// 放行给当前前台并收起（Esc 仍吞掉）。
 // 请求什么时候真发出去另由 hint_end 决定（还有吞掉的键按着就等它们抬起）。
-// 两种模式下修饰键和原逻辑本来就放行的组合（含呼出键）都放行、不收起；呼出键照旧经全局快捷键收起。
+// 两种模式下修饰键单独按都放行、不收起；呼出键、退出键交给全局快捷键（快速模式交回原逻辑）；
+// 搜索模式下 Win 组合、Alt+Tab 照旧放行、不收起。
 fn hint_route(key: HintKey, earlier: Option<Fate>) -> (Route, Option<Fate>) {
     let Some(mode) = key.mode else {
         return (Route::Original, earlier);
@@ -113,24 +120,31 @@ fn hint_route(key: HintKey, earlier: Option<Fate>) -> (Route, Option<Fate>) {
         };
         return (route, Some(fate));
     }
+    let passthrough = (
+        Route::Pass {
+            end: Some(HintEnd::KeyPassthrough),
+        },
+        Some(Fate::Pass),
+    );
+    let consumed = (
+        Route::Swallow { end: None },
+        Some(Fate::Swallow(HintEnd::KeyConsumed)),
+    );
+    let escape = (
+        Route::Swallow { end: None },
+        Some(Fate::Swallow(HintEnd::Escape)),
+    );
     match mode {
         // 搜索模式下原逻辑的吞键记录是首键补发前留下的，可能过时，不看。
-        HintMode::Quick if key.original || key.system => (Route::Original, None),
-        HintMode::Search if key.system => (Route::Pass { end: None }, None),
-        _ if key.vk == 0x1B => (
-            Route::Swallow { end: None },
-            Some(Fate::Swallow(HintEnd::Escape)),
-        ),
-        HintMode::Search if key.focused => (
-            Route::Swallow { end: None },
-            Some(Fate::Swallow(HintEnd::KeyConsumed)),
-        ),
-        HintMode::Quick | HintMode::Search => (
-            Route::Pass {
-                end: Some(HintEnd::KeyPassthrough),
-            },
-            Some(Fate::Pass),
-        ),
+        HintMode::Quick if key.original || key.shortcut => (Route::Original, None),
+        // 带 Ctrl / Alt / Win 的都按组合键放行，含 Alt+Tab、Win 组合、Ctrl+Esc；单按 Esc 维持原处理。
+        HintMode::Quick if key.chord => passthrough,
+        HintMode::Quick if key.vk == 0x1B => escape,
+        HintMode::Quick => consumed,
+        HintMode::Search if key.shortcut || key.system => (Route::Pass { end: None }, None),
+        HintMode::Search if key.vk == 0x1B => escape,
+        HintMode::Search if key.focused => consumed,
+        HintMode::Search => passthrough,
     }
 }
 
@@ -139,14 +153,21 @@ fn is_modifier(vk: u16) -> bool {
     matches!(vk, 0x10..=0x12 | 0x5B | 0x5C | 0xA0..=0xA5)
 }
 
-// 和 keyboard() 原逻辑里放行的组合一致（停留规则单独用，原逻辑那段没动）。
-fn system_combo(vk: u16, mods: Modifiers, hotkey: (u16, Modifiers)) -> bool {
+// 下面两个合起来和 keyboard() 原逻辑里放行的组合一致（停留规则单独用，原逻辑那段没动，测试钉住一致）。
+// 样机自己的全局快捷键：呼出键，以及原逻辑里的 exit（退出键 Ctrl+Alt+Shift+Q、采集调试键 Ctrl+Alt+Shift+L）。
+fn app_shortcut(vk: u16, mods: Modifiers, hotkey: (u16, Modifiers)) -> bool {
     let exit = matches!(vk, 0x51 | 0x4c)
         && mods == (Modifiers::CONTROL | Modifiers::ALT | Modifiers::SHIFT);
-    mods.contains(Modifiers::SUPER)
-        || (vk == 0x09 && mods.contains(Modifiers::ALT))
-        || (vk == hotkey.0 && mods == hotkey.1)
-        || exit
+    (vk == hotkey.0 && mods == hotkey.1) || exit
+}
+// 系统组合：Win 组合、Alt+Tab。
+fn system_combo(vk: u16, mods: Modifiers) -> bool {
+    mods.contains(Modifiers::SUPER) || (vk == 0x09 && mods.contains(Modifiers::ALT))
+}
+
+// Ctrl、Alt、Win 至少按着一个（Shift 不算）。
+fn chord(mods: Modifiers) -> bool {
+    mods.intersects(Modifiers::CONTROL | Modifiers::ALT | Modifiers::SUPER)
 }
 
 // 收起请求什么时候发（M0-6b）：还有被停留规则吞掉的键按着时先记着，等最后一个抬起再发——收起会卸钩，
@@ -220,12 +241,16 @@ impl Context {
         if vk > 255 {
             return None;
         }
+        // 修饰键状态和原逻辑一样取 modifiers()，每个按键事件只取一次。
+        let mods = modifiers();
         let (swallow, end) = self.hint_state.handle(HintKey {
             mode: Some(mode),
             vk,
             modifier: is_modifier(vk),
             pressed,
-            system: system_combo(vk, modifiers(), self.hotkey),
+            chord: chord(mods),
+            shortcut: app_shortcut(vk, mods, self.hotkey),
+            system: system_combo(vk, mods),
             original: self.swallowed[vk as usize],
             focused: super::window::foreground() == self.window,
         });
@@ -718,6 +743,8 @@ mod tests {
     const X: u16 = 0x58;
     const ENTER: u16 = 0x0D;
     const CTRL: u16 = 0xA2;
+    const ALT: u16 = 0xA4;
+    const SHIFT: u16 = 0xA0;
     const PASS: Route = Route::Pass { end: None };
     const SWALLOW: Route = Route::Swallow { end: None };
 
@@ -727,14 +754,29 @@ mod tests {
             vk,
             modifier: is_modifier(vk),
             pressed,
+            chord: false,
+            shortcut: false,
             system: false,
             original: false,
             // 搜索模式下面板通常持有前台；切走的情形单独测。
             focused: mode == HintMode::Search,
         }
     }
+    // 按着 Ctrl / Alt / Win 按的组合键。
+    fn chord_key(mut key: HintKey) -> HintKey {
+        key.chord = true;
+        key
+    }
+    // 呼出键、退出键（都带 Ctrl / Alt 之类，所以 chord 也为真）。
+    fn shortcut(mut key: HintKey) -> HintKey {
+        key.shortcut = true;
+        key.chord = true;
+        key
+    }
+    // Win 组合、Alt+Tab。
     fn system(mut key: HintKey) -> HintKey {
         key.system = true;
+        key.chord = true;
         key
     }
     fn original(mut key: HintKey) -> HintKey {
@@ -753,10 +795,66 @@ mod tests {
     // 表驱动用例：名称、输入、这个键先前的处置、期望的处理方式、期望的处置记录。
     type Case = (&'static str, HintKey, Option<Fate>, Route, Option<Fate>);
 
-    // 任务说明表格的每一格，外加重复按下、停留前按下的键。
+    // 快速模式（审查后的规则）：组合键放行并收起，普通键吞掉并收起，Esc / 呼出键 / 退出键 / 修饰键维持原处理。
     #[test]
-    fn hint_rules_cover_every_cell() {
-        use HintMode::{Quick, Search};
+    fn quick_mode_rules_cover_every_cell() {
+        use HintMode::Quick;
+        let passthrough = Route::Pass {
+            end: Some(HintEnd::KeyPassthrough),
+        };
+        let consumed = Fate::Swallow(HintEnd::KeyConsumed);
+        let escape = Fate::Swallow(HintEnd::Escape);
+        let pass = Fate::Pass;
+        let release_consumed = Route::Swallow {
+            end: Some(HintEnd::KeyConsumed),
+        };
+        #[rustfmt::skip]
+        let cases: Vec<Case> = vec![
+            // 1）按着 Ctrl / Alt / Win 的非修饰键：按下放行给目标并请求收起，抬起也放行。
+            ("Ctrl+V 按下", chord_key(key(Quick, V, true)), None, passthrough, Some(pass)),
+            ("Ctrl+V 抬起", key(Quick, V, false), Some(pass), PASS, None),
+            ("Ctrl+Z", chord_key(key(Quick, 0x5A, true)), None, passthrough, Some(pass)),
+            ("Ctrl+Enter", chord_key(key(Quick, ENTER, true)), None, passthrough, Some(pass)),
+            ("Alt+Tab", system(key(Quick, 0x09, true)), None, passthrough, Some(pass)),
+            ("Win+D", system(key(Quick, 0x44, true)), None, passthrough, Some(pass)),
+            ("Ctrl+Esc 按组合键处理", chord_key(key(Quick, ESC, true)), None, passthrough, Some(pass)),
+            // 2）没按着 Ctrl / Alt / Win 的普通键：吞掉，抬起也吞并收起。
+            ("数字 2 按下", key(Quick, 0x32, true), None, SWALLOW, Some(consumed)),
+            ("数字 2 抬起", key(Quick, 0x32, false), Some(consumed), release_consumed, None),
+            ("小键盘 2", key(Quick, 0x62, true), None, SWALLOW, Some(consumed)),
+            ("字母 V", key(Quick, V, true), None, SWALLOW, Some(consumed)),
+            ("Enter", key(Quick, ENTER, true), None, SWALLOW, Some(consumed)),
+            ("方向键", key(Quick, 0x28, true), None, SWALLOW, Some(consumed)),
+            ("空格", key(Quick, 0x20, true), None, SWALLOW, Some(consumed)),
+            ("Shift+字母（Shift 不算组合）", key(Quick, 0x41, true), None, SWALLOW, Some(consumed)),
+            // 3）Esc、呼出键、退出键维持原处理。
+            ("Esc 按下", key(Quick, ESC, true), None, SWALLOW, Some(escape)),
+            ("Esc 抬起", key(Quick, ESC, false), Some(escape), Route::Swallow { end: Some(HintEnd::Escape) }, None),
+            ("呼出键按下", shortcut(key(Quick, V, true)), None, Route::Original, None),
+            ("呼出键抬起", shortcut(key(Quick, V, false)), None, Route::Original, None),
+            ("退出键", shortcut(key(Quick, 0x51, true)), None, Route::Original, None),
+            // 按住不放的重复按下：照第一次的处置，不再请求收起；中途按下或松开 Ctrl 也不改。
+            ("Ctrl+V 重复按下", chord_key(key(Quick, V, true)), Some(pass), PASS, Some(pass)),
+            ("松开 Ctrl 后 V 重复按下", key(Quick, V, true), Some(pass), PASS, Some(pass)),
+            ("普通键按住后再按 Ctrl", chord_key(key(Quick, V, true)), Some(consumed), SWALLOW, Some(consumed)),
+            ("Esc 重复按下", key(Quick, ESC, true), Some(escape), SWALLOW, Some(escape)),
+            // 停留开始前按下、原逻辑已吞掉的键：重复按下和抬起都交回原逻辑配对。
+            ("原逻辑的键按下", original(key(Quick, V, true)), None, Route::Original, None),
+            ("原逻辑的组合键按下", original(chord_key(key(Quick, V, true))), None, Route::Original, None),
+            ("停留前按下的键抬起", key(Quick, V, false), None, Route::Original, None),
+            // 快速模式只看模式，focused 不影响。
+            ("focused 为真的普通键", focused(key(Quick, V, true)), None, SWALLOW, Some(consumed)),
+            ("focused 为真的组合键", focused(chord_key(key(Quick, V, true))), None, passthrough, Some(pass)),
+        ];
+        for (name, input, earlier, route, fate) in cases {
+            assert_eq!(hint_route(input, earlier), (route, fate), "{name}");
+        }
+    }
+
+    // 搜索模式：审查后不变。
+    #[test]
+    fn search_mode_rules_cover_every_cell() {
+        use HintMode::Search;
         let passthrough = Route::Pass {
             end: Some(HintEnd::KeyPassthrough),
         };
@@ -765,50 +863,29 @@ mod tests {
         let pass = Fate::Pass;
         #[rustfmt::skip]
         let cases: Vec<Case> = vec![
-            // Esc：两种模式都吞掉，抬起时收起（抬起也吞）。
-            ("快速 Esc 按下", key(Quick, ESC, true), None, SWALLOW, Some(escape)),
-            ("快速 Esc 抬起", key(Quick, ESC, false), Some(escape), Route::Swallow { end: Some(HintEnd::Escape) }, None),
-            ("搜索 Esc 按下", key(Search, ESC, true), None, SWALLOW, Some(escape)),
-            ("搜索 Esc 抬起", key(Search, ESC, false), Some(escape), Route::Swallow { end: Some(HintEnd::Escape) }, None),
-            // 呼出键：快速模式交回原逻辑（原逻辑放行，全局快捷键收起）；搜索模式直接放行。都不由停留规则收起。
-            ("快速 呼出键按下", system(key(Quick, V, true)), None, Route::Original, None),
-            ("快速 呼出键抬起", system(key(Quick, V, false)), None, Route::Original, None),
-            ("搜索 呼出键按下", system(key(Search, V, true)), None, PASS, None),
-            ("搜索 呼出键抬起", system(key(Search, V, false)), None, PASS, None),
-            // 其他非修饰键：快速模式放行并立即收起，抬起也放行；搜索模式吞掉，抬起也吞并收起。
-            ("快速 V 按下", key(Quick, V, true), None, passthrough, Some(pass)),
-            ("快速 V 抬起", key(Quick, V, false), Some(pass), PASS, None),
-            ("快速 字母 A", key(Quick, 0x41, true), None, passthrough, Some(pass)),
-            ("快速 数字 1", key(Quick, 0x31, true), None, passthrough, Some(pass)),
-            ("快速 小键盘 1", key(Quick, 0x61, true), None, passthrough, Some(pass)),
-            ("快速 Enter", key(Quick, ENTER, true), None, passthrough, Some(pass)),
-            ("快速 方向键", key(Quick, 0x28, true), None, passthrough, Some(pass)),
-            ("搜索 V 按下", key(Search, V, true), None, SWALLOW, Some(consumed)),
-            ("搜索 V 抬起", key(Search, V, false), Some(consumed), Route::Swallow { end: Some(HintEnd::KeyConsumed) }, None),
-            ("搜索 字母 A", key(Search, 0x41, true), None, SWALLOW, Some(consumed)),
-            ("搜索 数字 1", key(Search, 0x31, true), None, SWALLOW, Some(consumed)),
-            ("搜索 Enter", key(Search, ENTER, true), None, SWALLOW, Some(consumed)),
-            // 按住不放的重复按下：照第一次的处置，不再请求收起。
-            ("快速 V 重复按下", key(Quick, V, true), Some(pass), PASS, Some(pass)),
-            ("搜索 V 重复按下", key(Search, V, true), Some(consumed), SWALLOW, Some(consumed)),
-            ("快速 Esc 重复按下", key(Quick, ESC, true), Some(escape), SWALLOW, Some(escape)),
-            // 停留开始前按下、原逻辑已吞掉的键：快速模式下重复按下和抬起都交回原逻辑配对。
-            ("快速 原逻辑的键按下", original(key(Quick, V, true)), None, Route::Original, None),
-            ("快速 停留前按下的键抬起", key(Quick, V, false), None, Route::Original, None),
-            // 搜索模式下原逻辑的吞键记录是补发前留下的，不看；停留前按下的键那时没有钩子，抬起放行。
-            ("搜索 过时的原逻辑记录", original(key(Search, V, true)), None, SWALLOW, Some(consumed)),
-            ("搜索 停留前按下的键抬起", key(Search, V, false), None, PASS, None),
-            // 搜索模式下停留期间面板被切走（Alt+Tab 之类）：照快速模式放行给当前前台并收起，不吞别的程序的键。
-            ("搜索 切走后 V 按下", unfocused(key(Search, V, true)), None, passthrough, Some(pass)),
-            ("搜索 切走后 V 抬起", unfocused(key(Search, V, false)), Some(pass), PASS, None),
-            ("搜索 切走后 Esc 按下", unfocused(key(Search, ESC, true)), None, SWALLOW, Some(escape)),
-            ("搜索 切走后 呼出键", system(unfocused(key(Search, V, true))), None, PASS, None),
-            ("搜索 切走后 停留前按下的键抬起", unfocused(key(Search, V, false)), None, PASS, None),
-            // 按下时吞掉的键，抬起时面板已被切走：照按下的处置吞掉，并在抬起时收起。
-            ("搜索 吞掉后切走再抬起", unfocused(key(Search, V, false)), Some(consumed), Route::Swallow { end: Some(HintEnd::KeyConsumed) }, None),
-            // 快速模式只看模式，focused 不影响。
-            ("快速 V 按下（focused 为真）", focused(key(Quick, V, true)), None, passthrough, Some(pass)),
-            ("快速 Esc 按下（focused 为真）", focused(key(Quick, ESC, true)), None, SWALLOW, Some(escape)),
+            ("Esc 按下", key(Search, ESC, true), None, SWALLOW, Some(escape)),
+            ("Esc 抬起", key(Search, ESC, false), Some(escape), Route::Swallow { end: Some(HintEnd::Escape) }, None),
+            ("呼出键按下", shortcut(key(Search, V, true)), None, PASS, None),
+            ("呼出键抬起", shortcut(key(Search, V, false)), None, PASS, None),
+            ("Alt+Tab", system(key(Search, 0x09, true)), None, PASS, None),
+            ("Win+D", system(key(Search, 0x44, true)), None, PASS, None),
+            // 其他非修饰键（带不带 Ctrl 都一样）：吞掉，抬起也吞并收起。
+            ("V 按下", key(Search, V, true), None, SWALLOW, Some(consumed)),
+            ("V 抬起", key(Search, V, false), Some(consumed), Route::Swallow { end: Some(HintEnd::KeyConsumed) }, None),
+            ("Ctrl+V", chord_key(key(Search, V, true)), None, SWALLOW, Some(consumed)),
+            ("数字 1", key(Search, 0x31, true), None, SWALLOW, Some(consumed)),
+            ("Enter", key(Search, ENTER, true), None, SWALLOW, Some(consumed)),
+            ("V 重复按下", key(Search, V, true), Some(consumed), SWALLOW, Some(consumed)),
+            // 原逻辑的吞键记录是补发前留下的，不看；停留前按下的键那时没有钩子，抬起放行。
+            ("过时的原逻辑记录", original(key(Search, V, true)), None, SWALLOW, Some(consumed)),
+            ("停留前按下的键抬起", key(Search, V, false), None, PASS, None),
+            // 停留期间面板被切走（Alt+Tab 之类）：放行给当前前台并收起，不吞别的程序的键；Esc 仍吞掉。
+            ("切走后 V 按下", unfocused(key(Search, V, true)), None, passthrough, Some(pass)),
+            ("切走后 V 抬起", unfocused(key(Search, V, false)), Some(pass), PASS, None),
+            ("切走后 Esc 按下", unfocused(key(Search, ESC, true)), None, SWALLOW, Some(escape)),
+            ("切走后 呼出键", shortcut(unfocused(key(Search, V, true))), None, PASS, None),
+            ("切走后 停留前按下的键抬起", unfocused(key(Search, V, false)), None, PASS, None),
+            ("吞掉后切走再抬起", unfocused(key(Search, V, false)), Some(consumed), Route::Swallow { end: Some(HintEnd::KeyConsumed) }, None),
         ];
         for (name, input, earlier, route, fate) in cases {
             assert_eq!(hint_route(input, earlier), (route, fate), "{name}");
@@ -822,11 +899,15 @@ mod tests {
                 0x10, 0x11, 0x12, 0x5B, 0x5C, 0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5,
             ] {
                 for pressed in [true, false] {
-                    assert_eq!(
-                        hint_route(key(mode, vk, pressed), None),
-                        (PASS, None),
-                        "{mode:?} {vk:#x} {pressed}"
-                    );
+                    for chord in [false, true] {
+                        let mut input = key(mode, vk, pressed);
+                        input.chord = chord;
+                        assert_eq!(
+                            hint_route(input, None),
+                            (PASS, None),
+                            "{mode:?} {vk:#x} {pressed} {chord}"
+                        );
+                    }
                 }
             }
         }
@@ -842,51 +923,101 @@ mod tests {
             Some(Fate::Swallow(HintEnd::KeyConsumed)),
         ];
         for vk in 0..=255u16 {
-            for pressed in [true, false] {
-                for system in [false, true] {
-                    for original in [false, true] {
-                        for focused in [false, true] {
-                            let input = HintKey {
-                                mode: None,
-                                vk,
-                                modifier: is_modifier(vk),
-                                pressed,
-                                system,
-                                original,
-                                focused,
-                            };
-                            for earlier in fates {
-                                assert_eq!(hint_route(input, earlier), (Route::Original, earlier));
-                            }
-                            let mut state = HintState::new();
-                            state.end = Some(HintEnd::KeyConsumed);
-                            assert_eq!(state.handle(input), (None, None));
-                        }
+            for flags in 0..32u8 {
+                for pressed in [true, false] {
+                    let input = HintKey {
+                        mode: None,
+                        vk,
+                        modifier: is_modifier(vk),
+                        pressed,
+                        chord: flags & 1 != 0,
+                        shortcut: flags & 2 != 0,
+                        system: flags & 4 != 0,
+                        original: flags & 8 != 0,
+                        focused: flags & 16 != 0,
+                    };
+                    for earlier in fates {
+                        assert_eq!(hint_route(input, earlier), (Route::Original, earlier));
                     }
+                    let mut state = HintState::new();
+                    state.end = Some(HintEnd::KeyConsumed);
+                    assert_eq!(state.handle(input), (None, None));
                 }
             }
         }
     }
 
+    // keyboard() 原逻辑里放行组合的原样副本，用来钉住 app_shortcut / system_combo 合起来和它一致。
+    fn original_passthrough(vk: u16, mods: Modifiers, hotkey: (u16, Modifiers)) -> bool {
+        let exit = matches!(vk, 0x51 | 0x4c)
+            && mods == (Modifiers::CONTROL | Modifiers::ALT | Modifiers::SHIFT);
+        mods.contains(Modifiers::SUPER)
+            || (vk == 0x09 && mods.contains(Modifiers::ALT))
+            || (vk == hotkey.0 && mods == hotkey.1)
+            || exit
+    }
+    // Shift / Ctrl / Alt / Win 的 16 种组合。
+    fn all_mods() -> Vec<Modifiers> {
+        let each = [
+            Modifiers::SHIFT,
+            Modifiers::CONTROL,
+            Modifiers::ALT,
+            Modifiers::SUPER,
+        ];
+        (0..16usize)
+            .map(|bits| {
+                each.iter()
+                    .enumerate()
+                    .filter(|(index, _)| bits & (1 << index) != 0)
+                    .fold(Modifiers::empty(), |mods, (_, &one)| mods | one)
+            })
+            .collect()
+    }
+
     #[test]
-    fn system_combos_match_the_original_passthrough() {
+    fn shortcut_and_system_together_match_the_original_passthrough() {
+        let hotkeys = [
+            (V, Modifiers::ALT),
+            (0x7B, Modifiers::CONTROL | Modifiers::SHIFT),
+            (0x78, Modifiers::empty()),
+        ];
+        for hotkey in hotkeys {
+            for vk in 0..=255u16 {
+                for mods in all_mods() {
+                    assert_eq!(
+                        app_shortcut(vk, mods, hotkey) || system_combo(vk, mods),
+                        original_passthrough(vk, mods, hotkey),
+                        "{vk:#x} {mods:?} {hotkey:?}"
+                    );
+                }
+            }
+        }
         let alt_v = (V, Modifiers::ALT);
-        assert!(system_combo(V, Modifiers::ALT, alt_v), "呼出键");
+        let exit = Modifiers::CONTROL | Modifiers::ALT | Modifiers::SHIFT;
+        assert!(app_shortcut(V, Modifiers::ALT, alt_v), "呼出键");
         assert!(
-            !system_combo(V, Modifiers::CONTROL, alt_v),
+            !app_shortcut(V, Modifiers::CONTROL, alt_v),
             "Ctrl+V 不是呼出键"
         );
-        assert!(!system_combo(V, Modifiers::ALT | Modifiers::SHIFT, alt_v));
-        assert!(!system_combo(V, Modifiers::empty(), alt_v));
-        assert!(system_combo(0x44, Modifiers::SUPER, alt_v), "Win+D");
-        assert!(system_combo(0x09, Modifiers::ALT, alt_v), "Alt+Tab");
-        assert!(!system_combo(0x09, Modifiers::empty(), alt_v), "Tab");
-        let exit = Modifiers::CONTROL | Modifiers::ALT | Modifiers::SHIFT;
-        assert!(system_combo(0x51, exit, alt_v), "退出键");
-        assert!(system_combo(0x4c, exit, alt_v), "采集调试键");
-        assert!(!system_combo(0x51, Modifiers::CONTROL, alt_v));
-        assert!(!system_combo(ENTER, Modifiers::empty(), alt_v));
-        assert!(!system_combo(ESC, Modifiers::empty(), alt_v));
+        assert!(app_shortcut(0x51, exit, alt_v), "退出键");
+        assert!(app_shortcut(0x4c, exit, alt_v), "采集调试键");
+        assert!(!app_shortcut(0x51, Modifiers::CONTROL, alt_v));
+        assert!(system_combo(0x44, Modifiers::SUPER), "Win+D");
+        assert!(system_combo(0x09, Modifiers::ALT), "Alt+Tab");
+        assert!(!system_combo(0x09, Modifiers::empty()), "Tab");
+        assert!(!system_combo(V, Modifiers::CONTROL), "Ctrl+V");
+    }
+
+    #[test]
+    fn chord_means_ctrl_alt_or_win() {
+        for mods in all_mods() {
+            let expected = mods.contains(Modifiers::CONTROL)
+                || mods.contains(Modifiers::ALT)
+                || mods.contains(Modifiers::SUPER);
+            assert_eq!(chord(mods), expected, "{mods:?}");
+        }
+        assert!(!chord(Modifiers::SHIFT), "Shift 不算组合");
+        assert!(!chord(Modifiers::empty()));
     }
 
     #[test]
@@ -914,7 +1045,30 @@ mod tests {
     // 一个按键事件经停留规则后的结果：Some(是否吞掉)，None 表示交回原逻辑；以及现在请求收起的原因。
     type Outcome = (Option<bool>, Option<HintEnd>);
 
-    // 用 Context::hint_key 同一份状态跑一串事件；面板是否在前台取模式的常态。
+    // Ctrl / Alt / Win 键（左右都算）。
+    fn chord_vk(vk: u16) -> bool {
+        matches!(vk, 0x11 | 0x12 | 0x5B | 0x5C | 0xA2..=0xA5)
+    }
+
+    // 用 Context::hint_key 同一份状态跑一串事件。chord 按序列里此刻按着的 Ctrl / Alt / Win 算——和钩子里
+    // modifiers() 读到的一样是这个事件之前的状态；面板是否在前台逐个事件给出。
+    fn run_focus(mode: HintMode, events: &[(u16, bool, bool)]) -> Vec<Outcome> {
+        let mut state = HintState::new();
+        let mut held = [false; 256];
+        events
+            .iter()
+            .map(|&(vk, pressed, focused)| {
+                let mut input = key(mode, vk, pressed);
+                input.chord = (0..=255u16).any(|other| held[other as usize] && chord_vk(other));
+                input.focused = focused;
+                if is_modifier(vk) {
+                    held[vk as usize] = pressed;
+                }
+                state.handle(input)
+            })
+            .collect()
+    }
+    // 同上，面板是否在前台取模式的常态。
     fn run(mode: HintMode, events: &[(u16, bool)]) -> Vec<Outcome> {
         let focused = mode == HintMode::Search;
         let events: Vec<_> = events
@@ -923,40 +1077,59 @@ mod tests {
             .collect();
         run_focus(mode, &events)
     }
-    // 同上，逐个事件给出面板是否在前台。
-    fn run_focus(mode: HintMode, events: &[(u16, bool, bool)]) -> Vec<Outcome> {
-        let mut state = HintState::new();
-        events
-            .iter()
-            .map(|&(vk, pressed, focused)| {
-                let mut input = key(mode, vk, pressed);
-                input.focused = focused;
-                state.handle(input)
-            })
-            .collect()
+
+    const PASSED: Outcome = (Some(false), None);
+    const SWALLOWED: Outcome = (Some(true), None);
+
+    #[test]
+    fn quick_mode_passes_chords_and_consumes_plain_keys() {
+        let quick = HintMode::Quick;
+        let passthrough = (Some(false), Some(HintEnd::KeyPassthrough));
+        let consumed = (Some(true), Some(HintEnd::KeyConsumed));
+        // Ctrl+V：Ctrl 放行；V 按下放行给目标并立即请求收起，抬起也放行。
+        let ctrl_v = [(CTRL, true), (V, true), (V, false), (CTRL, false)];
+        assert_eq!(run(quick, &ctrl_v), [PASSED, passthrough, PASSED, PASSED]);
+        // 先松开 Ctrl 再松开 V：V 的抬起照按下的处置放行。
+        let ctrl_first = [(CTRL, true), (V, true), (CTRL, false), (V, false)];
+        assert_eq!(
+            run(quick, &ctrl_first),
+            [PASSED, passthrough, PASSED, PASSED]
+        );
+        // Alt+Tab 同样放行并收起。
+        let alt_tab = [(ALT, true), (0x09, true), (0x09, false), (ALT, false)];
+        assert_eq!(run(quick, &alt_tab), [PASSED, passthrough, PASSED, PASSED]);
+        // 想换一条按 2：吞掉，抬起也吞，抬起时收起，“2”不会进目标。
+        assert_eq!(
+            run(quick, &[(0x32, true), (0x32, false)]),
+            [SWALLOWED, consumed]
+        );
+        // Shift+字母照普通键吞掉。
+        let shift_a = [(SHIFT, true), (0x41, true), (0x41, false), (SHIFT, false)];
+        assert_eq!(run(quick, &shift_a), [PASSED, SWALLOWED, consumed, PASSED]);
+        // 先按 V（吞掉）再按 Ctrl：V 的重复按下和抬起照第一次吞掉。
+        let late_ctrl = [
+            (V, true),
+            (CTRL, true),
+            (V, true),
+            (V, false),
+            (CTRL, false),
+        ];
+        assert_eq!(
+            run(quick, &late_ctrl),
+            [SWALLOWED, PASSED, SWALLOWED, consumed, PASSED]
+        );
     }
 
     #[test]
-    fn ctrl_v_passes_in_quick_mode_and_is_consumed_in_search_mode() {
+    fn search_mode_consumes_ctrl_v() {
         let ctrl_v = [(CTRL, true), (V, true), (V, false), (CTRL, false)];
-        // 快速模式：Ctrl 放行；V 的按下放行并立即请求收起，抬起也放行、不再请求。
-        assert_eq!(
-            run(HintMode::Quick, &ctrl_v),
-            [
-                (Some(false), None),
-                (Some(false), Some(HintEnd::KeyPassthrough)),
-                (Some(false), None),
-                (Some(false), None),
-            ]
-        );
-        // 搜索模式：V 的按下吞掉，抬起也吞，抬起时才请求收起（收起会卸钩，抬起不能漏给还回焦点的目标）。
         assert_eq!(
             run(HintMode::Search, &ctrl_v),
             [
-                (Some(false), None),
-                (Some(true), None),
+                PASSED,
+                SWALLOWED,
                 (Some(true), Some(HintEnd::KeyConsumed)),
-                (Some(false), None),
+                PASSED
             ]
         );
     }
@@ -964,24 +1137,38 @@ mod tests {
     #[test]
     fn held_keys_keep_their_first_decision() {
         let held = [(V, true), (V, true), (V, true), (V, false)];
+        let consumed = (Some(true), Some(HintEnd::KeyConsumed));
+        for mode in [HintMode::Quick, HintMode::Search] {
+            assert_eq!(
+                run(mode, &held),
+                [SWALLOWED, SWALLOWED, SWALLOWED, consumed],
+                "{mode:?}"
+            );
+        }
+        let ctrl_v_held = [
+            (CTRL, true),
+            (V, true),
+            (V, true),
+            (V, true),
+            (V, false),
+            (CTRL, false),
+        ];
         assert_eq!(
-            run(HintMode::Quick, &held),
+            run(HintMode::Quick, &ctrl_v_held),
             [
+                PASSED,
                 (Some(false), Some(HintEnd::KeyPassthrough)),
-                (Some(false), None),
-                (Some(false), None),
-                (Some(false), None),
+                PASSED,
+                PASSED,
+                PASSED,
+                PASSED
             ]
         );
         let escape = [(ESC, true), (ESC, true), (ESC, false)];
         for mode in [HintMode::Quick, HintMode::Search] {
             assert_eq!(
                 run(mode, &escape),
-                [
-                    (Some(true), None),
-                    (Some(true), None),
-                    (Some(true), Some(HintEnd::Escape)),
-                ],
+                [SWALLOWED, SWALLOWED, (Some(true), Some(HintEnd::Escape))],
                 "{mode:?}"
             );
         }
@@ -989,36 +1176,44 @@ mod tests {
 
     #[test]
     fn overlapping_keys_hide_after_the_last_swallowed_release() {
-        // 搜索模式下快速连打 V、X（V 还没抬起 X 就按下了）：V 抬起时 X 还被吞着按住，等 X 抬起再收起。
+        let consumed = (Some(true), Some(HintEnd::KeyConsumed));
+        // 快速连打 V、X（V 还没抬起 X 就按下了）：V 抬起时 X 还被吞着按住，等 X 抬起再收起。两种模式一样。
         let rollover = [(V, true), (X, true), (V, false), (X, false)];
-        assert_eq!(
-            run(HintMode::Search, &rollover),
-            [
-                (Some(true), None),
-                (Some(true), None),
-                (Some(true), None),
-                (Some(true), Some(HintEnd::KeyConsumed)),
-            ]
-        );
-        // 快速模式下按住 Esc 时按 V：V 放行，收起等 Esc 抬起，原因按先到的 key_passthrough 记。
-        let escape_held = [(ESC, true), (V, true), (V, false), (ESC, false)];
+        for mode in [HintMode::Quick, HintMode::Search] {
+            assert_eq!(
+                run(mode, &rollover),
+                [SWALLOWED, SWALLOWED, SWALLOWED, consumed],
+                "{mode:?}"
+            );
+        }
+        // 快速模式下按住 Esc 时按 Ctrl+V：V 放行，收起等 Esc 抬起，原因按先到的 key_passthrough 记。
+        let escape_held = [
+            (ESC, true),
+            (CTRL, true),
+            (V, true),
+            (V, false),
+            (CTRL, false),
+            (ESC, false),
+        ];
         assert_eq!(
             run(HintMode::Quick, &escape_held),
             [
-                (Some(true), None),
-                (Some(false), None),
-                (Some(false), None),
-                (Some(true), Some(HintEnd::KeyPassthrough)),
+                SWALLOWED,
+                PASSED,
+                PASSED,
+                PASSED,
+                PASSED,
+                (Some(true), Some(HintEnd::KeyPassthrough))
             ]
         );
     }
 
     // 按下和抬起成对：停留规则放行了按下，抬起也放行；吞掉了按下，抬起也吞。交叉按键、重复按下、
-    // 搜索模式下中途切走 / 切回也一样；收起请求只在没有吞掉的键还按着时发出，按过非修饰键、全部抬起后
-    // 一定已经发出过。用固定种子的伪随机序列把常见键的各种交错都走一遍。
+    // 中途按下 / 松开 Ctrl、Alt、搜索模式下中途切走 / 切回也一样；收起请求只在没有吞掉的键还按着时发出，
+    // 按过非修饰键、全部抬起后一定已经发出过。用固定种子的伪随机序列把常见键的各种交错都走一遍。
     #[test]
     fn every_release_follows_its_press() {
-        let keys = [V, X, 0x31, ENTER, ESC, 0x28, CTRL, 0xA0];
+        let keys = [V, X, 0x32, ENTER, ESC, 0x28, CTRL, SHIFT, ALT];
         let mut seed = 0x2545_F491_4F6C_DD1D_u64;
         for mode in [HintMode::Quick, HintMode::Search] {
             for _ in 0..300 {
