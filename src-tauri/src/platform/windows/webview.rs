@@ -2,11 +2,11 @@ use crate::{log::Logger, platform::Result};
 use serde_json::json;
 use std::{
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc,
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 use tauri::WebviewWindow;
 use webview2_com::{Microsoft::Web::WebView2::Win32::*, TrySuspendCompletedHandler};
@@ -16,6 +16,8 @@ use windows::core::Interface;
 pub struct MemoryState {
     generation: AtomicU64,
     visible: AtomicBool,
+    // 最近一次请求挂起的时刻，供 NIANLAI_G0_RESUSPEND_MIN 判断是否到期；显示时清空。
+    suspended_at: Mutex<Option<Instant>>,
 }
 
 fn memory_target_level(core: &ICoreWebView2) -> String {
@@ -59,6 +61,7 @@ pub fn set_visible_with_completion(
     ready: Option<mpsc::Sender<Result<Instant>>>,
 ) -> Result<()> {
     state.visible.store(visible, Ordering::SeqCst);
+    *state.suspended_at.lock().unwrap() = (!visible).then(Instant::now);
     let generation = state.generation.fetch_add(1, Ordering::SeqCst) + 1;
     panel.with_webview(move |webview| unsafe {
         if state.generation.load(Ordering::SeqCst) != generation {
@@ -119,6 +122,97 @@ pub fn set_visible_with_completion(
             complete(&ready, Err(error.to_string()));
         }
     }).map_err(|e|e.to_string())
+}
+
+// 到期 = 面板不可见，且距最近一次挂起请求已超过 interval。
+pub fn due(state: &MemoryState, interval: Duration) -> bool {
+    !state.visible.load(Ordering::SeqCst)
+        && state
+            .suspended_at
+            .lock()
+            .unwrap()
+            .is_some_and(|at| at.elapsed() >= interval)
+}
+
+pub fn generation(state: &MemoryState) -> u64 {
+    state.generation.load(Ordering::SeqCst)
+}
+
+// 隐藏期间先 Resume 再立刻 TrySuspend，验证能否让 WebView2 重新压缩内存。
+// 仅由面板状态机在 UI 线程调用，with_webview 在此线程同步执行；到期执行并返回请求号，否则返回 None。
+pub fn resuspend(
+    panel: &WebviewWindow,
+    logger: Logger,
+    session: u64,
+    state: Arc<MemoryState>,
+    interval: Duration,
+) -> Result<Option<u64>> {
+    let hidden_seconds = {
+        let mut suspended_at = state.suspended_at.lock().unwrap();
+        if state.visible.load(Ordering::SeqCst) {
+            return Ok(None);
+        }
+        let Some(hidden_since) = *suspended_at else {
+            return Ok(None);
+        };
+        if hidden_since.elapsed() < interval {
+            return Ok(None);
+        }
+        *suspended_at = Some(Instant::now());
+        hidden_since.elapsed().as_secs_f64()
+    };
+    let generation = state.generation.fetch_add(1, Ordering::SeqCst) + 1;
+    panel
+        .with_webview(move |webview| unsafe {
+            if state.generation.load(Ordering::SeqCst) != generation {
+                return;
+            }
+            let controller = webview.controller();
+            let before = super::memory::sample();
+            let outcome = (|| -> windows::core::Result<()> {
+                let core = controller.CoreWebView2()?;
+                let suspend = core.cast::<ICoreWebView2_3>()?;
+                let resume_started = Instant::now();
+                suspend.Resume()?;
+                let resume_ms = resume_started.elapsed().as_secs_f64() * 1000.0;
+                let suspend_started = Instant::now();
+                let callback_log = logger.clone();
+                let callback_core = core.clone();
+                let callback_suspend = suspend.clone();
+                let callback_controller = controller.clone();
+                let callback = TrySuspendCompletedHandler::create(Box::new(move |result, success| {
+                    let suspend_ms = suspend_started.elapsed().as_secs_f64() * 1000.0;
+                    let stale = state.generation.load(Ordering::SeqCst) != generation;
+                    let suspended = result.is_ok() && success;
+                    let error = result.err().map(|error| error.to_string());
+                    callback_log.event("webview_resuspended", json!({
+                        "session":session,"generation":generation,"suspend_result":suspended,"stale":stale,"error":error,
+                        "memory_target_level":memory_target_level(&callback_core),
+                        "hidden_seconds":hidden_seconds,"resume_ms":resume_ms,"suspend_ms":suspend_ms,
+                        "before":before,"after":super::memory::sample(),
+                    }));
+                    // 旧挂起请求可能在重新显示后完成，此时必须立即恢复。
+                    if stale && state.visible.load(Ordering::SeqCst) {
+                        callback_controller.SetIsVisible(true)?;
+                        callback_suspend.Resume()?;
+                        callback_log.event("webview_resumed", json!({
+                            "session":session,"visible":true,"stale":true,
+                            "memory_target_level":memory_target_level(&callback_core),
+                        }));
+                    }
+                    Ok(())
+                }));
+                suspend.TrySuspend(&callback)?;
+                Ok(())
+            })();
+            if let Err(error) = outcome {
+                logger.event("webview_resuspend_failed", json!({
+                    "session":session,"generation":generation,"error":error.to_string(),
+                }));
+            }
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(Some(generation))
 }
 
 // 仅由面板状态机在 UI 线程调用，with_webview 在此线程同步执行。

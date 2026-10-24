@@ -180,4 +180,24 @@ pub mod webview {
     pub fn focus(_: &WebviewWindow) -> Result<()> {
         Err("G0 仅支持 Windows".into())
     }
+    pub fn due(_: &MemoryState, _: std::time::Duration) -> bool {
+        false
+    }
+    pub fn generation(_: &MemoryState) -> u64 {
+        0
+    }
+    pub fn resuspend(
+        _: &WebviewWindow,
+        _: Logger,
+        _: u64,
+        _: std::sync::Arc<MemoryState>,
+        _: std::time::Duration,
+    ) -> Result<Option<u64>> {
+        Ok(None)
+    }
+}
+pub mod memory {
+    pub fn sample() -> serde_json::Value {
+        serde_json::Value::Null
+    }
 }

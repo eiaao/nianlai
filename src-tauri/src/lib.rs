@@ -5,6 +5,7 @@ mod log;
 mod panel;
 mod paste;
 mod platform;
+mod resuspend;
 mod samples;
 
 use panel::{Action, Controller};
@@ -186,8 +187,9 @@ pub fn run() {
             platform::window::no_activate(&window, true)?;
             platform::webview::initialize(&window)?;
             let plan = autocycle::Plan::from_env(&logger);
+            let resuspend = resuspend::from_env(&logger);
             let automatic = plan.is_some();
-            app.manage(Controller::new(window, logger.clone(), plan)?);
+            app.manage(Controller::new(window, logger.clone(), plan, resuspend)?);
             let handle = app.handle().clone();
             let capture_logger = logger.clone();
             std::thread::Builder::new()

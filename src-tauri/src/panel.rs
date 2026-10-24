@@ -7,6 +7,7 @@ use crate::{
         request::{Mode as PasteMode, Request},
     },
     platform::{self, HookEvent, Hooks, REPLAY_WAIT, Target, paste, webview, window},
+    resuspend,
 };
 use serde_json::{Value, json};
 use std::{
@@ -68,6 +69,8 @@ struct Panel {
     auto_plan: Option<autocycle::Plan>,
     auto_stop: Option<mpsc::Sender<()>>,
     auto_visible: Option<AutoVisible>,
+    resuspend: Option<Duration>,
+    resuspend_stop: Option<mpsc::Sender<()>>,
 }
 
 pub enum Action {
@@ -90,6 +93,10 @@ pub enum Action {
     },
     AutoDone {
         cycles: usize,
+    },
+    Resuspend {
+        interval: Duration,
+        reply: mpsc::Sender<(u64, u64)>,
     },
     FrontendReady,
     Key {
@@ -140,6 +147,7 @@ impl Controller {
         window: WebviewWindow,
         logger: Logger,
         plan: Option<autocycle::Plan>,
+        resuspend: Option<Duration>,
     ) -> platform::Result<Self> {
         let history = Arc::new(History::new(platform::hash::sha256, logger.clone()));
         let clipboard = platform::clipboard::Service::start(logger.clone(), history.clone())?;
@@ -170,6 +178,8 @@ impl Controller {
                 auto_plan: plan,
                 auto_stop: None,
                 auto_visible: None,
+                resuspend,
+                resuspend_stop: None,
             }),
         })
     }
@@ -214,6 +224,7 @@ impl Controller {
         }
         if let Ok(mut panel) = self.inner.lock() {
             panel.auto_stop.take();
+            panel.resuspend_stop.take();
             if let Err(error) = panel.replay_search(&self.logger, false, "shutdown") {
                 panel.log(
                     &self.logger,
@@ -643,6 +654,15 @@ impl Panel {
                 let first = !self.ready;
                 self.ready = true;
                 self.log(logger, "frontend_ready", json!({}));
+                // 普通模式和自动循环模式都要启动重挂起线程。
+                if first && let Some(interval) = self.resuspend {
+                    self.resuspend_stop = Some(resuspend::spawn(
+                        app.clone(),
+                        logger.clone(),
+                        interval,
+                        self.memory.clone(),
+                    )?);
+                }
                 if self.auto_enabled {
                     if first {
                         let plan = self.auto_plan.take().ok_or("自动循环计划不存在")?;
@@ -857,11 +877,26 @@ impl Panel {
                     );
                 }
             }
+            Action::Resuspend { interval, reply }
+                if self.mode == Mode::Hidden && self.ready && !self.pasting =>
+            {
+                // 条件不满足时落到 _，reply 被丢弃，线程便知道这次跳过了。
+                if let Some(generation) = webview::resuspend(
+                    &self.window,
+                    logger.clone(),
+                    self.session,
+                    self.memory.clone(),
+                    interval,
+                )? {
+                    let _ = reply.send((self.session, generation));
+                }
+            }
             Action::Quit | Action::QuitFrontend => {
                 app.state::<Controller>()
                     .stopping
                     .store(true, Ordering::Release);
                 self.auto_stop.take();
+                self.resuspend_stop.take();
                 if self.mode != Mode::Hidden
                     && let Err(error) = self.hide(logger)
                 {
