@@ -36,6 +36,11 @@ pub mod hook {
         true
     }
 }
+pub mod dialog {
+    pub fn error(text: &str) {
+        eprintln!("{text}");
+    }
+}
 // 输入法状态只在 Windows 上能查；这里只给出同样形状的 JSON。
 pub mod ime {
     pub fn query(_: usize) -> serde_json::Value {
