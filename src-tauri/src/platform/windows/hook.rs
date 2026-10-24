@@ -77,12 +77,16 @@ struct HintKey {
     system: bool,
     // 原逻辑吞了这个键的按下、还没见到抬起：按住不放的重复按下和最后的抬起仍归原逻辑。
     original: bool,
+    // 面板持有前台。只在搜索模式下看：停留期间用户用 Alt+Tab 之类切走了，按键本来就到不了搜索框，
+    // 照快速模式的规则放行给当前前台并收起，不吞别的程序的键。
+    focused: bool,
 }
 
 // 管理员提示停留期间按键怎么处理（M0-6b）。earlier 是停留规则先前对这个键按下的处置；
 // 返回处理方式和这个键之后的处置记录。
 // 快速模式：Esc 吞掉、抬起时收起；其他非修饰键放行给目标（Ctrl+V 直接粘进管理员窗口）并在按下时就请求收起。
-// 搜索模式：Esc 和其他非修饰键都吞掉（不进搜索框）、抬起时收起，焦点由收起按原逻辑还。
+// 搜索模式：Esc 和其他非修饰键都吞掉（不进搜索框）、抬起时收起，焦点由收起按原逻辑还；面板已不在前台时
+// 照快速模式放行。
 // 请求什么时候真发出去另由 hint_end 决定（还有吞掉的键按着就等它们抬起）。
 // 两种模式下修饰键和原逻辑本来就放行的组合（含呼出键）都放行、不收起；呼出键照旧经全局快捷键收起。
 fn hint_route(key: HintKey, earlier: Option<Fate>) -> (Route, Option<Fate>) {
@@ -117,15 +121,15 @@ fn hint_route(key: HintKey, earlier: Option<Fate>) -> (Route, Option<Fate>) {
             Route::Swallow { end: None },
             Some(Fate::Swallow(HintEnd::Escape)),
         ),
-        HintMode::Quick => (
+        HintMode::Search if key.focused => (
+            Route::Swallow { end: None },
+            Some(Fate::Swallow(HintEnd::KeyConsumed)),
+        ),
+        HintMode::Quick | HintMode::Search => (
             Route::Pass {
                 end: Some(HintEnd::KeyPassthrough),
             },
             Some(Fate::Pass),
-        ),
-        HintMode::Search => (
-            Route::Swallow { end: None },
-            Some(Fate::Swallow(HintEnd::KeyConsumed)),
         ),
     }
 }
@@ -223,6 +227,7 @@ impl Context {
             pressed,
             system: system_combo(vk, modifiers(), self.hotkey),
             original: self.swallowed[vk as usize],
+            focused: super::window::foreground() == self.window,
         });
         if let Some(end) = end {
             let _ = self.sender.try_send(HookEvent::HintKey(end));
@@ -724,6 +729,8 @@ mod tests {
             pressed,
             system: false,
             original: false,
+            // 搜索模式下面板通常持有前台；切走的情形单独测。
+            focused: mode == HintMode::Search,
         }
     }
     fn system(mut key: HintKey) -> HintKey {
@@ -732,6 +739,14 @@ mod tests {
     }
     fn original(mut key: HintKey) -> HintKey {
         key.original = true;
+        key
+    }
+    fn unfocused(mut key: HintKey) -> HintKey {
+        key.focused = false;
+        key
+    }
+    fn focused(mut key: HintKey) -> HintKey {
+        key.focused = true;
         key
     }
 
@@ -783,6 +798,17 @@ mod tests {
             // 搜索模式下原逻辑的吞键记录是补发前留下的，不看；停留前按下的键那时没有钩子，抬起放行。
             ("搜索 过时的原逻辑记录", original(key(Search, V, true)), None, SWALLOW, Some(consumed)),
             ("搜索 停留前按下的键抬起", key(Search, V, false), None, PASS, None),
+            // 搜索模式下停留期间面板被切走（Alt+Tab 之类）：照快速模式放行给当前前台并收起，不吞别的程序的键。
+            ("搜索 切走后 V 按下", unfocused(key(Search, V, true)), None, passthrough, Some(pass)),
+            ("搜索 切走后 V 抬起", unfocused(key(Search, V, false)), Some(pass), PASS, None),
+            ("搜索 切走后 Esc 按下", unfocused(key(Search, ESC, true)), None, SWALLOW, Some(escape)),
+            ("搜索 切走后 呼出键", system(unfocused(key(Search, V, true))), None, PASS, None),
+            ("搜索 切走后 停留前按下的键抬起", unfocused(key(Search, V, false)), None, PASS, None),
+            // 按下时吞掉的键，抬起时面板已被切走：照按下的处置吞掉，并在抬起时收起。
+            ("搜索 吞掉后切走再抬起", unfocused(key(Search, V, false)), Some(consumed), Route::Swallow { end: Some(HintEnd::KeyConsumed) }, None),
+            // 快速模式只看模式，focused 不影响。
+            ("快速 V 按下（focused 为真）", focused(key(Quick, V, true)), None, passthrough, Some(pass)),
+            ("快速 Esc 按下（focused 为真）", focused(key(Quick, ESC, true)), None, SWALLOW, Some(escape)),
         ];
         for (name, input, earlier, route, fate) in cases {
             assert_eq!(hint_route(input, earlier), (route, fate), "{name}");
@@ -819,20 +845,23 @@ mod tests {
             for pressed in [true, false] {
                 for system in [false, true] {
                     for original in [false, true] {
-                        let input = HintKey {
-                            mode: None,
-                            vk,
-                            modifier: is_modifier(vk),
-                            pressed,
-                            system,
-                            original,
-                        };
-                        for earlier in fates {
-                            assert_eq!(hint_route(input, earlier), (Route::Original, earlier));
+                        for focused in [false, true] {
+                            let input = HintKey {
+                                mode: None,
+                                vk,
+                                modifier: is_modifier(vk),
+                                pressed,
+                                system,
+                                original,
+                                focused,
+                            };
+                            for earlier in fates {
+                                assert_eq!(hint_route(input, earlier), (Route::Original, earlier));
+                            }
+                            let mut state = HintState::new();
+                            state.end = Some(HintEnd::KeyConsumed);
+                            assert_eq!(state.handle(input), (None, None));
                         }
-                        let mut state = HintState::new();
-                        state.end = Some(HintEnd::KeyConsumed);
-                        assert_eq!(state.handle(input), (None, None));
                     }
                 }
             }
@@ -885,12 +914,25 @@ mod tests {
     // 一个按键事件经停留规则后的结果：Some(是否吞掉)，None 表示交回原逻辑；以及现在请求收起的原因。
     type Outcome = (Option<bool>, Option<HintEnd>);
 
-    // 用 Context::hint_key 同一份状态跑一串事件。
+    // 用 Context::hint_key 同一份状态跑一串事件；面板是否在前台取模式的常态。
     fn run(mode: HintMode, events: &[(u16, bool)]) -> Vec<Outcome> {
+        let focused = mode == HintMode::Search;
+        let events: Vec<_> = events
+            .iter()
+            .map(|&(vk, pressed)| (vk, pressed, focused))
+            .collect();
+        run_focus(mode, &events)
+    }
+    // 同上，逐个事件给出面板是否在前台。
+    fn run_focus(mode: HintMode, events: &[(u16, bool, bool)]) -> Vec<Outcome> {
         let mut state = HintState::new();
         events
             .iter()
-            .map(|&(vk, pressed)| state.handle(key(mode, vk, pressed)))
+            .map(|&(vk, pressed, focused)| {
+                let mut input = key(mode, vk, pressed);
+                input.focused = focused;
+                state.handle(input)
+            })
             .collect()
     }
 
@@ -971,9 +1013,9 @@ mod tests {
         );
     }
 
-    // 按下和抬起成对：停留规则放行了按下，抬起也放行；吞掉了按下，抬起也吞。交叉按键、重复按下也一样；
-    // 收起请求只在没有吞掉的键还按着时发出，按过非修饰键、全部抬起后一定已经发出过。
-    // 用固定种子的伪随机序列把常见键的各种交错都走一遍。
+    // 按下和抬起成对：停留规则放行了按下，抬起也放行；吞掉了按下，抬起也吞。交叉按键、重复按下、
+    // 搜索模式下中途切走 / 切回也一样；收起请求只在没有吞掉的键还按着时发出，按过非修饰键、全部抬起后
+    // 一定已经发出过。用固定种子的伪随机序列把常见键的各种交错都走一遍。
     #[test]
     fn every_release_follows_its_press() {
         let keys = [V, X, 0x31, ENTER, ESC, 0x28, CTRL, 0xA0];
@@ -981,6 +1023,7 @@ mod tests {
         for mode in [HintMode::Quick, HintMode::Search] {
             for _ in 0..300 {
                 let mut held = [false; 256];
+                let mut focused = mode == HintMode::Search;
                 let mut events = Vec::new();
                 for _ in 0..24 {
                     seed ^= seed << 13;
@@ -990,17 +1033,20 @@ mod tests {
                     // 已按住的键随机再按（自动重复）或抬起；没按住的只会按下。
                     let pressed = !held[vk as usize] || (seed >> 32).is_multiple_of(3);
                     held[vk as usize] = pressed;
-                    events.push((vk, pressed));
+                    if mode == HintMode::Search && (seed >> 40).is_multiple_of(5) {
+                        focused = !focused;
+                    }
+                    events.push((vk, pressed, focused));
                 }
                 for vk in keys {
                     if held[vk as usize] {
-                        events.push((vk, false));
+                        events.push((vk, false, focused));
                     }
                 }
-                let outcomes = run(mode, &events);
+                let outcomes = run_focus(mode, &events);
                 let mut first: [Option<bool>; 256] = [None; 256];
                 let mut requested = false;
-                for (&(vk, pressed), &(swallow, end)) in events.iter().zip(&outcomes) {
+                for (&(vk, pressed, _), &(swallow, end)) in events.iter().zip(&outcomes) {
                     // 停留开始后才按下的键都由停留规则处理，不会交回原逻辑。
                     let swallow = swallow.unwrap_or_else(|| panic!("{mode:?} {vk:#x} {events:?}"));
                     if pressed {
@@ -1018,7 +1064,7 @@ mod tests {
                         );
                     }
                 }
-                let typed = events.iter().any(|&(vk, _)| !is_modifier(vk));
+                let typed = events.iter().any(|&(vk, _, _)| !is_modifier(vk));
                 assert_eq!(requested, typed, "{mode:?} {events:?}");
             }
         }
