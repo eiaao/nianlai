@@ -29,6 +29,7 @@ pnpm tauri dev
 - `g0_log_report.py`：把样机的诊断日志汇总成 Markdown 报告（采集、监听、粘贴、呼出、错误）。运行 `python tools/g0_log_report.py --log <panel-log.jsonl>`。
 - `g0_matrix_report.py`：焦点矩阵手工格子的日志汇总，按“目标程序 × 模式”统计粘贴结论、降级原因和可疑试验。运行 `python tools/g0_matrix_report.py --log <panel-log.jsonl> --out <报告.md>`。
 - `measure-show-under-pressure.ps1`：测内存紧张时的呼出耗时。用自动循环反复隐藏、显示样机，显示前修剪工作集（`trim`）或用辅助进程占内存（`pressure`），输出每次显示的耗时；`-DryRun` 只打印计划。
+- `g0-night-batch.ps1`：夜间无人值守批处理，按顺序重建样机、跑焦点矩阵（空跑 → 冒烟 → 全量）和内存基线（默认 8 小时），逐步记录 `batch.log`，收尾写 `summary.txt`；`-DryRun` 只打印计划，`-SkipBuild` 跳过重建样机，`-SkipMatrix` 跳过矩阵只跑内存。
 - `g0-store`：历史库的压测和维护工具，命令有 `fill`、`search-bench`、`writer`、`check`、`snapshot`、`restore` 等。运行 `cargo run --release -p g0-store -- <命令> --dir <数据目录>`。
 - `g0-crash-test.ps1`、`g0-store-validation.ps1`、`g0-smoke-test.ps1`：基于 `g0-store` 的故障注入（反复强杀写入进程再检查库）、存储压测汇总，以及正式版的冒烟测试。
 
