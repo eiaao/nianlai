@@ -89,7 +89,11 @@ impl History {
         }
     }
     fn store(&self) -> Option<Store> {
-        if self.disabled.load(Ordering::Acquire) { None } else { self.store.read().unwrap().clone() }
+        if self.disabled.load(Ordering::Acquire) {
+            None
+        } else {
+            self.store.read().unwrap().clone()
+        }
     }
     pub fn initialize(&self) {
         let specified = std::env::var_os("NIANLAI_G0_DATA_DIR");
@@ -107,7 +111,8 @@ impl History {
         let opened = directory
             .ok_or(nianlai_store::Error::Invalid("data_directory_missing"))
             .and_then(|path| {
-                *self.application_guard.lock().unwrap() = Some(nianlai_store::application_guard(&path)?);
+                *self.application_guard.lock().unwrap() =
+                    Some(nianlai_store::application_guard(&path)?);
                 Store::open(&path, self.hash)
             });
         match opened {
@@ -335,7 +340,13 @@ impl History {
         *self.last_write.lock().unwrap()
     }
     pub fn summary(&self) {
-        let stats = self.store.read().unwrap().as_ref().map(Store::stats).unwrap_or_default();
+        let stats = self
+            .store
+            .read()
+            .unwrap()
+            .as_ref()
+            .map(Store::stats)
+            .unwrap_or_default();
         self.logger.event("store_summary", json!(stats));
     }
 }
