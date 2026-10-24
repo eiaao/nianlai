@@ -101,6 +101,10 @@ pub mod paste {
     pub fn replay(_: &[ReplayKey], _: usize, _: Instant) -> usize {
         0
     }
+    // 查不到完整性级别，和 Windows 版查不到时一样按"可能更高"处理。
+    pub fn compare_integrity(_: &Target) -> serde_json::Value {
+        serde_json::json!({"status":"unknown_assume_higher","target_token_known":false,"own_token_known":false})
+    }
     pub fn execute(
         _: crate::paste::request::Request,
         _: &crate::paste::keys::Table,
