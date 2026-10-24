@@ -6,7 +6,7 @@ use crate::{
         keys::Table,
         request::{Mode as PasteMode, Request},
     },
-    platform::{self, HookEvent, Hooks, REPLAY_WAIT, Target, paste, webview, window},
+    platform::{self, HookEvent, Hooks, REPLAY_WAIT, Target, ime, paste, webview, window},
     resuspend,
 };
 use serde_json::{Value, json};
@@ -40,6 +40,41 @@ struct AutoVisible {
     hidden_ms: f64,
 }
 
+// 实验开关：快速模式下让搜索框持有页面内焦点。启动时读一次环境变量，随 panel:shown 发给前端。
+#[derive(Clone, Copy, Default)]
+pub struct Experiments {
+    pub search_box_focus: bool,
+}
+impl Experiments {
+    pub fn from_env(logger: &Logger) -> Self {
+        let experiments = Self {
+            search_box_focus: flag_enabled(
+                std::env::var("NIANLAI_G0_SEARCHBOX_FOCUS").ok().as_deref(),
+            ),
+        };
+        logger.event(
+            "experiment_searchbox_focus",
+            json!({"enabled":experiments.search_box_focus}),
+        );
+        experiments
+    }
+    fn payload(self) -> Value {
+        json!({"searchBoxFocus":self.search_box_focus})
+    }
+}
+// 只认 "1"（和 NIANLAI_MEMORY_TIER 一样），其他值都当关闭，默认行为不变。
+fn flag_enabled(value: Option<&str>) -> bool {
+    value.map(str::trim) == Some("1")
+}
+// 日志行共有的会话标记。短命探针线程不持有 Panel，抄走 session 和 target 后用同一个函数盖章。
+fn stamp(mut fields: Value, session: u64, target: &Target) -> Value {
+    fields["session"] = json!(session);
+    fields["process_name"] = json!(target.process_name);
+    fields["focus_class"] = json!(target.focus_class);
+    fields["focus_unknown"] = json!(target.focus == 0);
+    fields
+}
+
 pub struct Controller {
     inner: Mutex<Panel>,
     pub logger: Logger,
@@ -71,6 +106,7 @@ struct Panel {
     auto_visible: Option<AutoVisible>,
     resuspend: Option<Duration>,
     resuspend_stop: Option<mpsc::Sender<()>>,
+    experiments: Experiments,
 }
 
 pub enum Action {
@@ -148,6 +184,7 @@ impl Controller {
         logger: Logger,
         plan: Option<autocycle::Plan>,
         resuspend: Option<Duration>,
+        experiments: Experiments,
     ) -> platform::Result<Self> {
         let history = Arc::new(History::new(platform::hash::sha256, logger.clone()));
         let clipboard = platform::clipboard::Service::start(logger.clone(), history.clone())?;
@@ -180,6 +217,7 @@ impl Controller {
                 auto_visible: None,
                 resuspend,
                 resuspend_stop: None,
+                experiments,
             }),
         })
     }
@@ -225,7 +263,7 @@ impl Controller {
         if let Ok(mut panel) = self.inner.lock() {
             panel.auto_stop.take();
             panel.resuspend_stop.take();
-            if let Err(error) = panel.replay_search(&self.logger, false, "shutdown") {
+            if let Err(error) = panel.replay_search(&self.logger, false, "shutdown", false) {
                 panel.log(
                     &self.logger,
                     "replay_cleanup_failed",
@@ -261,12 +299,8 @@ pub fn dispatch(app: &AppHandle, action: Action) -> Result<(), String> {
 }
 
 impl Panel {
-    fn log(&self, logger: &Logger, event: &str, mut fields: Value) {
-        fields["session"] = json!(self.session);
-        fields["process_name"] = json!(self.target.process_name);
-        fields["focus_class"] = json!(self.target.focus_class);
-        fields["focus_unknown"] = json!(self.target.focus == 0);
-        logger.event(event, fields);
+    fn log(&self, logger: &Logger, event: &str, fields: Value) {
+        logger.event(event, stamp(fields, self.session, &self.target));
     }
     fn emit(&self, event: &str, mut payload: Value) {
         payload["session"] = json!(self.session);
@@ -281,7 +315,8 @@ impl Panel {
             let history = app.state::<Controller>().history_snapshot();
             self.emit(
                 "panel:shown",
-                json!({"hotkeyToShowMs":shown.duration_since(started).as_secs_f64()*1000.0,"history":history}),
+                json!({"hotkeyToShowMs":shown.duration_since(started).as_secs_f64()*1000.0,"history":history,
+                    "experiments":self.experiments.payload()}),
             );
         }
     }
@@ -441,7 +476,7 @@ impl Panel {
         let foreground = window::foreground();
         let panel = window::handle(&self.window)?;
         let may_restore = foreground == panel || foreground == self.target.window;
-        if let Err(error) = self.replay_search(logger, false, "hidden") {
+        if let Err(error) = self.replay_search(logger, false, "hidden", false) {
             self.log(logger, "replay_cleanup_failed", json!({"error":error}));
         }
         self.mode = Mode::Hidden;
@@ -486,6 +521,18 @@ impl Panel {
             .as_ref()
             .ok_or("键盘钩子尚未安装")?
             .begin_search(started.unwrap_or_else(Instant::now))?;
+        // 拿前台之前先记目标程序的输入法状态，和面板拿到焦点后的几条对照。焦点控件未知时退回主窗口。
+        // 查询在状态机线程里做，每条消息最多等 50 ms，不进钩子回调。
+        let probed = if self.target.focus != 0 {
+            self.target.focus
+        } else {
+            self.target.window
+        };
+        self.log(
+            logger,
+            "ime_state",
+            json!({"stage":"target_before_activate","ime":ime::query(probed)}),
+        );
         let panel = window::handle(&self.window)?;
         window::no_activate(&self.window, false)?;
         let result = window::activate(panel);
@@ -525,7 +572,13 @@ impl Panel {
         self.emit("panel:mode", json!({"mode":"search"}));
         Ok(())
     }
-    fn replay_search(&self, logger: &Logger, ready: bool, reason: &str) -> platform::Result<()> {
+    fn replay_search(
+        &self,
+        logger: &Logger,
+        ready: bool,
+        reason: &str,
+        probe_ime: bool,
+    ) -> platform::Result<()> {
         let Some(hooks) = self.hooks.as_ref() else {
             return Ok(());
         };
@@ -536,6 +589,9 @@ impl Panel {
         let expired = batch
             .started
             .is_some_and(|started| started.elapsed() >= REPLAY_WAIT);
+        // 补发前记一次面板焦点窗口（应在 msedgewebview2.exe 里）的输入法状态：卸钩之后、SendInput 之前，
+        // 在状态机线程里查，不进钩子回调。只有 finish_search 传 true，收起和退出时的清理不查。
+        let before = probe_ime.then(ime::query_focused);
         let replayed = if ready && !expired {
             if let Some(started) = batch.started {
                 paste::replay(&batch.keys, window::handle(&self.window)?, started)
@@ -545,6 +601,14 @@ impl Panel {
         } else {
             0
         };
+        if let Some(ime) = before {
+            self.log(
+                logger,
+                "ime_state",
+                json!({"stage":"panel_before_replay","replayed":replayed,"ime":ime}),
+            );
+            self.probe_after_replay(logger, replayed);
+        }
         self.log(
             logger,
             "search_replay",
@@ -558,11 +622,39 @@ impl Panel {
         );
         Ok(())
     }
+    // 豆包、微信输入法会在焦点到达后几十毫秒异步恢复状态，补发后 50 ms 和 150 ms 各查一次，不能省。
+    // 用短命线程睡，不让状态机等；线程里只做跨进程的只读查询和写日志。
+    fn probe_after_replay(&self, logger: &Logger, replayed: usize) {
+        let probe_logger = logger.clone();
+        let session = self.session;
+        let target = self.target.clone();
+        let replayed_at = Instant::now();
+        let spawned = std::thread::Builder::new()
+            .name("ime-probe".into())
+            .spawn(move || {
+                for (stage, sleep_ms) in [("panel_after_replay_50", 50), ("panel_after_replay_150", 100)] {
+                    std::thread::sleep(Duration::from_millis(sleep_ms));
+                    let after_replay_ms = replayed_at.elapsed().as_secs_f64() * 1000.0;
+                    let ime = ime::query_focused();
+                    probe_logger.event(
+                        "ime_state",
+                        stamp(
+                            json!({"stage":stage,"replayed":replayed,"after_replay_ms":after_replay_ms,"ime":ime}),
+                            session,
+                            &target,
+                        ),
+                    );
+                }
+            });
+        if spawned.is_err() {
+            self.log(logger, "ime_probe_failed", json!({"replayed":replayed}));
+        }
+    }
     fn finish_search(&mut self, logger: &Logger, ready: bool) -> platform::Result<()> {
         if !self.awaiting_search {
             return Ok(());
         }
-        self.replay_search(logger, ready, if ready { "ready" } else { "timeout" })?;
+        self.replay_search(logger, ready, if ready { "ready" } else { "timeout" }, true)?;
         self.awaiting_search = false;
         self.log(logger, "search_ready", json!({"search_box_ready":ready,"foreground_ok":window::foreground()==window::handle(&self.window)?}));
         Ok(())
@@ -910,5 +1002,60 @@ impl Panel {
             _ => {}
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn experiment_flag_only_accepts_one() {
+        assert!(flag_enabled(Some("1")));
+        assert!(flag_enabled(Some(" 1 ")));
+        for value in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("true"),
+            Some("yes"),
+            Some("11"),
+        ] {
+            assert!(!flag_enabled(value), "{value:?}");
+        }
+    }
+
+    #[test]
+    fn shown_payload_carries_the_experiment() {
+        assert_eq!(
+            Experiments {
+                search_box_focus: true
+            }
+            .payload(),
+            json!({"searchBoxFocus":true})
+        );
+        assert_eq!(
+            Experiments::default().payload(),
+            json!({"searchBoxFocus":false})
+        );
+    }
+
+    #[test]
+    fn stamp_adds_session_and_target_without_touching_other_fields() {
+        let target = Target {
+            process_name: "notepad.exe".into(),
+            focus_class: "Edit".into(),
+            ..Target::default()
+        };
+        let row = stamp(
+            json!({"stage":"panel_before_replay","ime":{"open":1}}),
+            7,
+            &target,
+        );
+        assert_eq!(
+            row,
+            json!({"stage":"panel_before_replay","ime":{"open":1},"session":7,
+                "process_name":"notepad.exe","focus_class":"Edit","focus_unknown":true})
+        );
     }
 }

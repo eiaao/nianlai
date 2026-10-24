@@ -4,6 +4,7 @@ pub mod formats;
 pub mod hash;
 pub mod hook;
 pub mod image;
+pub mod ime;
 pub mod memory;
 pub mod paste;
 pub mod uia;

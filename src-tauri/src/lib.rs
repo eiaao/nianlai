@@ -208,8 +208,15 @@ pub fn run() {
             platform::webview::initialize(&window)?;
             let plan = autocycle::Plan::from_env(&logger);
             let resuspend = resuspend::from_env(&logger);
+            let experiments = panel::Experiments::from_env(&logger);
             let automatic = plan.is_some();
-            app.manage(Controller::new(window, logger.clone(), plan, resuspend)?);
+            app.manage(Controller::new(
+                window,
+                logger.clone(),
+                plan,
+                resuspend,
+                experiments,
+            )?);
             let handle = app.handle().clone();
             let capture_logger = logger.clone();
             std::thread::Builder::new()

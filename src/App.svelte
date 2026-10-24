@@ -6,6 +6,7 @@
   type HistoryItem = { id: number; kind: string; preview: string; file_names: string[]; source: string; copied_ms: number; copy_count: number; partial: boolean };
   type HistorySnapshot = { items: HistoryItem[]; total: number; recording: boolean; last_recorded_ms: number | null; store_status: string | null };
   type SessionEvent = { session: number };
+  type Experiments = { searchBoxFocus?: boolean };
   type Timing = SessionEvent & { hotkeyToShowMs: number; showToPaintMs?: number };
   type PasteResult = SessionEvent & {
     paste_result: "copied" | "sent" | "confirmed" | "copied_only";
@@ -19,6 +20,10 @@
   let history = $state<HistorySnapshot>({ items: [], total: 0, recording: false, last_recorded_ms: null, store_status: null });
   let query = $state("");
   let mode = $state<"quick" | "search">("quick");
+  // 实验 NIANLAI_G0_SEARCHBOX_FOCUS（后端随 panel:shown 下发）：开着时快速模式也让搜索框持有页面内焦点。
+  // 快速模式下面板窗口没有系统焦点，真实按键到不了页面，字不会漏进搜索框；钩子那边不用改。
+  let searchBoxFocus = $state(false);
+  const locked = $derived(mode === "quick" && !searchBoxFocus);
   let selected = $state(0);
   let session = $state(0);
   let visible = $state(false);
@@ -208,7 +213,7 @@
       if (disposed) stop(); else unlisten.push(stop);
     }
     async function initialize() {
-      await subscribe<Timing & { history: HistorySnapshot }>("panel:shown", (payload) => {
+      await subscribe<Timing & { history: HistorySnapshot; experiments?: Experiments }>("panel:shown", (payload) => {
         if (payload.session < session) return;
         searchRequest += 1;
         session = payload.session;
@@ -221,9 +226,12 @@
         busy = false;
         composing = false;
         compositionEnded = -Infinity;
-        input?.blur();
+        searchBoxFocus = payload.experiments?.searchBoxFocus === true;
         timing = { session: payload.session, hotkeyToShowMs: payload.hotkeyToShowMs };
         const current = session;
+        // 实验开着时等 readonly 摘掉再聚焦，让焦点一直停在搜索框；关着时照旧 blur，按键全交给钩子。
+        if (searchBoxFocus) void tick().then(() => { if (!disposed && visible && session === current) input?.focus({ preventScroll: true }); });
+        else input?.blur();
         frame(() => frame(() => {
           if (visible && session === current) void command("report_painted", { session: current });
         }));
@@ -255,7 +263,8 @@
         visible = false;
         mode = "quick";
         composing = false;
-        input?.blur();
+        // 实验开着时焦点留在搜索框，下次呼出不用再聚焦。
+        if (!searchBoxFocus) input?.blur();
       });
       await subscribe<Timing>("panel:timing", (payload) => { if (payload.session === session) timing = payload; });
       await subscribe<SessionEvent & { message: string }>("panel:error", (payload) => {
@@ -305,8 +314,9 @@
       type="search"
       aria-label="搜索全文和文件名"
       placeholder={mode === "quick" ? "直接打字或按 / 搜索" : "搜索全文和文件名"}
-      readonly={mode === "quick"}
-      tabindex={mode === "quick" ? -1 : 0}
+      readonly={locked}
+      tabindex={locked ? -1 : 0}
+      class:quiet={searchBoxFocus && mode === "quick"}
       spellcheck="false"
       autocomplete="off"
       onpointerdown={searchPointer}

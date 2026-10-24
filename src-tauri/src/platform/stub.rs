@@ -36,6 +36,16 @@ pub mod hook {
         true
     }
 }
+// 输入法状态只在 Windows 上能查；这里只给出同样形状的 JSON。
+pub mod ime {
+    pub fn query(_: usize) -> serde_json::Value {
+        serde_json::json!({"open":null,"conversion":null,"native":null,"layout":"0x00000000",
+            "ime_window":false,"process_name":"","window_class":"","error":"unsupported"})
+    }
+    pub fn query_focused() -> serde_json::Value {
+        query(0)
+    }
+}
 pub mod window {
     use super::*;
     pub fn handle(_: &WebviewWindow) -> Result<usize> {

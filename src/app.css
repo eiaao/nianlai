@@ -44,6 +44,9 @@ input { width: 100%; height: 38px; padding: 8px 11px; border: 1px solid var(--bo
 input:focus { border-color: var(--accent); }
 input::placeholder { color: var(--muted); }
 input::-webkit-search-cancel-button { display: none; }
+/* 实验 NIANLAI_G0_SEARCHBOX_FOCUS：快速模式下搜索框持有焦点但不该像在编辑，藏掉光标和焦点色，不改布局。 */
+input.quiet { caret-color: transparent; }
+input.quiet:focus { border-color: var(--border); }
 .hint { margin-top: 8px; }
 ul { flex: 1; min-height: 0; list-style: none; margin: 0; padding: 3px 7px 7px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
 li { margin: 0; padding: 0; }
