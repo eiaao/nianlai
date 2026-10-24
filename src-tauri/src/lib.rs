@@ -8,6 +8,7 @@ mod platform;
 mod recovery;
 mod resuspend;
 mod samples;
+mod settings;
 mod tray;
 
 use panel::{Action, Controller};
@@ -15,6 +16,24 @@ use serde_json::json;
 use std::time::Instant;
 use tauri::{AppHandle, Manager};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
+
+#[tauri::command]
+fn get_settings(app: AppHandle) -> settings::Settings {
+    app.state::<settings::Store>().get()
+}
+
+#[tauri::command]
+fn set_settings(app: AppHandle, settings: serde_json::Value) -> Result<settings::Settings, String> {
+    let (settings, issues) = app.state::<settings::Store>().set(settings)?;
+    let controller = app.state::<Controller>();
+    for issue in issues {
+        issue.record(&controller.logger);
+    }
+    controller
+        .logger
+        .event("settings_saved", json!({"reason":"设置已保存，重启后生效"}));
+    Ok(settings)
+}
 
 #[tauri::command]
 fn get_history(app: AppHandle) -> history::Snapshot {
@@ -112,7 +131,12 @@ fn quit_prototype(app: AppHandle) -> Result<(), String> {
     panel::dispatch(&app, Action::QuitFrontend)
 }
 
-fn register_hotkeys(app: &AppHandle, logger: &log::Logger, automatic: bool) -> Result<(), String> {
+fn register_hotkeys(
+    app: &AppHandle,
+    logger: &log::Logger,
+    automatic: bool,
+    requested: &str,
+) -> Result<(), String> {
     let exit: Shortcut = "Ctrl+Alt+Shift+Q".parse().map_err(|e| format!("{e}"))?;
     if let Err(error) = app.global_shortcut().on_shortcut(exit, |app, _, event| {
         if event.state == ShortcutState::Pressed {
@@ -132,24 +156,9 @@ fn register_hotkeys(app: &AppHandle, logger: &log::Logger, automatic: bool) -> R
     if automatic {
         return Ok(());
     }
-    let requested = std::env::var("NIANLAI_HOTKEY").unwrap_or_else(|_| "Alt+V".into());
-    for (index, accelerator) in [requested.as_str(), "Ctrl+Shift+F12"]
-        .into_iter()
-        .enumerate()
-    {
+    for (index, accelerator) in [requested, "Ctrl+Shift+F12"].into_iter().enumerate() {
         let attempt = (|| -> Result<Shortcut, String> {
-            let shortcut: Shortcut = accelerator.parse().map_err(|e| format!("{e}"))?;
-            if shortcut == exit
-                || shortcut
-                    == "Ctrl+Alt+Shift+L"
-                        .parse::<Shortcut>()
-                        .map_err(|e| e.to_string())?
-            {
-                return Err("呼出键不能占用退出键或采集调试键".into());
-            }
-            if !platform::hook::supported(&shortcut) {
-                return Err("此呼出键不受钩子支持".into());
-            }
+            let shortcut = settings::parse_hotkey(accelerator)?;
             app.global_shortcut()
                 .on_shortcut(shortcut, |app, shortcut, event| {
                     let started = Instant::now();
@@ -183,7 +192,7 @@ fn register_hotkeys(app: &AppHandle, logger: &log::Logger, automatic: bool) -> R
             ),
         }
     }
-    Err("呼出键和备用键均注册失败，请查看 panel-log.jsonl".into())
+    Err("呼出键和备用键均注册失败，请查看日志目录中的 panel 日志".into())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -197,6 +206,8 @@ pub fn run() {
         .plugin(tray::autostart())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
+            get_settings,
+            set_settings,
             get_history,
             search_history,
             frontend_ready,
@@ -209,17 +220,40 @@ pub fn run() {
             quit_prototype
         ])
         .setup(|app| {
-            let logger = log::Logger::new()?;
+            let settings_file = settings::settings_path();
+            let (store, issues) = settings::Store::load(settings_file.clone());
+            let resolved = settings::Resolved::new(store.get(), settings_file);
+            let logger = log::Logger::with_settings(
+                &resolved.directories,
+                resolved.settings.log.max_total_mb,
+            )?;
             logger.event(
                 "startup",
-                json!({"platform":std::env::consts::OS,"guarded":recovery::is_child()}),
+                json!({
+                    "platform":std::env::consts::OS,
+                    "version":env!("CARGO_PKG_VERSION"),
+                    "guarded":recovery::is_child(),
+                }),
             );
+            logger.event(
+                "directories",
+                json!({
+                    "settings_dir":logger.directories.settings_file.parent(),
+                    "data_dir":logger.directories.data,
+                    "log_dir":logger.directories.logs,
+                }),
+            );
+            for issue in issues.iter().chain(&resolved.issues) {
+                issue.record(&logger);
+            }
+            app.manage(store);
             let window = app.get_webview_window("panel").ok_or("panel 窗口不存在")?;
             platform::window::no_activate(&window, true)?;
             platform::webview::initialize(&window)?;
             let plan = autocycle::Plan::from_env(&logger);
-            let resuspend = resuspend::from_env(&logger);
-            let experiments = panel::Experiments::from_env(&logger);
+            let resuspend = resuspend::from_settings(&resolved.settings.memory, &logger);
+            let experiments =
+                panel::Experiments::from_settings(&resolved.settings.experiments, &logger);
             let automatic = plan.is_some();
             app.manage(Controller::new(
                 window,
@@ -241,7 +275,9 @@ pub fn run() {
                         capture_logger.event("capture_start_failed", json!({"error":error}));
                     }
                 })?;
-            if let Err(error) = register_hotkeys(app.handle(), &logger, automatic) {
+            if let Err(error) =
+                register_hotkeys(app.handle(), &logger, automatic, &resolved.settings.hotkey)
+            {
                 logger.flush();
                 return Err(error.into());
             }

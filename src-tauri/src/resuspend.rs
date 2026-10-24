@@ -26,23 +26,11 @@ fn parse(value: &str) -> Result<Duration> {
         .map_err(|_| format!("分钟数“{value}”换算出的时长超出计时范围"))
 }
 
-pub fn from_env(logger: &Logger) -> Option<Duration> {
-    let value = match std::env::var("NIANLAI_G0_RESUSPEND_MIN") {
-        Ok(value) => value,
-        Err(std::env::VarError::NotPresent) => return None,
-        Err(std::env::VarError::NotUnicode(_)) => {
-            logger.event(
-                "resuspend_invalid",
-                json!({"reason": "环境变量不是有效 Unicode"}),
-            );
-            return None;
-        }
-    };
-    match parse(&value) {
-        Ok(_) if logger.tier == 1 => {
-            logger.event("resuspend_ignored", json!({"reason":"memory_tier_1"}));
-            None
-        }
+pub fn from_settings(settings: &crate::settings::Memory, logger: &Logger) -> Option<Duration> {
+    if settings.resuspend_minutes == 0.0 {
+        return None;
+    }
+    match parse(&settings.resuspend_minutes.to_string()) {
         Ok(interval) => {
             logger.event(
                 "resuspend_enabled",

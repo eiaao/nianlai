@@ -96,25 +96,14 @@ impl History {
         }
     }
     pub fn initialize(&self) {
-        let specified = std::env::var_os("NIANLAI_G0_DATA_DIR");
-        let location = if specified.is_some() {
-            "环境变量指定"
-        } else {
-            "默认位置"
-        };
-        let directory = specified.map(PathBuf::from).or_else(|| {
-            std::env::var_os("LOCALAPPDATA").map(|base| PathBuf::from(base).join("Nianlai/g0/data"))
-        });
-        if let Some(path) = &directory {
-            let _ = self.directory.set(path.clone());
-        }
-        let opened = directory
-            .ok_or(nianlai_store::Error::Invalid("data_directory_missing"))
-            .and_then(|path| {
-                *self.application_guard.lock().unwrap() =
-                    Some(nianlai_store::application_guard(&path)?);
-                Store::open(&path, self.hash)
-            });
+        let location = self.logger.directories.data_source;
+        let directory = self.logger.directories.data.clone();
+        let _ = self.directory.set(directory.clone());
+        let opened = (|| {
+            *self.application_guard.lock().unwrap() =
+                Some(nianlai_store::application_guard(&directory)?);
+            Store::open(&directory, self.hash)
+        })();
         match opened {
             Ok(store) => {
                 let mut report = serde_json::to_value(store.report()).unwrap();
@@ -349,5 +338,60 @@ impl History {
             .map(Store::stats)
             .unwrap_or_default();
         self.logger.event("store_summary", json!(stats));
+    }
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::*;
+    use crate::settings::{Directories, tests::Directory};
+    use std::fs;
+
+    fn directories(directory: &Directory) -> Directories {
+        Directories {
+            settings_file: directory.0.join("settings.json"),
+            data: directory.0.join("configured-data"),
+            logs: directory.0.join("logs"),
+            data_source: "设置文件指定",
+            test_data_dir: false,
+        }
+    }
+
+    #[test]
+    fn initializes_store_and_exports_in_startup_data_directory() {
+        let directory = Directory::new();
+        let directories = directories(&directory);
+        let logger = Logger::with_settings(&directories, 20).unwrap();
+        let history = History::new(nianlai_store::hash::sha256, logger);
+        history.initialize();
+        assert_eq!(history.store().unwrap().directory(), directories.data);
+        assert!(directories.data.join("history.db").is_file());
+        assert_eq!(history.exports(), Some(directories.data.join("exports")));
+        assert_eq!(history.snapshot().store_status, None);
+        assert!(!directories.settings_file.exists());
+    }
+
+    #[test]
+    fn newer_schema_in_startup_directory_preserves_database_and_reports_upgrade() {
+        let directory = Directory::new();
+        let directories = directories(&directory);
+        let mut database =
+            include_bytes!("../../../crates/nianlai-store/tests/fixtures/v1.db").to_vec();
+        // SQLite 文件头的 user_version 位于第 60 字节；夹具无 WAL，直接构造更新版本的库。
+        database[60..64].copy_from_slice(&(nianlai_store::VERSION + 1).to_be_bytes());
+        fs::create_dir(&directories.data).unwrap();
+        let database_file = directories.data.join("history.db");
+        fs::write(&database_file, &database).unwrap();
+        let logger = Logger::with_settings(&directories, 20).unwrap();
+        let history = History::new(nianlai_store::hash::sha256, logger);
+        history.initialize();
+        assert!(history.store().is_none());
+        assert_eq!(
+            history.snapshot().store_status,
+            Some("这个数据目录由更新版本的拈来创建，请升级后再打开")
+        );
+        assert_eq!(history.exports(), Some(directories.data.join("exports")));
+        assert_eq!(fs::read(database_file).unwrap(), database);
+        assert!(!directories.data.join("backups").exists());
     }
 }

@@ -40,17 +40,15 @@ struct AutoVisible {
     hidden_ms: f64,
 }
 
-// 实验开关：快速模式下让搜索框持有页面内焦点。启动时读一次环境变量，随 panel:shown 发给前端。
+// 实验开关：快速模式下让搜索框持有页面内焦点。启动时读一次设置，随 panel:shown 发给前端。
 #[derive(Clone, Copy, Default)]
 pub struct Experiments {
     pub search_box_focus: bool,
 }
 impl Experiments {
-    pub fn from_env(logger: &Logger) -> Self {
+    pub fn from_settings(settings: &crate::settings::Experiments, logger: &Logger) -> Self {
         let experiments = Self {
-            search_box_focus: flag_enabled(
-                std::env::var("NIANLAI_G0_SEARCHBOX_FOCUS").ok().as_deref(),
-            ),
+            search_box_focus: settings.searchbox_focus,
         };
         logger.event(
             "experiment_searchbox_focus",
@@ -62,7 +60,8 @@ impl Experiments {
         json!({"searchBoxFocus":self.search_box_focus})
     }
 }
-// 只认 "1"（和 NIANLAI_MEMORY_TIER 一样），其他值都当关闭，默认行为不变。
+// 保留旧开关解析的既有回归测试；运行时改用设置中的布尔值。
+#[cfg(test)]
 fn flag_enabled(value: Option<&str>) -> bool {
     value.map(str::trim) == Some("1")
 }

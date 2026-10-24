@@ -6,7 +6,9 @@
 //! - 其它（崩溃、被杀、release 下 panic=abort、启动失败）→ 等 2 秒重新拉起；24 小时滚动窗口内最多拉起 3 次，
 //!   额度用完后再次异常退出就弹系统消息框“拈来连续异常退出 3 次，已停止自动重启。日志在 <目录>”，然后以 1 退出。
 //!
-//! 每次子进程退出只往日志目录（和 log.rs 同一个 panel-log.jsonl）追加一行：时间、退出码、第几次、动作。
+//! 每次子进程退出只往日志目录的当天 UTC 文件 panel-YYYYMMDD.jsonl 追加一行：时间、退出码、第几次、动作。
+//! 有效的 NIANLAI_G0_DATA_DIR 同时覆盖日志位置并启用 panel-log.jsonl 兼容副本；守护者不读设置文件，
+//! 日志目录本来也不受文件设置影响。轮转删除仅由应用执行，守护者每次追加后关闭句柄，避免写入已删除的旧文件。
 //!
 //! 角色怎么判断（`role`，按顺序）：
 //! 1. 命令行带 `--child` → 真正的应用（这是守护者拉起的子进程）。
@@ -151,57 +153,77 @@ pub fn supervise(
     }
 }
 
-// 守护者的日志：和应用同一个文件，但不开线程、不带应用那套固定字段。
+// 守护者的日志：共用应用的目录解析与文件名，但不读设置文件、不开线程、不轮转删除。
 pub struct Journal {
     pub directory: PathBuf,
-    file: Option<File>,
+    compatibility: bool,
 }
 impl Journal {
     pub fn open() -> Self {
-        let primary = log::directory();
-        match Self::open_in(&primary) {
-            Some(file) => Self {
-                directory: primary,
-                file: Some(file),
-            },
-            None => {
-                let fallback = log::fallback_directory();
-                Self {
-                    file: Self::open_in(&fallback),
-                    directory: fallback,
-                }
-            }
-        }
+        // Resolved 只解析传入的默认值和环境变量，不调用 Store::load，也不创建设置文件。
+        let resolved = crate::settings::Resolved::new(
+            crate::settings::Settings::default(),
+            crate::settings::settings_path(),
+        );
+        Self::at(
+            &resolved.directories.logs,
+            resolved.directories.test_data_dir,
+            log::now_ms(),
+        )
     }
-    #[cfg(test)]
-    pub fn at(directory: &Path) -> Self {
-        Self {
+    fn at(directory: &Path, compatibility: bool, time: u64) -> Self {
+        let mut journal = Self {
             directory: directory.to_path_buf(),
-            file: Self::open_in(directory),
-        }
+            compatibility,
+        };
+        let _ = journal.files(time);
+        journal
     }
-    fn open_in(directory: &Path) -> Option<File> {
-        fs::create_dir_all(directory).ok()?;
-        OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(directory.join(log::FILE))
-            .ok()
+    fn open_in(
+        directory: &Path,
+        compatibility: bool,
+        time: u64,
+    ) -> io::Result<(File, Option<File>)> {
+        fs::create_dir_all(directory)?;
+        let open = |name| {
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(directory.join(name))
+        };
+        let file = open(log::daily_file_name(time))?;
+        let compatibility = compatibility
+            .then(|| open(log::COMPATIBILITY_FILE.to_owned()))
+            .transpose()?;
+        Ok((file, compatibility))
+    }
+    fn files(&mut self, time: u64) -> io::Result<(File, Option<File>)> {
+        Self::open_in(&self.directory, self.compatibility, time).or_else(|_| {
+            self.directory = log::fallback_directory();
+            Self::open_in(&self.directory, self.compatibility, time)
+        })
     }
     // 一行 JSON：时间、退出码、第几次、动作。整行一次写入，和应用进程交错追加也不会拆开。
     pub fn record(&mut self, exit: Exit) {
+        self.record_at(exit, log::now_ms());
+    }
+    fn record_at(&mut self, exit: Exit, time: u64) {
         let action = match exit.decision {
             Decision::Finished => "exit",
             Decision::Restart { .. } => "restart",
             Decision::GiveUp { .. } => "stop",
         };
         let row = json!({
-            "time_ms": log::now_ms(), "event": "guardian_child_exit",
+            "time_ms": time, "event": "guardian_child_exit",
             "exit_code": exit.code, "spawn_failed": exit.spawn_failed,
             "attempt": exit.restarts, "action": action,
         });
-        if let Some(file) = &mut self.file {
-            let _ = file.write_all(format!("{row}\n").as_bytes());
+        if let Ok((mut file, compatibility)) = self.files(time) {
+            let line = format!("{row}\n");
+            let _ = file.write_all(line.as_bytes());
+            if let Some(mut file) = compatibility {
+                let _ = file.write_all(line.as_bytes());
+            }
         }
     }
 }
@@ -423,26 +445,36 @@ mod tests {
             std::process::id(),
             log::now_ms()
         ));
-        let mut journal = Journal::at(&directory);
-        journal.record(Exit {
-            code: Some(1),
-            spawn_failed: false,
-            decision: Decision::Restart { attempt: 1 },
-            restarts: 1,
-        });
-        journal.record(Exit {
-            code: None,
-            spawn_failed: true,
-            decision: Decision::GiveUp { attempts: 3 },
-            restarts: 3,
-        });
-        journal.record(Exit {
-            code: Some(0),
-            spawn_failed: false,
-            decision: Decision::Finished,
-            restarts: 2,
-        });
-        let text = fs::read_to_string(directory.join(log::FILE)).unwrap();
+        let time = log::now_ms();
+        let mut journal = Journal::at(&directory, false, time);
+        journal.record_at(
+            Exit {
+                code: Some(1),
+                spawn_failed: false,
+                decision: Decision::Restart { attempt: 1 },
+                restarts: 1,
+            },
+            time,
+        );
+        journal.record_at(
+            Exit {
+                code: None,
+                spawn_failed: true,
+                decision: Decision::GiveUp { attempts: 3 },
+                restarts: 3,
+            },
+            time,
+        );
+        journal.record_at(
+            Exit {
+                code: Some(0),
+                spawn_failed: false,
+                decision: Decision::Finished,
+                restarts: 2,
+            },
+            time,
+        );
+        let text = fs::read_to_string(directory.join(log::daily_file_name(time))).unwrap();
         fs::remove_dir_all(&directory).unwrap();
         let rows: Vec<serde_json::Value> = text
             .lines()
@@ -474,5 +506,130 @@ mod tests {
                 "time_ms"
             ]
         );
+    }
+
+    #[test]
+    fn journal_appends_across_utc_midnight_and_restart_with_compatibility_copy() {
+        let directory = crate::settings::tests::Directory::new();
+        let exit = Exit {
+            code: Some(0),
+            spawn_failed: false,
+            decision: Decision::Finished,
+            restarts: 0,
+        };
+        let mut journal = Journal::at(&directory.0, true, 86_399_999);
+        journal.record_at(exit, 86_399_999);
+        journal.record_at(exit, 86_400_000);
+        drop(journal);
+        let mut journal = Journal::at(&directory.0, true, 86_400_001);
+        journal.record_at(exit, 86_400_001);
+
+        let first = fs::read_to_string(directory.0.join("panel-19700101.jsonl")).unwrap();
+        let second = fs::read_to_string(directory.0.join("panel-19700102.jsonl")).unwrap();
+        assert_eq!(first.lines().count(), 1);
+        assert_eq!(second.lines().count(), 2);
+        let times: Vec<u64> = first
+            .lines()
+            .chain(second.lines())
+            .map(|line| {
+                serde_json::from_str::<serde_json::Value>(line).unwrap()["time_ms"]
+                    .as_u64()
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(times, [86_399_999, 86_400_000, 86_400_001]);
+        assert_eq!(
+            fs::read_to_string(directory.0.join(log::COMPATIBILITY_FILE)).unwrap(),
+            format!("{first}{second}")
+        );
+    }
+
+    #[test]
+    fn journal_uses_daily_file_without_compatibility_copy_by_default() {
+        let directory = crate::settings::tests::Directory::new();
+        let mut journal = Journal::at(&directory.0, false, 0);
+        journal.record_at(
+            Exit {
+                code: Some(0),
+                spawn_failed: false,
+                decision: Decision::Finished,
+                restarts: 0,
+            },
+            0,
+        );
+        let text = fs::read_to_string(directory.0.join("panel-19700101.jsonl")).unwrap();
+        assert_eq!(text.lines().count(), 1);
+        assert!(!directory.0.join(log::COMPATIBILITY_FILE).exists());
+    }
+
+    #[test]
+    fn journal_reopens_after_application_rotation_and_never_prunes() {
+        let directory = crate::settings::tests::Directory::new();
+        let old = directory.0.join("panel-19691231.jsonl");
+        let database = directory.0.join("history.db");
+        fs::write(&old, b"1234567890").unwrap();
+        fs::write(&database, b"1234567890").unwrap();
+        let mut journal = Journal::at(&directory.0, true, 0);
+        let exit = Exit {
+            code: Some(1),
+            spawn_failed: false,
+            decision: Decision::Restart { attempt: 1 },
+            restarts: 1,
+        };
+        journal.record_at(exit, 0);
+        let daily = directory.0.join("panel-19700101.jsonl");
+        let compatibility = directory.0.join(log::COMPATIBILITY_FILE);
+        let first = fs::read_to_string(&daily).unwrap();
+        // 模拟应用轮转删除；守护者不能留着旧句柄，下一次退出必须写回新文件。
+        fs::remove_file(&daily).unwrap();
+        fs::remove_file(&compatibility).unwrap();
+        journal.record_at(exit, 0);
+        assert_eq!(fs::read_to_string(daily).unwrap(), first);
+        assert_eq!(fs::read_to_string(compatibility).unwrap(), first);
+        assert_eq!(fs::read(old).unwrap(), b"1234567890");
+        assert_eq!(fs::read(database).unwrap(), b"1234567890");
+    }
+
+    #[test]
+    fn journal_shares_daily_files_and_compatibility_with_application() {
+        for compatibility in [false, true] {
+            let directory = crate::settings::tests::Directory::new();
+            let directories = crate::settings::Directories {
+                settings_file: directory.0.join("settings.json"),
+                data: directory.0.join("data"),
+                logs: directory.0.join("logs"),
+                data_source: "默认位置",
+                test_data_dir: compatibility,
+            };
+            let logger = log::Logger::with_settings(&directories, 20).unwrap();
+            logger.event("应用验证", json!({"time_ms":0}));
+            logger.flush();
+            let mut journal = Journal::at(&directories.logs, compatibility, 0);
+            journal.record_at(
+                Exit {
+                    code: Some(0),
+                    spawn_failed: false,
+                    decision: Decision::Finished,
+                    restarts: 0,
+                },
+                0,
+            );
+            let daily = fs::read_to_string(directories.logs.join("panel-19700101.jsonl")).unwrap();
+            let rows: Vec<serde_json::Value> = daily
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            assert_eq!(rows.len(), 2);
+            assert_eq!(rows[0]["event"], "应用验证");
+            assert_eq!(rows[1]["event"], "guardian_child_exit");
+            let copy = directories.logs.join(log::COMPATIBILITY_FILE);
+            if compatibility {
+                assert_eq!(fs::read_to_string(copy).unwrap(), daily);
+            } else {
+                assert!(!copy.exists());
+            }
+            assert!(!directories.settings_file.exists());
+            assert!(!directories.data.exists());
+        }
     }
 }
