@@ -75,6 +75,46 @@ fn stamp(mut fields: Value, session: u64, target: &Target) -> Value {
     fields
 }
 
+// 目标程序可能以管理员身份运行时，粘贴只会降级成"只复制"，面板停留这么久把提示给用户看完再自动收起。
+// 来源：M0-6（10-24 夜实测，面板在结论出来前约 36 ms 就收起了，"目标程序以管理员身份运行"的提示要
+// 下次呼出才看得到）。3 秒够读完一行提示，再长会一直挡着目标窗口；期间 Esc、呼出键、点面板外都能提前收起。
+pub const ELEVATED_HINT_DWELL: Duration = Duration::from_secs(3);
+
+// 管理员提示的停留状态。预判要停留时先占位（dwell 为 None，等粘贴结论），结论确认后才开始计时。
+struct Hint {
+    since: Instant,
+    dwell: Option<Duration>,
+}
+
+// 粘贴前的预判：面板要不要先别收起。判断顺序和 paste::perform 一致——复制模式、目标失效、用户切走
+// 都排在完整性比较前面，这些情况照旧立即收起；只有走到完整性比较且目标不是 allowed（比样机高，或查不到、
+// 按高处理）时，结论必然是 copied_only / target_may_be_elevated，此时面板留着等结论。
+fn defers_hide_for_elevated(
+    mode: PasteMode,
+    target_valid: bool,
+    external_switch: bool,
+    integrity: &Value,
+) -> bool {
+    mode != PasteMode::Copy && target_valid && !external_switch && integrity["status"] != "allowed"
+}
+
+// 根据粘贴结论决定面板停留多久：只有"只复制 + 目标可能是管理员"停留 ELEVATED_HINT_DWELL；
+// 其他 copied_only 原因（目标失效、用户切走、发键前确认没过、发键失败等）和正常粘贴都不停留。
+fn dwell_after_paste(result: &Value) -> Option<Duration> {
+    (result["paste_result"] == "copied_only" && result["reason"] == "target_may_be_elevated")
+        .then_some(ELEVATED_HINT_DWELL)
+}
+
+// 停留结束的日志字段：计划时长、实际停留时长、是不是到点自动收起（否则是 Esc / 呼出键 / 点面板外提前收的）。
+fn hint_hidden_fields(dwell: Duration, shown: Duration) -> Value {
+    json!({
+        "reason":"target_may_be_elevated",
+        "dwell_ms":dwell.as_millis() as u64,
+        "shown_ms":shown.as_secs_f64() * 1000.0,
+        "timed_out":shown >= dwell,
+    })
+}
+
 pub struct Controller {
     inner: Mutex<Panel>,
     pub logger: Logger,
@@ -100,6 +140,8 @@ struct Panel {
     awaiting_search: bool,
     memory: Arc<webview::MemoryState>,
     pasting: bool,
+    // 管理员提示：粘贴预判为"目标可能是管理员"后面板不收起，这里记着停留状态；None 表示没在停留。
+    hint: Option<Hint>,
     auto_enabled: bool,
     auto_plan: Option<autocycle::Plan>,
     auto_stop: Option<mpsc::Sender<()>>,
@@ -170,6 +212,10 @@ pub enum Action {
         session: u64,
         result: Value,
     },
+    // 管理员提示停留到点：计时线程发回，面板自动收起。
+    HintElapsed {
+        session: u64,
+    },
     Painted {
         session: u64,
         received: Instant,
@@ -211,6 +257,7 @@ impl Controller {
                 awaiting_search: false,
                 memory: Arc::new(webview::MemoryState::default()),
                 pasting: false,
+                hint: None,
                 auto_enabled: plan.is_some(),
                 auto_plan: plan,
                 auto_stop: None,
@@ -341,6 +388,7 @@ impl Panel {
         self.painted = false;
         self.foreground_taken = false;
         self.awaiting_search = false;
+        self.hint = None;
         self.auto_visible = None;
         let automatic = match source {
             ShowSource::Hotkey { target, alt } => {
@@ -472,6 +520,17 @@ impl Panel {
         }
         if self.mode == Mode::Hidden {
             return Ok(false);
+        }
+        // 管理员提示停留中被收起（到点、Esc、呼出键、点面板外都走这里）：记一条停留结束，含实际时长。
+        // 预判后还没等到结论就收起的（占位、dwell 为 None）只清掉标记，不算停留过。
+        if let Some(hint) = self.hint.take()
+            && let Some(dwell) = hint.dwell
+        {
+            self.log(
+                logger,
+                "elevated_hint_hidden",
+                hint_hidden_fields(dwell, hint.since.elapsed()),
+            );
         }
         let foreground = window::foreground();
         let panel = window::handle(&self.window)?;
@@ -659,6 +718,42 @@ impl Panel {
         self.log(logger, "search_ready", json!({"search_box_ready":ready,"foreground_ok":window::foreground()==window::handle(&self.window)?}));
         Ok(())
     }
+    fn mode_name(&self) -> &'static str {
+        match self.mode {
+            Mode::Hidden => "hidden",
+            Mode::Quick => "quick",
+            Mode::Search => "search",
+            Mode::Auto => "auto",
+        }
+    }
+    // 粘贴结论确认是"目标可能是管理员、只复制了"：开始停留计时，到点自动收起。期间不碰窗口样式、不还焦点、
+    // 钩子照旧——快速模式下面板仍不激活；搜索模式下焦点等收起时按原逻辑还（还不回去只会记在 focus_restored 里）。
+    fn begin_hint(
+        &mut self,
+        app: &AppHandle,
+        logger: &Logger,
+        dwell: Duration,
+    ) -> platform::Result<()> {
+        let session = self.session;
+        let app = app.clone();
+        std::thread::Builder::new()
+            .name("elevated-hint".into())
+            .spawn(move || {
+                std::thread::sleep(dwell);
+                let _ = dispatch(&app, Action::HintElapsed { session });
+            })
+            .map_err(|error| format!("管理员提示计时线程启动失败：{error}"))?;
+        self.hint = Some(Hint {
+            since: Instant::now(),
+            dwell: Some(dwell),
+        });
+        // target_foreground：停留开始时目标是否仍在前台（快速模式应为 true；搜索模式前台是面板，为 false）。
+        self.log(logger, "elevated_hint_shown", json!({
+            "reason":"target_may_be_elevated","dwell_ms":dwell.as_millis() as u64,
+            "panel_mode":self.mode_name(),"target_foreground":window::foreground()==self.target.window,
+        }));
+        Ok(())
+    }
     fn act(&mut self, app: &AppHandle, logger: &Logger, action: Action) -> platform::Result<()> {
         if self.auto_enabled {
             let command = match &action {
@@ -792,8 +887,13 @@ impl Panel {
                     self.hide(logger)?;
                 }
             }
-            Action::Search { session, started } if self.current(session) => {
+            Action::Search { session, started } if self.current(session) && self.hint.is_none() => {
                 self.begin_search(app, logger, started)?
+            }
+            // 管理员提示停留期间不切搜索模式（不抢焦点、不开新的键处理）：快速模式下钩子已把这些键吞掉并
+            // 缓冲，收起时按原逻辑作废并记入 search_replay。
+            Action::Search { session, .. } if self.current(session) => {
+                self.log(logger, "search_ignored", json!({"reason":"elevated_hint"}));
             }
             Action::SearchActivated { session, success }
                 if self.current(session) && self.mode == Mode::Search =>
@@ -833,7 +933,7 @@ impl Panel {
                 id,
                 mode,
                 started,
-            } if self.current(session) && !self.pasting => {
+            } if self.current(session) && !self.pasting && self.hint.is_none() => {
                 let owner = window::handle(&self.window)?;
                 let foreground = window::foreground();
                 let switched_to = self.hooks.as_ref().map_or(0, Hooks::switched_to);
@@ -855,20 +955,45 @@ impl Panel {
                 }
                 let target = self.target.clone();
                 let restore_focus = self.foreground_taken || foreground == owner;
-                let hooks = self.hooks.take();
-                self.mode = Mode::Hidden;
-                self.awaiting_search = false;
-                window::hide(&self.window)?;
-                self.emit("panel:hidden", json!({}));
-                webview::set_visible(
-                    &self.window,
-                    false,
-                    logger.clone(),
-                    self.session,
-                    self.memory.clone(),
-                )?;
-                self.log(logger, "hide_source", json!({"source":"paste"}));
-                self.log(logger, "hidden", json!({}));
+                // M0-6：目标可能是管理员时粘贴只会降级成只复制，面板先不收起，等结论出来当场停留提示。
+                // 钩子留着（快速模式下按键照旧被吞、Esc 照旧收起、点面板外照旧收起），也不在这里还焦点。
+                let integrity = paste::compare_integrity(&target);
+                let keep_visible = defers_hide_for_elevated(
+                    mode,
+                    window::valid(&target),
+                    external_switch,
+                    &integrity,
+                );
+                let hooks = if keep_visible {
+                    None
+                } else {
+                    self.hooks.take()
+                };
+                if keep_visible {
+                    self.hint = Some(Hint {
+                        since: Instant::now(),
+                        dwell: None,
+                    });
+                    self.log(
+                        logger,
+                        "elevated_target",
+                        json!({"integrity":integrity,"panel_mode":self.mode_name()}),
+                    );
+                } else {
+                    self.mode = Mode::Hidden;
+                    self.awaiting_search = false;
+                    window::hide(&self.window)?;
+                    self.emit("panel:hidden", json!({}));
+                    webview::set_visible(
+                        &self.window,
+                        false,
+                        logger.clone(),
+                        self.session,
+                        self.memory.clone(),
+                    )?;
+                    self.log(logger, "hide_source", json!({"source":"paste"}));
+                    self.log(logger, "hidden", json!({}));
+                }
                 self.pasting = true;
                 let controller = app.state::<Controller>();
                 let clipboard = controller.clipboard.clone();
@@ -898,12 +1023,16 @@ impl Panel {
                             let _ = dispatch(&app, Action::PasteSent { session });
                         };
                         // 先按原流程还焦点，再读取大内容。读完不再还焦点，避免抢回用户在读库期间切走的窗口。
-                        let restored = (restore_focus && !external_switch).then(|| window::restore(&target));
+                        // 面板没收起（管理员提示）时不还：搜索模式下要等停留结束、收起时再按原逻辑还。
+                        let restored = (restore_focus && !external_switch && !keep_visible).then(|| window::restore(&target));
                         let read_started = Instant::now();
                         let loaded = history.get(id);
                         let exports = history.exports();
                         let store_read_ms = read_started.elapsed().as_secs_f64() * 1000.0;
-                        let external_switch = external_switch || window::foreground() != target.window;
+                        // 面板没收起时它自己持有前台不算切走（搜索模式下前台本来就是面板）。
+                        let foreground = window::foreground();
+                        let external_switch = external_switch
+                            || (foreground != target.window && !(keep_visible && foreground == owner));
                         let mut result = match loaded {
                             Ok(Some(content)) => paste::execute(Request {
                                 target, panel: owner, record_id: id, content, mode, started,
@@ -937,6 +1066,13 @@ impl Panel {
                 }
                 if session == self.session {
                     self.pasting = false;
+                    // 预判时没收起的面板：按实际结论决定是停留提示还是现在收起。
+                    let deferred = self.hint.take().is_some() && self.current(session);
+                    let dwell = if deferred {
+                        dwell_after_paste(&result)
+                    } else {
+                        None
+                    };
                     if result["clipboard_written"] == false {
                         let message = if result["reason"] == "record_missing" {
                             "这条记录已不在历史里"
@@ -947,9 +1083,43 @@ impl Panel {
                         };
                         self.emit("panel:error", json!({"message":message}));
                     } else {
+                        if let Some(dwell) = dwell {
+                            // 告诉前端面板还开着、要停留：页脚当场显示提示，停留期间不再发起粘贴。
+                            result["hint_dwell_ms"] = json!(dwell.as_millis() as u64);
+                        }
                         self.emit("panel:paste-result", result);
                     }
+                    if deferred {
+                        match dwell {
+                            Some(dwell) => self.begin_hint(app, logger, dwell)?,
+                            None => {
+                                // 预判要停留但结论不是"管理员、只复制"（期间目标关了、用户切走、记录没了）：
+                                // 不扩大停留范围，现在收起。
+                                self.log(
+                                    logger,
+                                    "hide_source",
+                                    json!({"source":"paste_without_hint"}),
+                                );
+                                self.hide(logger)?;
+                            }
+                        }
+                    }
                 }
+            }
+            Action::HintElapsed { session }
+                if self.current(session)
+                    && self.hint.as_ref().is_some_and(|hint| hint.dwell.is_some()) =>
+            {
+                self.log(
+                    logger,
+                    "hide_source",
+                    json!({"source":"elevated_hint_timeout"}),
+                );
+                self.hide(logger)?;
+            }
+            // 停留期间不再发起粘贴（前端 busy 也保持着，这里是兜底）。
+            Action::Paste { session, .. } if self.current(session) && self.hint.is_some() => {
+                self.log(logger, "paste_ignored", json!({"reason":"elevated_hint"}));
             }
             Action::Painted { session, received } if self.current(session) && !self.painted => {
                 if let (Some(started), Some(shown)) = (self.started, self.shown) {
@@ -1037,6 +1207,130 @@ mod tests {
         assert_eq!(
             Experiments::default().payload(),
             json!({"searchBoxFocus":false})
+        );
+    }
+
+    #[test]
+    fn only_elevated_copy_only_results_keep_the_panel() {
+        assert_eq!(ELEVATED_HINT_DWELL, Duration::from_secs(3));
+        assert_eq!(
+            dwell_after_paste(
+                &json!({"paste_result":"copied_only","reason":"target_may_be_elevated"})
+            ),
+            Some(ELEVATED_HINT_DWELL)
+        );
+        // 其他 copied_only 原因保持现状，不停留。
+        for reason in [
+            "external_switch",
+            "invalid_target",
+            "preflight_timeout",
+            "conditions_changed",
+            "send_failed",
+            "user_copy",
+        ] {
+            assert_eq!(
+                dwell_after_paste(&json!({"paste_result":"copied_only","reason":reason})),
+                None,
+                "{reason}"
+            );
+        }
+        // 真发了键、或 Shift+Enter 只复制：不管原因字段写什么都不停留。
+        for result in ["copied", "sent", "confirmed"] {
+            assert_eq!(
+                dwell_after_paste(
+                    &json!({"paste_result":result,"reason":"target_may_be_elevated"})
+                ),
+                None,
+                "{result}"
+            );
+        }
+        // 没写进剪贴板（记录不存在、读库失败）和线程报错时结论为空，不停留。
+        assert_eq!(
+            dwell_after_paste(
+                &json!({"paste_result":null,"reason":"record_missing","clipboard_written":false})
+            ),
+            None
+        );
+        assert_eq!(dwell_after_paste(&json!({})), None);
+    }
+
+    #[test]
+    fn hide_is_deferred_only_when_perform_would_reach_the_integrity_check() {
+        let higher = json!({"status":"higher"});
+        let unknown = json!({"status":"unknown_assume_higher"});
+        let allowed = json!({"status":"allowed"});
+        assert!(defers_hide_for_elevated(
+            PasteMode::Paste,
+            true,
+            false,
+            &higher
+        ));
+        assert!(defers_hide_for_elevated(
+            PasteMode::Text,
+            true,
+            false,
+            &higher
+        ));
+        // 查不到目标权限时 perform 也按"可能更高"降级，预判要一致。
+        assert!(defers_hide_for_elevated(
+            PasteMode::Paste,
+            true,
+            false,
+            &unknown
+        ));
+        assert!(defers_hide_for_elevated(
+            PasteMode::Paste,
+            true,
+            false,
+            &json!({})
+        ));
+        // Shift+Enter 只复制、目标已失效、用户切走：perform 在完整性比较之前就返回，照旧立即收起。
+        assert!(!defers_hide_for_elevated(
+            PasteMode::Copy,
+            true,
+            false,
+            &higher
+        ));
+        assert!(!defers_hide_for_elevated(
+            PasteMode::Paste,
+            false,
+            false,
+            &higher
+        ));
+        assert!(!defers_hide_for_elevated(
+            PasteMode::Paste,
+            true,
+            true,
+            &higher
+        ));
+        assert!(!defers_hide_for_elevated(
+            PasteMode::Paste,
+            true,
+            false,
+            &allowed
+        ));
+        assert!(!defers_hide_for_elevated(
+            PasteMode::Text,
+            true,
+            false,
+            &allowed
+        ));
+    }
+
+    #[test]
+    fn hint_hidden_fields_tell_timeout_from_early_hide() {
+        let early = hint_hidden_fields(ELEVATED_HINT_DWELL, Duration::from_millis(1200));
+        assert_eq!(
+            early,
+            json!({"reason":"target_may_be_elevated","dwell_ms":3000,"shown_ms":1200.0,"timed_out":false})
+        );
+        assert_eq!(
+            hint_hidden_fields(ELEVATED_HINT_DWELL, Duration::from_millis(3004))["timed_out"],
+            true
+        );
+        assert_eq!(
+            hint_hidden_fields(ELEVATED_HINT_DWELL, ELEVATED_HINT_DWELL)["timed_out"],
+            true
         );
     }
 

@@ -207,7 +207,8 @@ fn integrity(process: HANDLE) -> Option<u32> {
     }
 }
 
-fn compare_integrity(target: &Target) -> Value {
+// 面板在粘贴前也用它预判目标是不是管理员（M0-6：预判为是就先不收起面板），判定和 perform 里的一致。
+pub fn compare_integrity(target: &Target) -> Value {
     let own = integrity(unsafe { GetCurrentProcess() });
     let other = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, target.process) }
         .ok()

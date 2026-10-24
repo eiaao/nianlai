@@ -16,7 +16,11 @@
     layer3: { conclusion: string };
     as_text: { conversion: "paths" | "image_path" | "plain_text" | null; error?: string } | null;
     selected_to_result_ms: number;
+    // 后端判定面板要停留（目标程序是管理员、只复制了）时带上停留毫秒数；其他结论没有这个字段。
+    hint_dwell_ms?: number;
   };
+  // 目标程序以管理员身份运行时粘贴降级为只复制，页脚当场给这句提示（M0-6）。
+  const ELEVATED_HINT = "目标程序以管理员身份运行，已复制到剪贴板，请手动粘贴（Ctrl+V）";
   let history = $state<HistorySnapshot>({ items: [], total: 0, recording: false, last_recorded_ms: null, store_status: null });
   let query = $state("");
   let mode = $state<"quick" | "search">("quick");
@@ -272,13 +276,15 @@
       });
       await subscribe<PasteResult>("panel:paste-result", (payload) => {
         if (payload.session !== session) return;
+        // 面板停留中（后端带了 hint_dwell_ms）：只显示提示，busy 保持到收起——停留期间 1–9、Enter、点条目
+        // 都不再发起粘贴；Esc、呼出键、点面板外照旧收起。
+        if (payload.hint_dwell_ms) { message = ELEVATED_HINT; return; }
         busy = false;
         const labels = {
           copied: "已复制",
           sent: payload.layer2?.timed_out ? "已发送粘贴指令，可能没粘进去" : "已发送粘贴指令",
           confirmed: "确认已粘贴",
-          copied_only: payload.reason === "target_may_be_elevated"
-            ? "目标程序以管理员身份运行，已复制，请手动粘贴" : "已复制，请到目标位置粘贴",
+          copied_only: payload.reason === "target_may_be_elevated" ? ELEVATED_HINT : "已复制，请到目标位置粘贴",
         };
         const evidence: string[] = [labels[payload.paste_result]];
         const conversion = payload.as_text?.conversion;
