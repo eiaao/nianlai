@@ -33,6 +33,24 @@ pnpm tauri dev
 - `g0-store`：历史库的压测和维护工具，命令有 `fill`、`search-bench`、`writer`、`check`、`snapshot`、`restore` 等。运行 `cargo run --release -p g0-store -- <命令> --dir <数据目录>`。
 - `g0-crash-test.ps1`、`g0-store-validation.ps1`、`g0-smoke-test.ps1`：基于 `g0-store` 的故障注入（反复强杀写入进程再检查库）、存储压测汇总，以及正式版的冒烟测试。
 
+## 开发流程
+
+`main` 是 v0.1 的开发主线。每个任务从 `main` 新建独立分支（如 `m0/ci`），完成后通过 PR 合并。
+
+CI 在 Windows 上使用 Node.js 22、pnpm 10 和 Rust stable（含 clippy、rustfmt）。首次安装依赖使用 `pnpm install --frozen-lockfile`，提交前在仓库根目录执行以下验收命令：
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+pnpm check
+pnpm build
+```
+
+所有 PR、推送到 `main`、推送 `v*` 标签以及手动触发都会运行 CI 检查。`main` 和 `v*` 标签的推送在检查通过后执行 `pnpm tauri build --no-bundle`，并上传 `target/release/nianlai.exe` 供下载。工作区中的 Windows 专用工具也参与检查，CI 使用 `windows-latest`。
+
+建议仓库维护者在 GitHub 网页上为 `main` 设置分支保护：禁止直接推送，要求通过 PR 合并，并要求 CI 检查通过。
+
 ## 许可证
 
 待定。
