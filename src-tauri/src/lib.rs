@@ -7,6 +7,7 @@ mod paste;
 mod platform;
 mod resuspend;
 mod samples;
+mod tray;
 
 use panel::{Action, Controller};
 use serde_json::json;
@@ -187,6 +188,8 @@ fn register_hotkeys(app: &AppHandle, logger: &log::Logger, automatic: bool) -> R
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
+        .plugin(tray::single_instance())
+        .plugin(tray::autostart())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             get_history,
@@ -217,6 +220,7 @@ pub fn run() {
                 resuspend,
                 experiments,
             )?);
+            tray::setup(app.handle(), &logger)?;
             let handle = app.handle().clone();
             let capture_logger = logger.clone();
             std::thread::Builder::new()
