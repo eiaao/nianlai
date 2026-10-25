@@ -33,6 +33,9 @@ impl Hooks {
     pub fn begin_hint(&self, _: crate::platform::HintMode) -> Result<bool> {
         Ok(false)
     }
+    pub fn finish_hint(&self) -> Result<bool> {
+        Ok(true)
+    }
 }
 pub mod hook {
     use tauri_plugin_global_shortcut::Shortcut;

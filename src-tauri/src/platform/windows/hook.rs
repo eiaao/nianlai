@@ -42,6 +42,10 @@ enum Command {
         mode: HintMode,
         reply: mpsc::SyncSender<bool>,
     },
+    // 正常结束提示前在钩子线程检查配对；可以结束时当场卸钩，防止回执之后又吞掉新键。
+    FinishHint {
+        reply: mpsc::SyncSender<Result<bool>>,
+    },
 }
 
 // 停留期间一个键第一次按下时定下的处置，抬起时照此配对，目标不会收到孤立的抬起。
@@ -136,12 +140,15 @@ fn hint_route(key: HintKey, earlier: Option<Fate>) -> (Route, Option<Fate>) {
     );
     match mode {
         // 搜索模式下原逻辑的吞键记录是首键补发前留下的，可能过时，不看。
-        HintMode::Quick if key.original || key.shortcut => (Route::Original, None),
+        HintMode::Quick if key.original => (Route::Original, None),
+        HintMode::Quick if key.shortcut => (Route::Original, Some(Fate::Pass)),
         // 带 Ctrl / Alt / Win 的都按组合键放行，含 Alt+Tab、Win 组合、Ctrl+Esc；单按 Esc 维持原处理。
         HintMode::Quick if key.chord => passthrough,
         HintMode::Quick if key.vk == 0x1B => escape,
         HintMode::Quick => consumed,
-        HintMode::Search if key.shortcut || key.system => (Route::Pass { end: None }, None),
+        HintMode::Search if key.shortcut || key.system => {
+            (Route::Pass { end: None }, Some(Fate::Pass))
+        }
         HintMode::Search if key.vk == 0x1B => escape,
         HintMode::Search if key.focused => consumed,
         HintMode::Search => passthrough,
@@ -189,13 +196,39 @@ fn hint_end(
 struct HintState {
     keys: [Option<Fate>; 256],
     end: Option<HintEnd>,
+    closing: bool,
 }
 impl HintState {
     fn new() -> Self {
         Self {
             keys: [None; 256],
             end: None,
+            closing: false,
         }
+    }
+    // 提示开始前已经放行的按下，重复和抬起仍放行；原路径吞掉的键由调用方排除。
+    fn with_passed(pressed: impl IntoIterator<Item = u16>) -> Self {
+        let mut state = Self::new();
+        for vk in pressed {
+            if vk <= 255 && !is_modifier(vk) {
+                state.keys[vk as usize] = Some(Fate::Pass);
+            }
+        }
+        state
+    }
+    fn has_swallowed(&self, original_held: bool) -> bool {
+        original_held
+            || self
+                .keys
+                .iter()
+                .any(|fate| matches!(fate, Some(Fate::Swallow(_))))
+    }
+    fn request_close(&mut self, original_held: bool) -> bool {
+        self.closing = self.has_swallowed(original_held);
+        !self.closing
+    }
+    fn close_ready(&self, original_held: bool) -> bool {
+        self.closing && !self.has_swallowed(original_held)
     }
     // 处理一个按键事件（vk 不超过 255），返回（None 交回原逻辑 / Some(是否吞掉)，现在要发的收起请求）。
     fn handle(&mut self, key: HintKey) -> (Option<bool>, Option<HintEnd>) {
@@ -236,10 +269,31 @@ struct Context {
     hint_state: HintState,
 }
 impl Context {
+    fn original_hint_keys_held(&self) -> bool {
+        // 搜索首键已补发后的旧 swallowed 数组不代表仍按住；只有钩子一直在位时才看它。
+        (self.hint == Some(HintMode::Quick) || self.pending.is_some())
+            && self.swallowed.contains(&true)
+    }
+    fn notify_hint_close(&mut self) {
+        if self.hint.is_some()
+            && self.hint_state.close_ready(self.original_hint_keys_held())
+            && self
+                .sender
+                .try_send(HookEvent::HintKey(HintEnd::KeyConsumed))
+                .is_ok()
+        {
+            self.hint_state.closing = false;
+        }
+    }
     // 停留期间的按键：Some(是否吞掉) 表示停留规则已处理；None 表示交回原逻辑。
     fn hint_key(&mut self, vk: u16, pressed: bool, mode: HintMode) -> Option<bool> {
         if vk > 255 {
             return None;
+        }
+        if (mode == HintMode::Quick || self.pending.is_some()) && self.swallowed[vk as usize] {
+            // 提示开始前吞掉的键继续吞重复，避免中途加上 Win / Alt 后被原路径重新分类为放行。
+            // 抬起仍交回原路径清除 swallowed、处理 release_action，保留配对和原来的抬起动作。
+            return pressed.then_some(true);
         }
         // 修饰键状态和原逻辑一样取 modifiers()，每个按键事件只取一次。
         let mods = modifiers();
@@ -254,8 +308,10 @@ impl Context {
             original: self.swallowed[vk as usize],
             focused: super::window::foreground() == self.window,
         });
-        if let Some(end) = end {
-            let _ = self.sender.try_send(HookEvent::HintKey(end));
+        if let Some(end) = end
+            && self.sender.try_send(HookEvent::HintKey(end)).is_ok()
+        {
+            self.hint_state.closing = false;
         }
         swallow
     }
@@ -526,6 +582,12 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
         }
         true
     });
+    // 原路径接管的键抬起也能解除延后关闭；这里只投递事件，实际卸钩由 FinishHint 再原子检查。
+    CONTEXT.with(|context| {
+        if let Some(context) = context.borrow_mut().as_mut() {
+            context.notify_hint_close();
+        }
+    });
     if swallow {
         LRESULT(1)
     } else {
@@ -640,13 +702,35 @@ impl Hooks {
                                     }
                                     CONTEXT.with(|context| {
                                         if let Some(context) = context.borrow_mut().as_mut() {
+                                            if context.hint.is_none() {
+                                                // 钩子一直在位时排除原路径仍在吞的键；重新挂上时原数组已过时。
+                                                context.hint_state = HintState::with_passed((0u16..=255).filter(|vk| {
+                                                    (reinstalled || !context.swallowed[*vk as usize]) && down(i32::from(*vk))
+                                                }));
+                                            }
                                             context.hint = Some(mode);
-                                            context.hint_state = HintState::new();
                                         }
                                     });
                                     logger.event("hint_keys", json!({"session":session,"panel_mode":mode.name(),
                                         "keyboard_hook":keyboard_hook.is_some(),"reinstalled":reinstalled}));
                                     let _ = reply.send(keyboard_hook.is_some());
+                                }
+                                Command::FinishHint { reply } => {
+                                    let ready = CONTEXT.with(|context| {
+                                        let mut context = context.borrow_mut();
+                                        let Some(context) = context.as_mut() else { return true; };
+                                        let original_held = context.original_hint_keys_held();
+                                        context.hint_state.request_close(original_held)
+                                    });
+                                    let result = if !ready { Ok(false) } else {
+                                        let removed = if let Some(hook) = keyboard_hook {
+                                            UnhookWindowsHookEx(hook).map_err(|e| e.to_string())
+                                        } else { Ok(()) };
+                                        removed.map(|()| { keyboard_hook = None; true })
+                                    };
+                                    logger.event("hint_keys_finish", json!({"session":session,
+                                        "ready":ready,"keyboard_hook":keyboard_hook.is_some(),"error":result.as_ref().err()}));
+                                    let _ = reply.send(result);
                                 }
                             }
                         }
@@ -705,6 +789,15 @@ impl Hooks {
         receiver
             .recv_timeout(REPLAY_WAIT)
             .map_err(|e| e.to_string())
+    }
+
+    // false：有被吞的键还没松开，保持钩子，松键后通过原事件通道重试收起。
+    pub fn finish_hint(&self) -> Result<bool> {
+        let (reply, receiver) = mpsc::sync_channel(1);
+        self.command(Command::FinishHint { reply })?;
+        receiver
+            .recv_timeout(REPLAY_WAIT)
+            .map_err(|e| e.to_string())?
     }
 
     pub fn remove_keyboard(&self) -> Result<ReplayBatch> {
@@ -830,9 +923,9 @@ mod tests {
             // 3）Esc、呼出键、退出键维持原处理。
             ("Esc 按下", key(Quick, ESC, true), None, SWALLOW, Some(escape)),
             ("Esc 抬起", key(Quick, ESC, false), Some(escape), Route::Swallow { end: Some(HintEnd::Escape) }, None),
-            ("呼出键按下", shortcut(key(Quick, V, true)), None, Route::Original, None),
+            ("呼出键按下", shortcut(key(Quick, V, true)), None, Route::Original, Some(pass)),
             ("呼出键抬起", shortcut(key(Quick, V, false)), None, Route::Original, None),
-            ("退出键", shortcut(key(Quick, 0x51, true)), None, Route::Original, None),
+            ("退出键", shortcut(key(Quick, 0x51, true)), None, Route::Original, Some(pass)),
             // 按住不放的重复按下：照第一次的处置，不再请求收起；中途按下或松开 Ctrl 也不改。
             ("Ctrl+V 重复按下", chord_key(key(Quick, V, true)), Some(pass), PASS, Some(pass)),
             ("松开 Ctrl 后 V 重复按下", key(Quick, V, true), Some(pass), PASS, Some(pass)),
@@ -851,7 +944,160 @@ mod tests {
         }
     }
 
-    // 搜索模式：审查后不变。
+    #[test]
+    fn passed_system_key_keeps_pairing_after_modifier_release() {
+        let mut state = HintState::new();
+        assert_eq!(
+            state.handle(system(key(HintMode::Search, 0x44, true))),
+            (Some(false), None)
+        );
+        // Win 已松开，D 仍自动重复：最初的按下放行，后续也必须放行。
+        assert_eq!(
+            state.handle(key(HintMode::Search, 0x44, true)),
+            (Some(false), None)
+        );
+        assert_eq!(
+            state.handle(key(HintMode::Search, 0x44, false)),
+            (Some(false), None)
+        );
+    }
+
+    #[test]
+    fn passed_app_shortcut_keeps_pairing_after_modifier_release() {
+        for mode in [HintMode::Quick, HintMode::Search] {
+            let mut state = HintState::new();
+            let first = state.handle(shortcut(key(mode, V, true)));
+            assert_eq!(
+                first,
+                (
+                    if mode == HintMode::Quick {
+                        None
+                    } else {
+                        Some(false)
+                    },
+                    None
+                )
+            );
+            assert_eq!(state.handle(key(mode, V, true)), (Some(false), None));
+            assert_eq!(state.handle(key(mode, V, false)), (Some(false), None));
+        }
+    }
+
+    #[test]
+    fn preexisting_passed_key_keeps_repeats_and_release_in_both_modes() {
+        for mode in [HintMode::Quick, HintMode::Search] {
+            let mut state = HintState::with_passed([ENTER, CTRL]);
+            assert_eq!(state.handle(key(mode, ENTER, true)), (Some(false), None));
+            assert_eq!(state.handle(key(mode, ENTER, false)), (Some(false), None));
+            // 松开以后新按的 Enter 才属于停留规则。
+            assert_eq!(state.handle(key(mode, ENTER, true)), (Some(true), None));
+            assert!(!state.request_close(false));
+        }
+    }
+
+    #[test]
+    fn close_waits_for_every_swallowed_release_in_both_modes() {
+        for mode in [HintMode::Quick, HintMode::Search] {
+            let mut state = HintState::new();
+            assert_eq!(state.handle(key(mode, V, true)), (Some(true), None));
+            assert_eq!(state.handle(key(mode, X, true)), (Some(true), None));
+            // 模拟超时、外部点击或呼出键请求关闭；原配对状态不能被清掉。
+            assert!(!state.request_close(false));
+            assert!(!state.close_ready(false));
+            assert_eq!(state.handle(key(mode, V, false)).0, Some(true));
+            assert!(!state.close_ready(false));
+            assert!(!state.request_close(false));
+            assert_eq!(state.handle(key(mode, X, false)).0, Some(true));
+            assert!(state.close_ready(false));
+            assert!(state.request_close(false));
+        }
+    }
+
+    #[test]
+    fn queued_hide_rechecks_keys_arriving_after_the_close_event() {
+        for mode in [HintMode::Quick, HintMode::Search] {
+            let mut state = HintState::new();
+            state.handle(key(mode, V, true));
+            let released = state.handle(key(mode, V, false));
+            assert!(released.1.is_some(), "松键已投递关闭事件");
+            // 主线程尚未处理关闭事件，钩子又吞了 X 的按下。
+            state.handle(key(mode, X, true));
+            assert!(!state.request_close(false), "实际卸钩前必须再检查");
+            assert_eq!(state.handle(key(mode, X, false)).0, Some(true));
+            assert!(state.request_close(false));
+        }
+    }
+
+    #[test]
+    fn close_also_waits_for_original_keys_but_not_passed_chords() {
+        let mut state = HintState::new();
+        assert!(!state.request_close(true));
+        assert!(!state.close_ready(true));
+        assert!(state.close_ready(false));
+        assert!(state.request_close(false));
+        let mut state = HintState::new();
+        assert_eq!(
+            state.handle(chord_key(key(HintMode::Quick, V, true))).0,
+            Some(false)
+        );
+        assert!(state.request_close(false), "放行的 Ctrl+V 不应延后收起");
+    }
+
+    #[test]
+    fn original_keys_and_full_event_queue_keep_close_pending() {
+        for mode in [HintMode::Quick, HintMode::Search] {
+            let (sender, events) = mpsc::sync_channel(1);
+            let (replay, _) = mpsc::sync_channel(1);
+            let mut context = Context {
+                sender,
+                window: 0,
+                target: 0,
+                switched: Arc::new(AtomicUsize::new(0)),
+                bounds: RECT::default(),
+                hotkey: (V, Modifiers::CONTROL),
+                replay,
+                dropped: Arc::new(AtomicUsize::new(0)),
+                pending: Some(Instant::now()),
+                swallowed: [false; 256],
+                release_action: [None; 256],
+                hint: Some(mode),
+                hint_state: HintState::new(),
+            };
+            context.swallowed[V as usize] = true;
+            // 真正调用停留入口：原键的重复直接吞掉，不再读取当前修饰键重新分类。
+            assert_eq!(context.hint_key(V, true, mode), Some(true));
+            assert_eq!(context.hint_key(V, false, mode), None);
+            assert!(
+                !context
+                    .hint_state
+                    .request_close(context.original_hint_keys_held())
+            );
+            context.notify_hint_close();
+            assert!(events.try_recv().is_err(), "原路径尚未处理抬起，不能收起");
+
+            // 模拟原路径消费抬起，再模拟事件队列暂满；不能丢掉延后关闭请求。
+            context.swallowed[V as usize] = false;
+            assert!(context.sender.try_send(HookEvent::Key("Escape")).is_ok());
+            context.notify_hint_close();
+            assert!(context.hint_state.closing);
+            assert!(matches!(events.try_recv(), Ok(HookEvent::Key("Escape"))));
+            context.notify_hint_close();
+            assert!(matches!(
+                events.try_recv(),
+                Ok(HookEvent::HintKey(HintEnd::KeyConsumed))
+            ));
+            assert!(!context.hint_state.closing);
+            context.notify_hint_close();
+            assert!(events.try_recv().is_err(), "成功入队后不重复通知");
+
+            // 搜索首键已经补发后，原数组里的旧记录不能阻止正常收起。
+            context.pending = None;
+            context.swallowed[V as usize] = true;
+            assert_eq!(context.original_hint_keys_held(), mode == HintMode::Quick);
+        }
+    }
+
+    // 搜索模式：按下时的放行决定也要留到抬起。
     #[test]
     fn search_mode_rules_cover_every_cell() {
         use HintMode::Search;
@@ -865,10 +1111,10 @@ mod tests {
         let cases: Vec<Case> = vec![
             ("Esc 按下", key(Search, ESC, true), None, SWALLOW, Some(escape)),
             ("Esc 抬起", key(Search, ESC, false), Some(escape), Route::Swallow { end: Some(HintEnd::Escape) }, None),
-            ("呼出键按下", shortcut(key(Search, V, true)), None, PASS, None),
+            ("呼出键按下", shortcut(key(Search, V, true)), None, PASS, Some(pass)),
             ("呼出键抬起", shortcut(key(Search, V, false)), None, PASS, None),
-            ("Alt+Tab", system(key(Search, 0x09, true)), None, PASS, None),
-            ("Win+D", system(key(Search, 0x44, true)), None, PASS, None),
+            ("Alt+Tab", system(key(Search, 0x09, true)), None, PASS, Some(pass)),
+            ("Win+D", system(key(Search, 0x44, true)), None, PASS, Some(pass)),
             // 其他非修饰键（带不带 Ctrl 都一样）：吞掉，抬起也吞并收起。
             ("V 按下", key(Search, V, true), None, SWALLOW, Some(consumed)),
             ("V 抬起", key(Search, V, false), Some(consumed), Route::Swallow { end: Some(HintEnd::KeyConsumed) }, None),
@@ -883,7 +1129,7 @@ mod tests {
             ("切走后 V 按下", unfocused(key(Search, V, true)), None, passthrough, Some(pass)),
             ("切走后 V 抬起", unfocused(key(Search, V, false)), Some(pass), PASS, None),
             ("切走后 Esc 按下", unfocused(key(Search, ESC, true)), None, SWALLOW, Some(escape)),
-            ("切走后 呼出键", shortcut(unfocused(key(Search, V, true))), None, PASS, None),
+            ("切走后 呼出键", shortcut(unfocused(key(Search, V, true))), None, PASS, Some(pass)),
             ("切走后 停留前按下的键抬起", unfocused(key(Search, V, false)), None, PASS, None),
             ("吞掉后切走再抬起", unfocused(key(Search, V, false)), Some(consumed), Route::Swallow { end: Some(HintEnd::KeyConsumed) }, None),
         ];

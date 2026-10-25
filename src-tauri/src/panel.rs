@@ -134,6 +134,19 @@ fn hint_key_hide_source(end: HintEnd) -> &'static str {
     }
 }
 
+// 先发生的关闭原因保持不变（例如超时后等到松键），明确退出始终优先。
+fn hint_end_reason(previous: Option<&'static str>, next: &'static str) -> &'static str {
+    if next == "quit" {
+        next
+    } else {
+        previous.unwrap_or(next)
+    }
+}
+
+fn hint_needs_key_drain(dwelling: bool, ended_by: Option<&str>) -> bool {
+    dwelling && ended_by != Some("quit")
+}
+
 pub struct Controller {
     inner: Mutex<Panel>,
     pub logger: Logger,
@@ -550,6 +563,21 @@ impl Panel {
         if self.mode == Mode::Hidden {
             return Ok(false);
         }
+        // 超时、外部点击、呼出键和排队的按键收起都必须通过同一道检查。
+        // 钩子线程在确认没有待配对键后立即卸钩，不留检查后再吞键的窗口；退出不等待。
+        if hint_needs_key_drain(
+            self.dwelling(),
+            self.hint.as_ref().and_then(|hint| hint.ended_by),
+        ) && let Some(hooks) = self.hooks.as_ref()
+            && !hooks.finish_hint()?
+        {
+            self.log(
+                logger,
+                "hint_close_deferred",
+                json!({"reason":"swallowed_keys_held"}),
+            );
+            return Ok(false);
+        }
         // 管理员提示停留中被收起（到点、Esc、呼出键、点面板外都走这里）：记一条停留结束，含实际时长。
         // 预判后还没等到结论就收起的（占位、dwell 为 None）只清掉标记，不算停留过。
         if let Some(hint) = self.hint.take()
@@ -742,19 +770,20 @@ impl Panel {
         if !self.awaiting_search {
             return Ok(());
         }
+        if self.dwelling() {
+            // 提示已覆盖搜索操作；不能先卸钩、补键、重挂，否则中间会漏掉待配对的抬起。
+            // 原缓冲留到真正收起时清理，不再把首键补进提示期间的搜索框。
+            self.awaiting_search = false;
+            self.log(
+                logger,
+                "search_replay_deferred",
+                json!({"reason":"elevated_hint"}),
+            );
+            return Ok(());
+        }
         self.replay_search(logger, ready, if ready { "ready" } else { "timeout" }, true)?;
         self.awaiting_search = false;
         self.log(logger, "search_ready", json!({"search_box_ready":ready,"foreground_ok":window::foreground()==window::handle(&self.window)?}));
-        // M0-6b：停留在搜索框就绪之前就开始了（例如切搜索模式途中点了条目），上面的补发卸掉了停留用的键盘钩子，
-        // 重新挂上。不在停留时不进这里。
-        if self.dwelling() {
-            let (hint_keys, hint_keys_error) = self.arm_hint_keys();
-            self.log(
-                logger,
-                "hint_keys_rearmed",
-                json!({"hint_keys":hint_keys,"hint_keys_error":hint_keys_error}),
-            );
-        }
         Ok(())
     }
     fn mode_name(&self) -> &'static str {
@@ -807,7 +836,7 @@ impl Panel {
         if let Some(hint) = self.hint.as_mut()
             && hint.dwell.is_some()
         {
-            hint.ended_by = Some(ended_by);
+            hint.ended_by = Some(hint_end_reason(hint.ended_by, ended_by));
         }
     }
     // 告诉钩子开始按停留规则处理按键（M0-6b）。返回（键盘钩子是否在位，出错时的错误文本）。
@@ -1467,6 +1496,30 @@ mod tests {
         assert_eq!(
             hint_key_hide_source(HintEnd::KeyConsumed),
             "elevated_hint_key"
+        );
+    }
+
+    #[test]
+    fn all_normal_hint_closes_drain_keys_and_keep_the_first_reason() {
+        for reason in [
+            "timeout",
+            "outside_click",
+            "hotkey",
+            "frontend",
+            "escape",
+            "key_consumed",
+            "key_passthrough",
+        ] {
+            assert!(hint_needs_key_drain(true, Some(reason)));
+            assert!(!hint_needs_key_drain(false, Some(reason)));
+            assert_eq!(hint_end_reason(None, reason), reason);
+            assert_eq!(hint_end_reason(Some(reason), "key_consumed"), reason);
+            assert_eq!(hint_end_reason(Some(reason), "quit"), "quit");
+        }
+        assert!(hint_needs_key_drain(true, None));
+        assert!(
+            !hint_needs_key_drain(true, Some("quit")),
+            "明确退出不能等松键"
         );
     }
 
