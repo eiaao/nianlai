@@ -1,4 +1,4 @@
-use super::paste::INPUT_MARKER;
+use super::{foreground, paste::INPUT_MARKER};
 use crate::{
     log::Logger,
     platform::{
@@ -256,6 +256,7 @@ struct Context {
     target: usize,
     // 第一个切到前台的外部窗口；0 表示没切走。
     switched: Arc<AtomicUsize>,
+    foreground_trace: Option<foreground::Trace>,
     bounds: RECT,
     hotkey: (u16, Modifiers),
     replay: mpsc::SyncSender<ReplayKey>,
@@ -345,21 +346,21 @@ unsafe extern "system" fn foreground_changed(
     hwnd: windows::Win32::Foundation::HWND,
     _: i32,
     _: i32,
-    _: u32,
-    _: u32,
+    event_thread: u32,
+    event_time: u32,
 ) {
     CONTEXT.with(|context| {
-        if let Some(context) = context.borrow().as_ref()
-            && !hwnd.is_invalid()
-            && hwnd.0 as usize != context.window
-            && hwnd.0 as usize != context.target
-        {
-            let _ = context.switched.compare_exchange(
-                0,
-                hwnd.0 as usize,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            );
+        if let Some(context) = context.borrow().as_ref() {
+            let latched = !hwnd.is_invalid()
+                && foreground::record_first_external(
+                    &context.switched,
+                    hwnd.0 as usize,
+                    context.window,
+                    context.target,
+                );
+            if let Some(trace) = &context.foreground_trace {
+                trace.record(hwnd.0 as usize, event_thread, event_time, latched);
+            }
         }
     });
 }
@@ -654,6 +655,7 @@ impl Hooks {
         let thread = thread::Builder::new().name("panel-hooks".into()).spawn(move || unsafe {
             CONTEXT.with(|context| *context.borrow_mut() = Some(Context {
                 sender, window, target, switched:switched_context, bounds, hotkey: (vk, shortcut.mods), replay: replay_sender,
+                foreground_trace: foreground::Trace::from_env(&logger, session, window, target),
                 dropped: overflow, pending: None, swallowed: [false; 256], release_action: [None; 256],
                 hint: None, hint_state: HintState::new(),
             }));
@@ -1053,6 +1055,7 @@ mod tests {
                 window: 0,
                 target: 0,
                 switched: Arc::new(AtomicUsize::new(0)),
+                foreground_trace: None,
                 bounds: RECT::default(),
                 hotkey: (V, Modifiers::CONTROL),
                 replay,
