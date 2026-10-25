@@ -8,6 +8,7 @@ use crate::{
 use serde_json::json;
 use std::{
     cell::RefCell,
+    ffi::OsStr,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -28,6 +29,244 @@ use windows::Win32::{
 };
 
 const HOOK_COMMAND: u32 = WM_APP + 1;
+
+// 仅用于取证：回调里只累计整数；阶段汇总在钩子消息循环中交给异步 Logger。
+// 不保存键值、扫描码、正文或逐键时间，也不把拿到 HHOOK 当作收到输入的证明。
+#[derive(Clone, Copy)]
+enum TraceRoute {
+    NegativeCode,
+    SelfMarker,
+    ContextMissing,
+    Routed { hint: bool, swallowed: bool },
+}
+
+#[derive(Clone, Copy, Default)]
+struct TraceInput {
+    injected: bool,
+    lower_il: bool,
+    pressed: Option<bool>,
+}
+
+#[derive(Clone, Copy, Default, serde::Serialize)]
+struct TraceCounts {
+    callbacks: u64,
+    negative_code: u64,
+    self_marker: u64,
+    context_missing: u64,
+    original_passed: u64,
+    original_swallowed: u64,
+    hint_passed: u64,
+    hint_swallowed: u64,
+    unflagged: u64,
+    external_injected: u64,
+    // external_injected 的子集；自家 marker 不算在外部注入里。
+    external_lower_il_injected: u64,
+    non_self_down: u64,
+    non_self_up: u64,
+    unflagged_down: u64,
+    unflagged_up: u64,
+}
+
+impl TraceCounts {
+    fn record(&mut self, route: TraceRoute, injection: TraceInput) {
+        self.callbacks = self.callbacks.saturating_add(1);
+        if !matches!(route, TraceRoute::NegativeCode | TraceRoute::SelfMarker) {
+            if injection.injected || injection.lower_il {
+                self.external_injected = self.external_injected.saturating_add(1);
+            } else {
+                self.unflagged = self.unflagged.saturating_add(1);
+            }
+            if injection.lower_il {
+                self.external_lower_il_injected = self.external_lower_il_injected.saturating_add(1);
+            }
+            if let Some(pressed) = injection.pressed {
+                let count = if pressed {
+                    &mut self.non_self_down
+                } else {
+                    &mut self.non_self_up
+                };
+                *count = count.saturating_add(1);
+                if !injection.injected && !injection.lower_il {
+                    let count = if pressed {
+                        &mut self.unflagged_down
+                    } else {
+                        &mut self.unflagged_up
+                    };
+                    *count = count.saturating_add(1);
+                }
+            }
+        }
+        let count = match route {
+            TraceRoute::NegativeCode => &mut self.negative_code,
+            TraceRoute::SelfMarker => &mut self.self_marker,
+            TraceRoute::ContextMissing => &mut self.context_missing,
+            TraceRoute::Routed {
+                hint: false,
+                swallowed: false,
+            } => &mut self.original_passed,
+            TraceRoute::Routed {
+                hint: false,
+                swallowed: true,
+            } => &mut self.original_swallowed,
+            TraceRoute::Routed {
+                hint: true,
+                swallowed: false,
+            } => &mut self.hint_passed,
+            TraceRoute::Routed {
+                hint: true,
+                swallowed: true,
+            } => &mut self.hint_swallowed,
+        };
+        *count = count.saturating_add(1);
+    }
+
+    fn routed(&self) -> bool {
+        self.original_passed != 0
+            || self.original_swallowed != 0
+            || self.hint_passed != 0
+            || self.hint_swallowed != 0
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+enum TracePhase {
+    #[default]
+    BeforeHint,
+    HintQuick,
+    HintSearch,
+}
+
+struct HookTrace {
+    since: Instant,
+    phase_since: Instant,
+    installation_since: Option<Instant>,
+    phase: TracePhase,
+    counts: [TraceCounts; 3],
+    generation_counts: TraceCounts,
+    install_attempts: u64,
+    handle_acquisitions: u64,
+}
+
+impl Default for HookTrace {
+    fn default() -> Self {
+        Self::new(Instant::now())
+    }
+}
+
+impl HookTrace {
+    fn new(since: Instant) -> Self {
+        Self {
+            since,
+            phase_since: since,
+            installation_since: None,
+            phase: TracePhase::BeforeHint,
+            counts: [TraceCounts::default(); 3],
+            generation_counts: TraceCounts::default(),
+            install_attempts: 0,
+            handle_acquisitions: 0,
+        }
+    }
+
+    fn from_switch(value: Option<&OsStr>) -> Option<Self> {
+        (value == Some(OsStr::new("1"))).then(Self::default)
+    }
+
+    fn installed(&mut self, acquired: bool, now: Instant) {
+        self.install_attempts = self.install_attempts.saturating_add(1);
+        self.handle_acquisitions = self.handle_acquisitions.saturating_add(u64::from(acquired));
+        if acquired {
+            self.installation_since = Some(now);
+            self.generation_counts = TraceCounts::default();
+        }
+    }
+
+    fn begin_hint(&mut self, mode: HintMode, now: Instant) {
+        self.phase_since = now;
+        self.phase = match mode {
+            HintMode::Quick => TracePhase::HintQuick,
+            HintMode::Search => TracePhase::HintSearch,
+        };
+    }
+
+    fn record(&mut self, route: TraceRoute) {
+        self.record_input(route, TraceInput::default());
+    }
+
+    fn record_input(&mut self, route: TraceRoute, injection: TraceInput) {
+        self.counts[self.phase as usize].record(route, injection);
+        self.generation_counts.record(route, injection);
+    }
+
+    fn summary(
+        &self,
+        session: u64,
+        stage: &str,
+        source: &str,
+        handle_present: bool,
+        now: Instant,
+    ) -> serde_json::Value {
+        // 句柄标志只描述本线程持有的 HHOOK；系统超时静默卸钩后它仍可能为 true。
+        let elapsed = |since| now.saturating_duration_since(since).as_millis() as u64;
+        let phase = match self.phase {
+            TracePhase::BeforeHint => "before_hint",
+            TracePhase::HintQuick => "hint_quick",
+            TracePhase::HintSearch => "hint_search",
+        };
+        json!({
+            "session":session,"stage":stage,"source":source,"cumulative":true,
+            "trace_elapsed_ms":elapsed(self.since),"phase":phase,"phase_elapsed_ms":elapsed(self.phase_since),
+            "hhook_handle_present":handle_present,"hhook_install_attempts":self.install_attempts,
+            "hhook_handle_acquisitions":self.handle_acquisitions,
+            "hook_generation":self.handle_acquisitions,"installation_elapsed_ms":self.installation_since.map(elapsed),
+            "generation_counts":self.generation_counts,
+            "generation_callback_observed":self.generation_counts.callbacks != 0,
+            "generation_routed_callback_observed":self.generation_counts.routed(),
+            "callback_observed":self.counts.iter().any(|counts| counts.callbacks != 0),
+            // 包含外部注入输入；不能据此声称观察到物理键盘或管理员目标的输入。
+            "routed_callback_observed":self.counts.iter().any(TraceCounts::routed),
+            "before_hint":self.counts[0],"hint_quick":self.counts[1],"hint_search":self.counts[2],
+        })
+    }
+}
+
+thread_local! { static HOOK_TRACE: RefCell<Option<HookTrace>> = const { RefCell::new(None) }; }
+
+fn trace_callback(route: TraceRoute) {
+    HOOK_TRACE.with(|trace| {
+        if let Some(trace) = trace.borrow_mut().as_mut() {
+            trace.record(route);
+        }
+    });
+}
+
+fn trace_input(route: TraceRoute, injection: TraceInput) {
+    HOOK_TRACE.with(|trace| {
+        if let Some(trace) = trace.borrow_mut().as_mut() {
+            trace.record_input(route, injection);
+        }
+    });
+}
+
+fn trace_install(acquired: bool) {
+    HOOK_TRACE.with(|trace| {
+        if let Some(trace) = trace.borrow_mut().as_mut() {
+            trace.installed(acquired, Instant::now());
+        }
+    });
+}
+
+// 只从消息循环/卸钩清理调用，绝不从键盘回调调用。
+fn report_trace(logger: &Logger, session: u64, stage: &str, source: &str, handle_present: bool) {
+    HOOK_TRACE.with(|trace| {
+        if let Some(trace) = trace.borrow().as_ref() {
+            logger.event(
+                "keyboard_hook_trace",
+                trace.summary(session, stage, source, handle_present, Instant::now()),
+            );
+        }
+    });
+}
+
 enum Command {
     Begin {
         started: Instant,
@@ -461,23 +700,29 @@ fn modifiers() -> Modifiers {
 
 unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code < 0 {
+        trace_callback(TraceRoute::NegativeCode);
         return unsafe { CallNextHookEx(None, code, wparam, lparam) };
     }
     let key = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
     if key.dwExtraInfo == INPUT_MARKER {
+        trace_callback(TraceRoute::SelfMarker);
         return unsafe { CallNextHookEx(None, code, wparam, lparam) };
     }
     let vk = key.vkCode as u16;
     let pressed = wparam.0 as u32 == WM_KEYDOWN || wparam.0 as u32 == WM_SYSKEYDOWN;
+    let mut hint_handled = false;
+    let mut context_missing = false;
     let swallow = CONTEXT.with(|context| {
         let mut context = context.borrow_mut();
         let Some(context) = context.as_mut() else {
+            context_missing = true;
             return false;
         };
         // M0-6b：管理员提示停留中才进这个分支；不在停留时 hint 为 None，下面的原逻辑一行没改。
         if let Some(mode) = context.hint
             && let Some(swallow) = context.hint_key(vk, pressed, mode)
         {
+            hint_handled = true;
             return swallow;
         }
         if matches!(vk, 0x10..=0x12 | 0x5B | 0x5C | 0xA0..=0xA5) {
@@ -583,6 +828,21 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
         }
         true
     });
+    trace_input(
+        if context_missing {
+            TraceRoute::ContextMissing
+        } else {
+            TraceRoute::Routed {
+                hint: hint_handled,
+                swallowed: swallow,
+            }
+        },
+        TraceInput {
+            injected: key.flags.contains(LLKHF_INJECTED),
+            lower_il: key.flags.contains(LLKHF_LOWER_IL_INJECTED),
+            pressed: Some(pressed),
+        },
+    );
     // 原路径接管的键抬起也能解除延后关闭；这里只投递事件，实际卸钩由 FinishHint 再原子检查。
     CONTEXT.with(|context| {
         if let Some(context) = context.borrow_mut().as_mut() {
@@ -653,6 +913,8 @@ impl Hooks {
         let switched = Arc::new(AtomicUsize::new(0));
         let switched_context = switched.clone();
         let thread = thread::Builder::new().name("panel-hooks".into()).spawn(move || unsafe {
+            HOOK_TRACE.with(|trace| *trace.borrow_mut() = HookTrace::from_switch(
+                std::env::var_os("NIANLAI_G0_HOOK_TRACE").as_deref()));
             CONTEXT.with(|context| *context.borrow_mut() = Some(Context {
                 sender, window, target, switched:switched_context, bounds, hotkey: (vk, shortcut.mods), replay: replay_sender,
                 foreground_trace: foreground::Trace::from_env(&logger, session, window, target),
@@ -663,12 +925,14 @@ impl Hooks {
             let _ = PeekMessageW(&mut message, None, 0, 0, PM_NOREMOVE);
             let module = GetModuleHandleW(None).ok().map(|m| HINSTANCE(m.0));
             let mut keyboard_hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard), module, 0).ok();
+            trace_install(keyboard_hook.is_some());
             let mouse_hook = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse), module, 0).ok();
             let foreground_hook = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND,
                 None, Some(foreground_changed), 0, 0, WINEVENT_OUTOFCONTEXT);
             let installed = keyboard_hook.is_some() && mouse_hook.is_some() && !foreground_hook.is_invalid();
             logger.event("hooks_installed", json!({"session":session,"keyboard_hook":keyboard_hook.is_some(),"mouse_hook":mouse_hook.is_some(),
                 "bounds":[bounds.left, bounds.top, bounds.right, bounds.bottom]}));
+            report_trace(&logger, session, "installed", "install", keyboard_hook.is_some());
             let _ = ready.send(if installed { Ok(GetCurrentThreadId()) } else { Err("低层钩子安装失败".to_owned()) });
             if installed {
                 loop {
@@ -686,6 +950,7 @@ impl Hooks {
                                     let _ = reply.send(started);
                                 }
                                 Command::Stop { reply } => {
+                                    report_trace(&logger, session, "before_unhook", "remove_keyboard", keyboard_hook.is_some());
                                     let result = if let Some(hook) = keyboard_hook {
                                         UnhookWindowsHookEx(hook).map_err(|e| e.to_string())
                                     } else { Ok(()) };
@@ -698,10 +963,15 @@ impl Hooks {
                                     let _ = reply.send(result);
                                 }
                                 Command::Hint { mode, reply } => {
+                                    report_trace(&logger, session, "before_hint", "begin_hint", keyboard_hook.is_some());
                                     let reinstalled = keyboard_hook.is_none();
                                     if reinstalled {
                                         keyboard_hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard), module, 0).ok();
+                                        trace_install(keyboard_hook.is_some());
                                     }
+                                    HOOK_TRACE.with(|trace| {
+                                        if let Some(trace) = trace.borrow_mut().as_mut() { trace.begin_hint(mode, Instant::now()); }
+                                    });
                                     CONTEXT.with(|context| {
                                         if let Some(context) = context.borrow_mut().as_mut() {
                                             if context.hint.is_none() {
@@ -715,6 +985,7 @@ impl Hooks {
                                     });
                                     logger.event("hint_keys", json!({"session":session,"panel_mode":mode.name(),
                                         "keyboard_hook":keyboard_hook.is_some(),"reinstalled":reinstalled}));
+                                    report_trace(&logger, session, "hint_armed", "begin_hint", keyboard_hook.is_some());
                                     let _ = reply.send(keyboard_hook.is_some());
                                 }
                                 Command::FinishHint { reply } => {
@@ -725,6 +996,7 @@ impl Hooks {
                                         context.hint_state.request_close(original_held)
                                     });
                                     let result = if !ready { Ok(false) } else {
+                                        report_trace(&logger, session, "before_unhook", "finish_hint", keyboard_hook.is_some());
                                         let removed = if let Some(hook) = keyboard_hook {
                                             UnhookWindowsHookEx(hook).map_err(|e| e.to_string())
                                         } else { Ok(()) };
@@ -739,10 +1011,13 @@ impl Hooks {
                     } else { let _ = TranslateMessage(&message); DispatchMessageW(&message); }
                 }
             }
-            if let Some(hook) = keyboard_hook { let _ = UnhookWindowsHookEx(hook); }
+            report_trace(&logger, session, "before_unhook", "thread_exit", keyboard_hook.is_some());
+            if let Some(hook) = keyboard_hook.take() { let _ = UnhookWindowsHookEx(hook); }
             if let Some(hook) = mouse_hook { let _ = UnhookWindowsHookEx(hook); }
             if !foreground_hook.is_invalid() { let _ = UnhookWinEvent(foreground_hook); }
             CONTEXT.with(|context| *context.borrow_mut() = None);
+            report_trace(&logger, session, "finished", "thread_exit", keyboard_hook.is_some());
+            HOOK_TRACE.with(|trace| *trace.borrow_mut() = None);
             logger.event("hooks_removed", json!({"session":session,"keyboard_hook":false,"mouse_hook":false}));
         }).map_err(|e| e.to_string())?;
         match receive_ready.recv().map_err(|e| e.to_string())? {
@@ -842,6 +1117,214 @@ mod tests {
     const SHIFT: u16 = 0xA0;
     const PASS: Route = Route::Pass { end: None };
     const SWALLOW: Route = Route::Swallow { end: None };
+
+    #[test]
+    fn hook_trace_requires_exact_opt_in_without_mutating_the_environment() {
+        assert!(HookTrace::from_switch(None).is_none());
+        for value in ["", "0", "true", "01", " 1", "1 ", "1\n"] {
+            assert!(HookTrace::from_switch(Some(OsStr::new(value))).is_none());
+        }
+        assert!(HookTrace::from_switch(Some(OsStr::new("1"))).is_some());
+    }
+
+    #[test]
+    fn hook_trace_does_not_treat_a_handle_or_bypassed_callback_as_routed_input() {
+        let now = Instant::now();
+        let mut trace = HookTrace::new(now);
+        trace.installed(true, now);
+        let installed = trace.summary(1, "installed", "install", true, now);
+        assert_eq!(installed["hhook_handle_acquisitions"], 1);
+        assert_eq!(installed["callback_observed"], false);
+        assert_eq!(installed["routed_callback_observed"], false);
+
+        for route in [
+            TraceRoute::NegativeCode,
+            TraceRoute::SelfMarker,
+            TraceRoute::ContextMissing,
+        ] {
+            trace.record(route);
+        }
+        let bypassed = trace.summary(1, "before_hint", "begin_hint", true, now);
+        assert_eq!(bypassed["callback_observed"], true);
+        assert_eq!(bypassed["routed_callback_observed"], false);
+        assert_eq!(bypassed["before_hint"]["callbacks"], 3);
+        assert_eq!(bypassed["before_hint"]["negative_code"], 1);
+        assert_eq!(bypassed["before_hint"]["self_marker"], 1);
+        assert_eq!(bypassed["before_hint"]["context_missing"], 1);
+
+        trace.record(TraceRoute::Routed {
+            hint: false,
+            swallowed: true,
+        });
+        let routed = trace.summary(1, "before_unhook", "remove_keyboard", true, now);
+        assert_eq!(routed["routed_callback_observed"], true);
+        assert_eq!(routed["before_hint"]["callbacks"], 4);
+        assert_eq!(routed["before_hint"]["original_swallowed"], 1);
+    }
+
+    #[test]
+    fn hook_trace_keeps_phase_totals_across_reports_and_reinstallation() {
+        let now = Instant::now();
+        let mut trace = HookTrace::new(now);
+        trace.installed(true, now);
+        trace.record(TraceRoute::Routed {
+            hint: false,
+            swallowed: false,
+        });
+        let before_hint = trace.summary(7, "before_hint", "begin_hint", true, now);
+        trace.begin_hint(HintMode::Quick, now);
+        trace.record(TraceRoute::Routed {
+            hint: true,
+            swallowed: false,
+        });
+        trace.record(TraceRoute::Routed {
+            hint: true,
+            swallowed: true,
+        });
+        let first = trace.summary(7, "before_unhook", "finish_hint", true, now);
+        // 汇总不清零；重挂失败或成功都不能抹掉前一阶段的证据。
+        trace.installed(false, now);
+        let failed = trace.summary(7, "hint_armed", "begin_hint", false, now);
+        assert_eq!(failed["generation_counts"], first["generation_counts"]);
+        trace.installed(true, now);
+        let reinstalled = trace.summary(7, "hint_armed", "begin_hint", true, now);
+        assert_eq!(reinstalled["callback_observed"], true);
+        assert_eq!(reinstalled["generation_callback_observed"], false);
+        assert_eq!(reinstalled["generation_routed_callback_observed"], false);
+        trace.begin_hint(HintMode::Search, now);
+        trace.record(TraceRoute::Routed {
+            hint: true,
+            swallowed: true,
+        });
+        let finished = trace.summary(7, "finished", "thread_exit", false, now);
+        assert_eq!(before_hint["before_hint"]["original_passed"], 1);
+        assert_eq!(finished["before_hint"], before_hint["before_hint"]);
+        assert_eq!(finished["hint_quick"], first["hint_quick"]);
+        assert_eq!(finished["hint_quick"]["callbacks"], 2);
+        assert_eq!(finished["hint_quick"]["hint_passed"], 1);
+        assert_eq!(finished["hint_quick"]["hint_swallowed"], 1);
+        assert_eq!(finished["hint_search"]["callbacks"], 1);
+        assert_eq!(finished["hint_search"]["hint_swallowed"], 1);
+        assert_eq!(finished["hhook_install_attempts"], 3);
+        assert_eq!(finished["hhook_handle_acquisitions"], 2);
+        assert_eq!(finished["hook_generation"], 2);
+        assert_eq!(finished["generation_counts"]["callbacks"], 1);
+        assert_eq!(finished["hhook_handle_present"], false);
+        assert_eq!(finished["callback_observed"], true);
+        assert_eq!(finished["cumulative"], true);
+    }
+
+    #[test]
+    fn hook_trace_counter_limits_cannot_wrap_into_no_callback_evidence() {
+        let mut counts = TraceCounts {
+            callbacks: u64::MAX,
+            hint_swallowed: u64::MAX,
+            ..TraceCounts::default()
+        };
+        counts.record(
+            TraceRoute::Routed {
+                hint: true,
+                swallowed: true,
+            },
+            TraceInput::default(),
+        );
+        assert_eq!(counts.callbacks, u64::MAX);
+        assert_eq!(counts.hint_swallowed, u64::MAX);
+        assert!(counts.routed());
+    }
+
+    #[test]
+    fn hook_trace_injection_groups_exclude_our_marker_and_keep_lower_il_as_a_subset() {
+        let mut counts = TraceCounts::default();
+        let injected = TraceInput {
+            injected: true,
+            lower_il: false,
+            pressed: Some(false),
+        };
+        let lower_il = TraceInput {
+            injected: true,
+            lower_il: true,
+            pressed: Some(true),
+        };
+        let passed = TraceRoute::Routed {
+            hint: false,
+            swallowed: false,
+        };
+        counts.record(passed, TraceInput::default());
+        counts.record(passed, injected);
+        counts.record(passed, lower_il);
+        counts.record(TraceRoute::SelfMarker, lower_il);
+        assert_eq!(counts.callbacks, 4);
+        assert_eq!(counts.unflagged, 1);
+        assert_eq!(counts.external_injected, 2);
+        assert_eq!(counts.external_lower_il_injected, 1);
+        assert_eq!(counts.self_marker, 1);
+        assert_eq!(counts.original_passed, 3);
+        assert_eq!(counts.non_self_down, 1);
+        assert_eq!(counts.non_self_up, 1);
+        assert_eq!(counts.unflagged_down, 0);
+        assert_eq!(counts.unflagged_up, 0);
+    }
+
+    #[test]
+    fn hook_trace_releases_alone_do_not_claim_new_unflagged_keydowns() {
+        let mut counts = TraceCounts::default();
+        let passed = TraceRoute::Routed {
+            hint: false,
+            swallowed: false,
+        };
+        counts.record(
+            passed,
+            TraceInput {
+                pressed: Some(false),
+                ..TraceInput::default()
+            },
+        );
+        assert_eq!(counts.unflagged_up, 1);
+        assert_eq!(counts.unflagged_down, 0);
+        // 外部注入的按下仍不能作为新的无注入标志按下证据。
+        counts.record(
+            passed,
+            TraceInput {
+                injected: true,
+                pressed: Some(true),
+                ..TraceInput::default()
+            },
+        );
+        assert_eq!(counts.non_self_down, 1);
+        assert_eq!(counts.unflagged_down, 0);
+        counts.record(
+            passed,
+            TraceInput {
+                pressed: Some(true),
+                ..TraceInput::default()
+            },
+        );
+        assert_eq!(counts.non_self_down, 2);
+        assert_eq!(counts.unflagged_down, 1);
+        assert_eq!(counts.unflagged_up, 1);
+    }
+
+    #[test]
+    fn hook_trace_elapsed_times_are_stage_snapshots_without_per_key_timestamps() {
+        use std::time::Duration;
+        let start = Instant::now();
+        let mut trace = HookTrace::new(start);
+        trace.installed(true, start + Duration::from_millis(10));
+        trace.begin_hint(HintMode::Quick, start + Duration::from_millis(40));
+        let summary = trace.summary(
+            9,
+            "hint_armed",
+            "begin_hint",
+            true,
+            start + Duration::from_millis(75),
+        );
+        assert_eq!(summary["trace_elapsed_ms"], 75);
+        assert_eq!(summary["phase_elapsed_ms"], 35);
+        assert_eq!(summary["installation_elapsed_ms"], 65);
+        assert_eq!(summary["phase"], "hint_quick");
+        assert_eq!(summary["callback_observed"], false);
+    }
 
     fn key(mode: HintMode, vk: u16, pressed: bool) -> HintKey {
         HintKey {

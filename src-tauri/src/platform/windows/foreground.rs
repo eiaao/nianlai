@@ -1,5 +1,5 @@
 // 前台切换诊断：只补充证据，不把输入法、工具窗口或已返回面板的切换视为安全。
-use super::window;
+use super::{ime_association, window};
 use crate::log::Logger;
 use serde_json::{Value, json};
 use std::{
@@ -60,6 +60,7 @@ pub(super) struct Trace {
     panel: usize,
     target: usize,
     budget: Budget,
+    association: ime_association::Session,
 }
 
 impl Trace {
@@ -82,6 +83,7 @@ impl Trace {
             panel,
             target,
             budget: Budget::default(),
+            association: ime_association::Session::new(logger, session, panel, target),
         })
     }
 
@@ -94,6 +96,9 @@ impl Trace {
     ) {
         match self.budget.next() {
             Slot::Event(sequence) => {
+                // 只投递元数据任务；UIA/IMM 查询由单一后台线程执行，不进入钩子回调。
+                self.association
+                    .record(sequence, event_window, event_thread, event_time);
                 // WinEvent 时间使用开机毫秒计数，不能当成 UTC；wrapping_sub 处理 32 位回绕。
                 let delay = unsafe { GetTickCount() }.wrapping_sub(event_time);
                 let current = window::foreground();
