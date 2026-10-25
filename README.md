@@ -25,7 +25,7 @@ pnpm tauri dev
 - `focus-probe`：焦点诊断小工具，实时显示前台窗口、焦点控件和插入符，并在屏幕上框出焦点控件。运行 `cargo run -p focus-probe`，加 `--once` 只看一次，加 `--json` 输出 JSON。
 - `focus-matrix`：焦点验收矩阵的无人值守跑法（探路版）。默认只做只读空跑 `cargo run -p focus-matrix -- --dry-run`；真跑要加 `--real-input`，会接管键盘鼠标，用法和注意事项见 `tools/focus-matrix/README.md`。
 - `measure-memory.ps1`：统计应用及其 WebView2 子进程的内存合计。
-- `release.ps1`：一条命令构建 Windows x64 便携版：`powershell -NoProfile -ExecutionPolicy Bypass -File tools\release.ps1`。默认版本来自 `src-tauri/Cargo.toml`，同步 `package.json`，输出 `release/nianlai-<版本>-windows-x64-portable.zip`、`nianlai-<版本>.sha256` 和 `build-info.json`；`-Version 0.1.0-alpha.1` 指定版本，`-SkipBuild` 打包已有程序，`-OutDir <目录>` 指定输出目录，`-AllowDirty` 允许未提交改动。指定新版本后需审查并提交清单和锁文件；跳过构建时需自行确认已有程序的版本。ZIP 附带运行、WebView2、SmartScreen、数据目录和退出说明，不含安装包及签名。
+- `release.ps1`：一条命令构建 Windows x64 便携版：`powershell -NoProfile -ExecutionPolicy Bypass -File tools\release.ps1`。默认版本来自 `src-tauri/Cargo.toml`，同步 `package.json`，输出 `release/nianlai-<版本>-windows-x64-portable.zip`、`nianlai-<版本>.sha256` 和 `build-info.json`；固定构建目标 `x86_64-pc-windows-msvc`，读取 Cargo 目标目录下 `x86_64-pc-windows-msvc/release/nianlai.exe` 并校验 PE x64 架构和打包哈希。`-Version 0.1.0-alpha.1` 指定版本，`-SkipBuild` 打包该目标目录中的已有程序，`-OutDir <目录>` 指定输出目录，`-AllowDirty` 允许未提交改动。指定新版本后需审查并提交清单和锁文件；跳过构建时需自行确认已有程序的版本，构建信息记录 `skip_build=true`、`source_commit=null`，其中 `git_commit` 仅表示打包时的工作区提交。ZIP 附带运行、WebView2、SmartScreen、数据目录和退出说明，不含安装包及签名。
 - `measure-memory-overnight.ps1`：整夜每分钟采样样机进程树的内存，可以带重挂起开关（`-ResuspendMinutes`）启动样机，结束时切出本次日志并生成摘要；用法见脚本开头的说明。
 - `g0_log_report.py`：把样机的诊断日志汇总成 Markdown 报告（采集、监听、粘贴、呼出、错误）。运行 `python tools/g0_log_report.py --log <panel-log.jsonl>`。
 - `g0_matrix_report.py`：焦点矩阵手工格子的日志汇总，按“目标程序 × 模式”统计粘贴结论、降级原因和可疑试验。运行 `python tools/g0_matrix_report.py --log <panel-log.jsonl> --out <报告.md>`。
@@ -38,7 +38,7 @@ pnpm tauri dev
 
 `main` 是 v0.1 的开发主线。每个任务从 `main` 新建独立分支（如 `m0/ci`），完成后通过 PR 合并。
 
-CI 在 Windows 上使用 Node.js 22、pnpm 10 和 Rust stable（含 clippy、rustfmt）。首次安装依赖使用 `pnpm install --frozen-lockfile`，提交前在仓库根目录执行以下验收命令：
+CI 在 Windows 上使用 Node.js 22、pnpm 10、Rust stable（含 clippy、rustfmt）和 Python 3.12。首次安装依赖使用 `pnpm install --frozen-lockfile`，提交前在仓库根目录执行以下验收命令：
 
 ```bash
 cargo fmt --all -- --check
@@ -46,9 +46,11 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 pnpm check
 pnpm build
+python -I tools/check_release_versions.py
+python -I -m unittest discover -s tools -p "test_release*.py" -v
 ```
 
-所有 PR、推送到 `main`、推送 `v*` 标签以及手动触发都会运行 CI 检查。`main` 和 `v*` 标签的推送在检查通过后执行 `pnpm tauri build --no-bundle`，并上传 `target/release/nianlai.exe` 供下载。工作区中的 Windows 专用工具也参与检查，CI 使用 `windows-latest`。
+所有 PR、推送到 `main`、推送 `v*` 标签以及手动触发都会运行 CI 检查，包括发布版本核对和发布脚本的隔离集成测试。检查通过后，所有这些事件都会执行 `tools/release.ps1`，真实构建前端与 Windows x64 程序，并上传便携版 ZIP、SHA-256 校验文件和 `build-info.json` 供验收下载，不自动发布 GitHub Release。工作区中的 Windows 专用工具也参与检查，CI 使用 `windows-latest`。
 
 建议仓库维护者在 GitHub 网页上为 `main` 设置分支保护：禁止直接推送，要求通过 PR 合并，并要求 CI 检查通过。
 

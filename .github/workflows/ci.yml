@@ -40,17 +40,24 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: 检查前端
         run: pnpm check
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 核对发布版本来源
+        run: python -I tools/check_release_versions.py
       - name: 检查 Rust 格式
         run: cargo fmt --all -- --check
       - name: 检查 Rust 代码
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: 运行 Rust 测试
         run: cargo test --workspace
+      - name: 检查发布脚本
+        run: python -I -m unittest discover -s tools -p "test_release*.py" -v
 
   build:
     name: 构建
     needs: check
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     runs-on: windows-latest
     steps:
       - name: 检出代码
@@ -71,13 +78,14 @@ jobs:
           components: clippy, rustfmt
       - name: 缓存 Cargo
         uses: Swatinem/rust-cache@v2
-      - name: 安装前端依赖
-        run: pnpm install --frozen-lockfile
-      - name: 构建 Windows 可执行文件
-        run: pnpm tauri build --no-bundle
-      - name: 上传 Windows 可执行文件
+      - name: 构建 Windows x64 便携版
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tools/release.ps1
+      - name: 上传 Windows 便携版与构建信息
         uses: actions/upload-artifact@v4
         with:
           name: nianlai-windows
-          path: target/release/nianlai.exe
+          path: |
+            release/nianlai-*-windows-x64-portable.zip
+            release/nianlai-*.sha256
+            release/build-info.json
           if-no-files-found: error

@@ -15,6 +15,16 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "tools" / "release.ps1"
 POWERSHELL = Path(os.environ.get("WINDIR", r"C:\Windows")) / "System32/WindowsPowerShell/v1.0/powershell.exe"
 VERSION = "0.1.0-alpha.1"
+TARGET = "x86_64-pc-windows-msvc"
+
+
+def pe_binary(machine=0x8664, payload=b"portable-release-test"):
+    data = bytearray(128)
+    data[:2] = b"MZ"
+    data[60:64] = (64).to_bytes(4, "little")
+    data[64:68] = b"PE\x00\x00"
+    data[68:70] = machine.to_bytes(2, "little")
+    return bytes(data) + payload
 
 
 @unittest.skipUnless(os.name == "nt", "需要 Windows PowerShell 5.1")
@@ -39,9 +49,13 @@ class ReleaseTests(unittest.TestCase):
         self.config = self.repo / "src-tauri/tauri.conf.json"
         self.config.write_text('{"productName":"Nianlai","build":{"frontendDist":"../dist"},"bundle":{"active":true}}', encoding="utf-8")
         (self.repo / ".gitignore").write_text("dist/\nrelease/\nbin/\nbuild-output/\ncommands.log\n", encoding="utf-8")
-        self.binary = self.repo / "build-output/release/nianlai.exe"
+        self.binary = self.repo / "build-output" / TARGET / "release/nianlai.exe"
         self.binary.parent.mkdir(parents=True)
-        self.binary.write_bytes(b"MZ\x00\x00portable-release-test")
+        self.binary.write_bytes(pe_binary())
+        # 留下默认目标目录的旧程序，防止目标构建完成后误取此文件。
+        self.legacy_binary = self.repo / "build-output/release/nianlai.exe"
+        self.legacy_binary.parent.mkdir(parents=True)
+        self.legacy_binary.write_bytes(pe_binary(payload=b"old-build"))
         self.bin = self.repo / "bin"
         self.bin.mkdir()
         metadata = json.dumps({"target_directory": str(self.repo / "build-output")})
@@ -81,12 +95,18 @@ class ReleaseTests(unittest.TestCase):
         result = subprocess.run(["git", "-C", str(self.repo), *arguments], capture_output=True, text=True, encoding="utf-8", check=True)
         return result.stdout
 
-    def release(self, *arguments, success=True):
+    def release(self, *arguments, success=True, wrapper=None):
         result = subprocess.run(
-            [str(POWERSHELL), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(self.repo / "tools/release.ps1"), *arguments],
+            [str(POWERSHELL), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(wrapper or self.repo / "tools/release.ps1"), *arguments],
             cwd=ROOT, env=self.env, capture_output=True, timeout=40,
         )
-        output = result.stdout.decode("utf-8", errors="replace") + result.stderr.decode("utf-8", errors="replace")
+        def decode(data):
+            try:
+                return data.decode("utf-8")
+            except UnicodeDecodeError:
+                return data.decode("mbcs", errors="replace")
+
+        output = decode(result.stdout) + decode(result.stderr)
         if success:
             self.assertEqual(result.returncode, 0, output)
         else:
@@ -152,6 +172,7 @@ class ReleaseTests(unittest.TestCase):
         self.release("-SkipBuild")
         info = self.verify_artifacts(self.repo / "release")
         self.assertTrue(info["skip_build"])
+        self.assertIsNone(info["source_commit"])
         self.assertFalse(info["git_dirty"])
         self.assertFalse((self.repo / "dist").exists())
         self.assertIn("pnpm install --frozen-lockfile", self.commands())
@@ -161,7 +182,41 @@ class ReleaseTests(unittest.TestCase):
         self.release()
         info = self.verify_artifacts(self.repo / "release")
         self.assertFalse(info["skip_build"])
-        self.assertEqual(self.commands().count("pnpm tauri build --no-bundle"), 1)
+        self.assertEqual(self.commands().count("pnpm tauri build --no-bundle --target " + TARGET), 1)
+
+    def test_explicit_target_ignores_old_default_target_binary(self):
+        self.env["CARGO_BUILD_TARGET"] = "aarch64-pc-windows-msvc"
+        self.release()
+        info = self.verify_artifacts(self.repo / "release")
+        self.assertIn("--target " + TARGET, self.commands())
+        self.assertEqual(info["release_target"], TARGET)
+        self.assertEqual(info["source_commit"], self.commit)
+        self.assertEqual(info["source_exe_sha256"], info["exe_sha256"])
+
+    def test_rejects_non_x64_or_invalid_pe(self):
+        invalid_offset = bytearray(pe_binary())
+        invalid_offset[60:64] = (0xFFFFFFFF).to_bytes(4, "little")
+        for binary in (pe_binary(machine=0x014C), pe_binary(machine=0xAA64), b"MZ", b"not-a-pe" * 16, invalid_offset):
+            with self.subTest(binary=binary[:8]):
+                self.binary.write_bytes(binary)
+                self.legacy_binary.write_bytes(binary)
+                output = self.release("-SkipBuild", success=False)
+                self.assertIn("PE", output)
+                self.assertFalse((self.repo / "release").exists())
+
+    def test_rejects_binary_changed_during_copy(self):
+        wrapper = self.bin / "copy-change.ps1"
+        wrapper.write_text(
+            "function Copy-Item { param([string]$LiteralPath, [string]$Destination)\n"
+            "Microsoft.PowerShell.Management\\Copy-Item -LiteralPath $LiteralPath -Destination $Destination\n"
+            "[IO.File]::AppendAllText($Destination, 'changed')\n}\n"
+            "& (Join-Path $PSScriptRoot '..\\tools\\release.ps1') @args\nexit $LASTEXITCODE\n",
+            encoding="utf-8-sig",
+        )
+        output = self.release("-SkipBuild", success=False, wrapper=wrapper)
+        self.assertIn("哈希", output)
+        self.assertEqual(list((self.repo / "release").glob("*.zip")), [])
+        self.assertEqual(list((self.repo / "release").glob(".nianlai-release-*")), [])
 
     def test_version_override_and_relative_output_with_spaces(self):
         version = "0.2.0-rc.2+test.1"
@@ -169,6 +224,7 @@ class ReleaseTests(unittest.TestCase):
         self.release("-SkipBuild", "-Version", version, "-OutDir", "release/输出 文件")
         info = self.verify_artifacts(self.repo / "release/输出 文件", version)
         self.assertTrue(info["git_dirty"])
+        self.assertIsNone(info["source_commit"])
         self.assertIn('version = "' + version + '"', self.manifest.read_text(encoding="utf-8-sig"))
         self.assertIn('example = { version = "1.2.3" }', self.manifest.read_text(encoding="utf-8-sig"))
         self.assertEqual(json.loads(self.package.read_text(encoding="utf-8-sig"))["version"], version)

@@ -11,6 +11,7 @@
   指定新版本会修改版本清单和 Cargo.lock，请在发布后审查并提交这些改动。
 .PARAMETER SkipBuild
   跳过正式版构建，直接打包已有程序；仍同步版本并安装前端依赖。
+  程序必须位于 Cargo 目标目录的 x86_64-pc-windows-msvc/release 子目录中。
   不核验已有程序的内嵌版本；构建信息明确记录跳过构建和程序文件时间。
 .PARAMETER OutDir
   输出目录，默认是仓库根目录的 release；相对路径始终相对于仓库根目录。
@@ -32,6 +33,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$script:ReleaseTarget = 'x86_64-pc-windows-msvc'
 # 使用说明中的产品默认值集中在此处，方便与设置和托盘行为同步。
 $script:UsageDefaults = @{
     Hotkey = 'Ctrl+`（反引号键）'
@@ -68,6 +70,27 @@ function Resolve-ReleasePath([string]$Path, [string]$BasePath) {
         return [IO.Path]::GetFullPath($Path)
     }
     return [IO.Path]::GetFullPath((Join-Path $BasePath $Path))
+}
+
+function Assert-PortableExecutable([string]$Path) {
+    $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    $reader = [IO.BinaryReader]::new($stream)
+    try {
+        if ($stream.Length -lt 64 -or $reader.ReadUInt16() -ne 0x5A4D) {
+            throw 'PE 程序头损坏，不能打包 Windows x64 便携版。'
+        }
+        $stream.Position = 60
+        $peOffset = $reader.ReadUInt32()
+        if ([uint64]$peOffset + 6 -gt $stream.Length) {
+            throw 'PE 程序头偏移超出文件范围。'
+        }
+        $stream.Position = $peOffset
+        if ($reader.ReadUInt32() -ne 0x00004550 -or $reader.ReadUInt16() -ne 0x8664) {
+            throw 'PE 程序必须是 Windows x64（AMD64），不能使用其他架构。'
+        }
+    } finally {
+        $reader.Dispose()
+    }
 }
 
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..')).TrimEnd('\', '/')
@@ -153,7 +176,7 @@ try {
     $metadataText = & cargo metadata --format-version 1 --no-deps
     Assert-Command '读取 Cargo 元数据'
     $metadata = ($metadataText -join "`n") | ConvertFrom-Json
-    $exePath = Join-Path $metadata.target_directory 'release\nianlai.exe'
+    $exePath = Join-Path $metadata.target_directory ($script:ReleaseTarget + '\release\nianlai.exe')
     $rustc = & rustc --version
     Assert-Command '读取 Rust 编译器版本'
 
@@ -164,7 +187,9 @@ try {
         Write-Host '已跳过正式版构建；将打包已有程序，请自行确认其内嵌版本。'
     } else {
         Write-Host '开始正式版构建（不生成安装包）……'
-        & $env:ComSpec /d /c 'pnpm tauri build --no-bundle'
+        # 显式指定目标，避免 Cargo 配置改变输出路径后误取默认目录的旧程序。
+        $buildCommand = 'pnpm tauri build --no-bundle --target ' + $script:ReleaseTarget
+        & $env:ComSpec /d /c $buildCommand
         Assert-Command '正式版构建'
     }
     if (-not (Test-Path -LiteralPath $exePath -PathType Leaf)) {
@@ -172,6 +197,9 @@ try {
     }
     $gitStatus = @(& git status --porcelain=v1 --untracked-files=all)
     Assert-Command '记录最终 Git 状态'
+    Assert-PortableExecutable $exePath
+    $sourceExeHash = (Get-FileHash -LiteralPath $exePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $sourceExeTime = (Get-Item -LiteralPath $exePath).LastWriteTimeUtc.ToString('o')
 
     [IO.Directory]::CreateDirectory($outputPath) | Out-Null
     $staging = Join-Path $outputPath ('.nianlai-release-' + [Guid]::NewGuid().ToString('N'))
@@ -179,6 +207,11 @@ try {
     [IO.Directory]::CreateDirectory($payload) | Out-Null
     $packagedExe = Join-Path $payload 'nianlai.exe'
     Copy-Item -LiteralPath $exePath -Destination $packagedExe
+    $packagedExeHash = (Get-FileHash -LiteralPath $packagedExe -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($packagedExeHash -cne $sourceExeHash) {
+        throw '打包复制后的程序哈希与构建结束时不一致，文件可能被其他构建覆盖；已停止发布。'
+    }
+    Assert-PortableExecutable $packagedExe
     $instructions = @"
 拈来 v$Version · Windows x64 便携版
 
@@ -208,11 +241,15 @@ $($script:UsageDefaults.AutoStart)
         version = $Version
         git_commit = $gitCommit
         git_dirty = ($gitStatus.Count -gt 0)
-        build_time_utc = (Get-Item -LiteralPath $packagedExe).LastWriteTimeUtc.ToString('o')
+        # 跳过构建或源码有改动时，不能声称程序对应某个干净提交。
+        source_commit = $(if (-not $SkipBuild -and $gitStatus.Count -eq 0) { $gitCommit } else { $null })
+        release_target = $script:ReleaseTarget
+        build_time_utc = $sourceExeTime
         packaged_at_utc = [DateTime]::UtcNow.ToString('o')
         rustc_version = ($rustc -join ' ')
         skip_build = [bool]$SkipBuild
-        exe_sha256 = (Get-FileHash -LiteralPath $packagedExe -Algorithm SHA256).Hash.ToLowerInvariant()
+        source_exe_sha256 = $sourceExeHash
+        exe_sha256 = $packagedExeHash
     }
     Write-ReleaseText (Join-Path $staging 'build-info.json') (($buildInfo | ConvertTo-Json) + "`r`n")
     foreach ($name in @($zipName, $checksumName, 'build-info.json')) {
