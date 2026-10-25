@@ -1,26 +1,9 @@
+/* 面板窗口的全局基础样式。颜色、字号等变量在 lib/theme.css；各部分的样式在 lib/panel/ 的组件里。 */
 :root {
-  font-family: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", sans-serif;
-  font-size: 13px;
-  color-scheme: light dark;
-  color: #20272b;
-  background: #f8faf9;
-  --surface: #ffffff;
-  --border: #dce3e0;
-  --muted: #697772;
-  --accent: #216d56;
-  --selected: #e7f2ec;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    color: #e2e9e5;
-    background: #202623;
-    --surface: #272f2b;
-    --border: #3b4741;
-    --muted: #9caca3;
-    --accent: #91d6b3;
-    --selected: #304b3e;
-  }
+  font-family: var(--font-family-ui);
+  font-size: var(--font-size-body);
+  color: var(--color-text-primary);
+  background: var(--color-bg-panel);
 }
 
 * { box-sizing: border-box; }
@@ -28,42 +11,3 @@ html, body, #app { margin: 0; width: 100%; height: 100%; overflow: hidden; }
 button, input { font: inherit; color: inherit; }
 button { cursor: pointer; }
 button:disabled { cursor: default; }
-main { height: 100%; display: flex; flex-direction: column; border: 1px solid var(--border); }
-header { padding: 14px 14px 8px; }
-.heading { display: flex; align-items: baseline; gap: 9px; margin-bottom: 12px; }
-.heading strong { font-size: 17px; font-weight: 650; }
-.heading span, .hint, .timing { color: var(--muted); font-size: 11px; }
-.count { margin-left: auto; }
-.recording { color: var(--accent); font-size: 11px; margin: -5px 0 9px; }
-.recording.inactive, .partial { color: #b45e2a; }
-.entry-content { min-width: 0; flex: 1; }
-.entry-type { display: block; color: var(--accent); font-size: 11px; margin-bottom: 3px; }
-.metadata, .partial { display: block; font-size: 10px; line-height: 1.5; margin-top: 4px; overflow-wrap: anywhere; }
-.metadata { color: var(--muted); }
-input { width: 100%; height: 38px; padding: 8px 11px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); outline: none; }
-input:focus { border-color: var(--accent); }
-input::placeholder { color: var(--muted); }
-input::-webkit-search-cancel-button { display: none; }
-/* 实验 NIANLAI_G0_SEARCHBOX_FOCUS：快速模式下搜索框持有焦点但不该像在编辑，藏掉光标和焦点色，不改布局。 */
-input.quiet { caret-color: transparent; }
-input.quiet:focus { border-color: var(--border); }
-.hint { margin-top: 8px; }
-ul { flex: 1; min-height: 0; list-style: none; margin: 0; padding: 3px 7px 7px; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
-li { margin: 0; padding: 0; }
-.entry { display: flex; align-items: flex-start; gap: 10px; width: 100%; border: 1px solid transparent; border-radius: 6px; padding: 10px 9px; text-align: left; background: transparent; }
-.entry.selected { background: var(--selected); border-color: var(--border); }
-.badge { flex: 0 0 20px; line-height: 21px; text-align: center; color: var(--muted); font-size: 11px; border-radius: 4px; background: var(--surface); }
-.preview { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.55; }
-.empty { padding: 50px 12px; text-align: center; color: var(--muted); }
-footer { border-top: 1px solid var(--border); padding: 8px 12px; }
-.status { display: flex; align-items: center; gap: 10px; min-height: 24px; }
-.mode { display: flex; align-items: center; gap: 5px; white-space: nowrap; font-size: 11px; }
-.mode i { width: 6px; height: 6px; background: var(--muted); border-radius: 50%; }
-.mode i.search { background: var(--accent); }
-.timing { margin-left: auto; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.quit { flex-shrink: 0; color: var(--muted); font-size: 11px; white-space: nowrap; }
-.version { margin: 3px 0 0; color: var(--muted); font-size: 11px; text-align: right; }
-.result { margin: 0 0 6px; color: var(--accent); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
-
-.store-status { color: #b45e2a; font-size: 11px; margin-bottom: 8px; }
-mark { background: #f2d875; color: #20272b; border-radius: 2px; }

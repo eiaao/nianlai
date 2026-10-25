@@ -1,0 +1,137 @@
+/*
+ * 拈来主题变量（M0-7）
+ * ------------------------------------------------------------------
+ * - 面板和设置窗口都先引入本文件，再引入自己的样式；组件样式只引用这里的变量，不写颜色、间距、圆角、字号的字面值。
+ * - 值全部是 G0 样机四的现状（M0 只搭结构，像素级不变）；名字尽量和 M1 设计稿的 tokens.css 对齐：
+ *   --color-<用途>-<角色>、--space-<n>（n × 4px）、--radius-*、--font-*、--shadow-*。M1 换成设计稿的值时只改这里。
+ * - 设计稿里没有对应名字的现状值放在每节末尾的“M0 现状专用”里，M1 按新设计改样式后删掉。
+ * - 深浅两套：默认跟随系统（prefers-color-scheme），根元素 data-theme="light" / "dark" 可以手动覆盖。
+ *   没有 data-theme 时 color-scheme 保持 light dark，和 G0 一样；现在没有任何代码设置 data-theme。
+ * - 不需要随主题变的几何值（50% 圆点、100% 宽高、flex）和行高、字重仍写在组件里。
+ */
+
+:root {
+  color-scheme: light dark;
+
+  /* ---------- 字体 ---------- */
+  --font-family-ui: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", sans-serif;
+  --font-size-caption: 11px;     /* 按键提示、状态、页脚、类型标签、槽位号 */
+  --font-size-body: 13px;        /* 正文、搜索框 */
+  --font-size-title: 20px;       /* 设置占位页标题 */
+  /* M0 现状专用 */
+  --font-size-heading: 17px;     /* 面板标题“拈来” */
+  --font-size-micro: 10px;       /* 条目的来源 · 时间、“部分格式未保存” */
+
+  /* ---------- 间距 ---------- */
+  /* 落在 4px 网格上的，用设计稿的名字 */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-6: 24px;                     /* 设置页内边距 */
+  /* M0 现状专用：不在 4px 网格上，按用到的位置命名 */
+  --space-header-inset: 14px;          /* 顶部区域上、左、右内边距 */
+  --space-heading-gap: 9px;            /* 标题行各项之间 */
+  --space-recording-before: -5px;      /* 记录状态行往上收 */
+  --space-recording-after: 9px;
+  --space-search-field-padding-x: 11px;
+  --space-list-padding-top: 3px;
+  --space-list-padding: 7px;           /* 列表左右和底部 */
+  --space-entry-gap: 10px;             /* 槽位号和内容之间 */
+  --space-entry-padding-y: 10px;
+  --space-entry-padding-x: 9px;
+  --space-entry-type-after: 3px;
+  --space-empty-padding-y: 50px;
+  --space-status-gap: 10px;            /* 页脚状态行各项之间 */
+  --space-mode-gap: 5px;               /* 模式圆点和文字之间 */
+  --space-version-before: 3px;
+  --space-result-after: 6px;
+
+  /* ---------- 圆角 ---------- */
+  --radius-xs: 2px;              /* 搜索命中高亮 */
+  --radius-sm: 4px;              /* 槽位号 */
+  --radius-md: 6px;              /* 列表条目 */
+  /* M0 现状专用 */
+  --radius-search-field: 7px;
+
+  /* ---------- 颜色：浅色（默认） ---------- */
+  --color-bg-panel: #f8faf9;            /* 面板底色 */
+  --color-bg-layer: #ffffff;            /* 搜索框 */
+  --color-bg-selected: #e7f2ec;         /* 选中条目 */
+
+  --color-text-primary: #20272b;
+  --color-text-secondary: #697772;      /* 次要文字：按键提示、条数、来源 · 时间、页脚、空列表 */
+  --color-text-tertiary: #697772;       /* 搜索框占位文字 */
+
+  --color-border-panel: #dce3e0;        /* 窗口边缘 1px */
+  --color-border-divider: #dce3e0;      /* 页脚上方分隔线 */
+  --color-border-control: #dce3e0;      /* 搜索框细边 */
+
+  --color-accent: #216d56;              /* 记录中、类型标签、搜索框聚焦边、搜索模式圆点、粘贴结果 */
+
+  --color-mark-bg: #f2d875;             /* 搜索命中高亮（深色下也不变） */
+  --color-mark-text: #20272b;
+
+  --color-caution: #b45e2a;             /* 未在记录、存储状态、部分格式未保存（深色下也不变） */
+  --color-neutral: #697772;             /* 快速模式圆点 */
+
+  --color-keycap-bg: #ffffff;           /* 槽位号 */
+  --color-keycap-text: #697772;
+  --color-scrollbar-thumb: #dce3e0;
+  /* M0 现状专用 */
+  --color-border-selected: #dce3e0;     /* 选中条目的细边 */
+
+  /* ---------- 阴影 ---------- */
+  /* 现在没有元素用阴影（面板窗口 shadow:false，样式里也没有 box-shadow）。先按设计稿的名字和值定义，
+     给 M1 的浮层、对话框用；面板窗口本身的阴影由系统画，不在这里。 */
+  --shadow-flyout: 0 4px 12px rgba(0, 0, 0, 0.14), 0 0 2px rgba(0, 0, 0, 0.08);
+  --shadow-dialog: 0 16px 40px rgba(0, 0, 0, 0.20), 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+
+/* ---------- 颜色：深色（手动覆盖；和下面跟随系统的一块逐项相同，改值时两处一起改） ---------- */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --color-bg-panel: #202623;
+  --color-bg-layer: #272f2b;
+  --color-bg-selected: #304b3e;
+  --color-text-primary: #e2e9e5;
+  --color-text-secondary: #9caca3;
+  --color-text-tertiary: #9caca3;
+  --color-border-panel: #3b4741;
+  --color-border-divider: #3b4741;
+  --color-border-control: #3b4741;
+  --color-accent: #91d6b3;
+  --color-neutral: #9caca3;
+  --color-keycap-bg: #272f2b;
+  --color-keycap-text: #9caca3;
+  --color-scrollbar-thumb: #3b4741;
+  --color-border-selected: #3b4741;
+  --shadow-flyout: 0 4px 12px rgba(0, 0, 0, 0.40), 0 0 2px rgba(0, 0, 0, 0.40);
+  --shadow-dialog: 0 16px 40px rgba(0, 0, 0, 0.55), 0 2px 8px rgba(0, 0, 0, 0.35);
+}
+
+/* ---------- 颜色：深色（跟随系统） ---------- */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --color-bg-panel: #202623;
+    --color-bg-layer: #272f2b;
+    --color-bg-selected: #304b3e;
+    --color-text-primary: #e2e9e5;
+    --color-text-secondary: #9caca3;
+    --color-text-tertiary: #9caca3;
+    --color-border-panel: #3b4741;
+    --color-border-divider: #3b4741;
+    --color-border-control: #3b4741;
+    --color-accent: #91d6b3;
+    --color-neutral: #9caca3;
+    --color-keycap-bg: #272f2b;
+    --color-keycap-text: #9caca3;
+    --color-scrollbar-thumb: #3b4741;
+    --color-border-selected: #3b4741;
+    --shadow-flyout: 0 4px 12px rgba(0, 0, 0, 0.40), 0 0 2px rgba(0, 0, 0, 0.40);
+    --shadow-dialog: 0 16px 40px rgba(0, 0, 0, 0.55), 0 2px 8px rgba(0, 0, 0, 0.35);
+  }
+}

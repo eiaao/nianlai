@@ -9,6 +9,7 @@ mod recovery;
 mod resuspend;
 mod samples;
 mod settings;
+mod settings_window;
 mod tray;
 
 use panel::{Action, Controller};
@@ -217,7 +218,8 @@ pub fn run() {
             paste_item,
             report_painted,
             report_search_input,
-            quit_prototype
+            quit_prototype,
+            settings_window::open_settings
         ])
         .setup(|app| {
             let settings_file = settings::settings_path();
@@ -285,6 +287,10 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // 设置窗口关掉就销毁，下次再按需创建；只有面板窗口的关闭请求才走退出。
+                if window.label() == settings_window::LABEL {
+                    return;
+                }
                 api.prevent_close();
                 if let Some(controller) = window.app_handle().try_state::<Controller>() {
                     controller
