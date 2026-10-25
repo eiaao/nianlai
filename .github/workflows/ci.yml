@@ -40,6 +40,8 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: 检查前端
         run: pnpm check
+      - name: 检查搜索确认键的自动重复
+        run: node tools/test-panel-key-repeat.mjs
       - name: 安装 Python
         uses: actions/setup-python@v5
         with:

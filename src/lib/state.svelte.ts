@@ -143,14 +143,15 @@ export class PanelState {
   keydown = (event: KeyboardEvent) => {
     if (!this.visible || this.mode !== "search") return;
     if (event.isComposing || this.composing || event.keyCode === 229) return;
+    // 提交动作忽略长按重复；保留原 50ms 组合上屏保护和方向键长按导航。
     if (event.ctrlKey && !event.altKey && !event.metaKey && /^[1-9]$/.test(event.key)) {
       event.preventDefault();
-      if (performance.now() - this.compositionEnded >= 50) void this.choose(Number(event.key) - 1);
+      if (!event.repeat && performance.now() - this.compositionEnded >= 50) void this.choose(Number(event.key) - 1);
       return;
     }
     if (event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey && event.key === "Enter") {
       event.preventDefault();
-      if (performance.now() - this.compositionEnded >= 50) this.navigate("Ctrl+Enter");
+      if (!event.repeat && performance.now() - this.compositionEnded >= 50) this.navigate("Ctrl+Enter");
       return;
     }
     if ((event.ctrlKey && ["f", "p", "r", "+", "-", "=", "0"].includes(event.key.toLowerCase())) || event.key === "F5" || event.key === "F7") {
@@ -160,7 +161,7 @@ export class PanelState {
     }
     if (!event.ctrlKey && !event.altKey && !event.metaKey && (event.target === this.input || event.key === "Escape") && ["Escape", "Enter", "ArrowUp", "ArrowDown"].includes(event.key)) {
       event.preventDefault();
-      if (performance.now() - this.compositionEnded < 50) return;
+      if (performance.now() - this.compositionEnded < 50 || (event.key === "Enter" && event.repeat)) return;
       this.navigate(event.key === "Enter" && event.shiftKey ? "Shift+Enter" : event.key);
     }
   };
