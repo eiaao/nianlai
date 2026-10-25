@@ -563,6 +563,86 @@ mod tests {
     }
 
     #[test]
+    fn journal_open_resolves_isolated_environment_without_changing_settings() {
+        const PROBE: &str = "NIANLAI_JOURNAL_TEST_ROOT";
+        if let Some(root) = std::env::var_os(PROBE) {
+            let root = PathBuf::from(root);
+            let settings = root.join("profile/Nianlai/settings.json");
+            assert_eq!(crate::settings::settings_path(), settings);
+            let before = fs::read(&settings).ok();
+            let compatibility = std::env::var_os("NIANLAI_G0_DATA_DIR").is_some();
+            let expected = if compatibility {
+                root.join("test-data")
+            } else {
+                root.join("local/Nianlai/logs")
+            };
+            let mut journal = Journal::open();
+            assert_eq!(journal.directory, expected);
+            journal.record(Exit {
+                code: Some(0),
+                spawn_failed: false,
+                decision: Decision::Finished,
+                restarts: 0,
+            });
+            let rows: Vec<_> = fs::read_dir(&expected)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .filter(|path| path.file_name().unwrap() != log::COMPATIBILITY_FILE)
+                .flat_map(|path| {
+                    fs::read_to_string(path)
+                        .unwrap()
+                        .lines()
+                        .map(str::to_owned)
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+            assert_eq!(rows.len(), 1);
+            let row: serde_json::Value = serde_json::from_str(&rows[0]).unwrap();
+            assert_eq!(row["event"], "guardian_child_exit");
+            assert_eq!(row["action"], "exit");
+            assert_eq!(
+                expected.join(log::COMPATIBILITY_FILE).exists(),
+                compatibility
+            );
+            assert_eq!(fs::read(&settings).ok(), before);
+            assert!(!root.join("local/Nianlai/data").exists());
+            assert!(!root.join("test-data/history.db").exists());
+            return;
+        }
+
+        // 环境只注入测试子进程，避免修改并行测试或日常样机的配置。
+        for compatibility in [false, true] {
+            let directory = crate::settings::tests::Directory::new();
+            let mut child = Command::new(std::env::current_exe().unwrap());
+            child.args([
+                "--exact",
+                "recovery::tests::journal_open_resolves_isolated_environment_without_changing_settings",
+                "--nocapture",
+            ]);
+            child
+                .env(PROBE, &directory.0)
+                .env("APPDATA", directory.0.join("profile"))
+                .env("LOCALAPPDATA", directory.0.join("local"))
+                .env_remove("NIANLAI_G0_DATA_DIR")
+                .env_remove("NIANLAI_HOTKEY")
+                .env_remove("NIANLAI_G0_RESUSPEND_MIN");
+            if compatibility {
+                let settings = directory.0.join("profile/Nianlai/settings.json");
+                fs::create_dir_all(settings.parent().unwrap()).unwrap();
+                fs::write(settings, b"{malformed-private-settings").unwrap();
+                child.env("NIANLAI_G0_DATA_DIR", directory.0.join("test-data"));
+            }
+            let output = child.output().unwrap();
+            assert!(
+                output.status.success(),
+                "隔离守护日志测试失败：{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+        }
+    }
+
+    #[test]
     fn journal_reopens_after_application_rotation_and_never_prunes() {
         let directory = crate::settings::tests::Directory::new();
         let old = directory.0.join("panel-19691231.jsonl");

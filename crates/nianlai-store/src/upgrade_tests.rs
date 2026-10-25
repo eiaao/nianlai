@@ -608,6 +608,85 @@ fn backup_failure_prevents_migration() {
 }
 
 #[test]
+fn reopened_migration_resumes_after_last_committed_step() {
+    let manifest = load_manifest(1);
+    let temp = fixture_copy(1);
+    let db = temp.0.join("history.db");
+    let mut c = writable(&db).unwrap();
+    let failing_steps = with_extra(&[Step { apply: probe }, Step { apply: failing }]);
+    assert_eq!(
+        migrate(&mut c, &failing_steps, &mut |c, from| {
+            migrations::backup(c, &temp.0, from).map(drop)
+        }),
+        Err(Error::Invalid("injected_migration_failure"))
+    );
+    assert_eq!(user_version(&c).unwrap(), VERSION + 1);
+    drop(c);
+
+    // 重新打开，已提交的建表步骤不能再执行，失败步骤的改动不能残留。
+    let mut c = writable(&db).unwrap();
+    assert!(!table_exists(&c, "migration_failed"));
+    let successful_steps = with_extra(&[Step { apply: probe }, Step { apply: probe_again }]);
+    assert_eq!(
+        migrate(&mut c, &successful_steps, &mut |c, from| {
+            assert_eq!(from, VERSION + 1);
+            migrations::backup(c, &temp.0, from).map(drop)
+        })
+        .unwrap(),
+        Some(VERSION + 1)
+    );
+    assert_eq!(user_version(&c).unwrap(), VERSION + 2);
+    let rows: Vec<i64> = c
+        .prepare("SELECT step FROM migration_probe ORDER BY step")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(rows, [1, 2]);
+    schema::pragma_check(&c, "integrity_check").unwrap();
+    let copies = backups(&temp.0);
+    assert_eq!(copies.len(), 2);
+    assert_valid_backup(&copies[0], 1, &manifest);
+    assert_valid_backup(&copies[1], VERSION + 1, &manifest);
+    let resumed_backup =
+        Connection::open_with_flags(&copies[1], OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    assert!(table_exists(&resumed_backup, "migration_probe"));
+    assert!(!table_exists(&resumed_backup, "migration_failed"));
+    drop(resumed_backup);
+
+    // 探针只扩展测试结构；按旧结构的完整清单复核内容和全部搜索结果。
+    c.pragma_update(None, "user_version", VERSION).unwrap();
+    drop(c);
+    assert_matches(&temp.0, &manifest);
+    check(&temp.0).unwrap();
+}
+
+#[test]
+fn real_backup_directory_failure_prevents_migration_without_changing_data() {
+    let manifest = load_manifest(1);
+    let temp = fixture_copy(1);
+    let db = temp.0.join("history.db");
+    let before = fs::read(&db).unwrap();
+    let blocked = temp.0.join("backups");
+    fs::write(&blocked, b"existing-file").unwrap();
+    let mut c = writable(&db).unwrap();
+    let steps = with_extra(&[Step { apply: probe }]);
+    let result = migrate(&mut c, &steps, &mut |c, from| {
+        migrations::backup(c, &temp.0, from).map(drop)
+    });
+    assert!(matches!(result, Err(Error::Io(_))));
+    assert_eq!(user_version(&c).unwrap(), 1);
+    assert!(!table_exists(&c, "migration_probe"));
+    schema::pragma_check(&c, "integrity_check").unwrap();
+    drop(c);
+    assert_eq!(fs::read(&db).unwrap(), before);
+    assert_eq!(fs::read(blocked).unwrap(), b"existing-file");
+    assert_matches(&temp.0, &manifest);
+    check(&temp.0).unwrap();
+}
+
+#[test]
 fn backup_is_a_verified_copy_including_wal_content() {
     let manifest = load_manifest(1);
     let temp = fixture_copy(1);
