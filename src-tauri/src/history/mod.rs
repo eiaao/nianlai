@@ -372,6 +372,79 @@ mod startup_tests {
     }
 
     #[test]
+    fn stored_and_memory_search_logs_never_include_content_or_queries() {
+        const CONTENT: &str = "正文隐私哨兵-9c41e2，包含查询隐私词-8e5b72";
+        const QUERY: &str = "查询隐私词-8e5b72";
+        for persistent in [false, true] {
+            let directory = Directory::new();
+            let directories = directories(&directory);
+            let logger = Logger::with_settings(&directories, 20).unwrap();
+            let history = History::new(nianlai_store::hash::sha256, logger.clone());
+            if persistent {
+                history.initialize();
+                assert!(history.store().is_some());
+            }
+            let now = Instant::now();
+            let saved = history
+                .ingest(
+                    Content::text(CONTENT, nianlai_store::hash::sha256).unwrap(),
+                    CopyEvent {
+                        time_ms: now_ms(),
+                        sequence: 1,
+                        source_process: "privacy-test.exe".into(),
+                        owner_process: "privacy-test.exe".into(),
+                        owner_pid: 1,
+                        observed: now,
+                    },
+                    false,
+                    now,
+                )
+                .unwrap();
+            let result = history.search(QUERY, 1).unwrap();
+            assert_eq!(result.items.len(), 1);
+            assert_eq!(result.items[0].id, saved.record_id.unwrap());
+            assert_eq!(result.items[0].preview, CONTENT);
+            assert!(
+                history
+                    .search("零结果查询哨兵-3fd610", 2)
+                    .unwrap()
+                    .items
+                    .is_empty()
+            );
+            history.summary();
+            logger.flush();
+            let text = fs::read_dir(&directories.logs)
+                .unwrap()
+                .map(|entry| fs::read_to_string(entry.unwrap().path()).unwrap())
+                .collect::<String>();
+            for private in [CONTENT, QUERY, "零结果查询哨兵-3fd610"] {
+                assert!(!text.contains(private));
+            }
+            let rows: Vec<serde_json::Value> = text
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            assert_eq!(
+                rows.iter().filter(|row| row["event"] == "search").count(),
+                2
+            );
+            for row in rows {
+                for field in [
+                    "text",
+                    "title",
+                    "window_title",
+                    "clipboard_text",
+                    "query",
+                    "preview",
+                    "content",
+                ] {
+                    assert!(row.get(field).is_none(), "日志不应包含字段 {field}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn newer_schema_in_startup_directory_preserves_database_and_reports_upgrade() {
         let directory = Directory::new();
         let directories = directories(&directory);

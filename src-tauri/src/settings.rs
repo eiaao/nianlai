@@ -590,6 +590,49 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn invalid_settings_diagnostics_never_write_input_values_to_logs() {
+        let directory = Directory::new();
+        let path = directory.0.join("settings.json");
+        let private = "设置原值隐私哨兵-7da493";
+        fs::write(
+            &path,
+            json!({"hotkey":private,"theme":private,"data_dir":private,
+                "memory":{"resuspend_minutes":private},
+                "experiments":{"searchbox_focus":private},"log":{"max_total_mb":private}})
+            .to_string(),
+        )
+        .unwrap();
+        let (store, mut issues) = Store::load(path.clone());
+        assert_eq!(store.get(), Settings::default());
+        assert_eq!(issues.len(), 6);
+        // JSON 解析器的错误也不能把损坏文件的输入带进诊断。
+        fs::write(&path, format!("{{{private}")).unwrap();
+        issues.extend(Store::load(path.clone()).1);
+        let directories = Directories {
+            settings_file: path,
+            data: directory.0.join("data"),
+            logs: directory.0.join("logs"),
+            data_source: "默认位置",
+            test_data_dir: true,
+        };
+        let logger = Logger::with_settings(&directories, 20).unwrap();
+        for issue in issues {
+            issue.record(&logger);
+        }
+        logger.flush();
+        let text =
+            fs::read_to_string(directories.logs.join(crate::log::COMPATIBILITY_FILE)).unwrap();
+        assert!(!text.contains(private));
+        let rows: Vec<Value> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(rows.len(), 7);
+        assert!(rows.iter().all(|row| row["event"] == "settings_invalid"));
+        assert!(rows.iter().all(|row| row["field"].is_string()));
+    }
+
+    #[test]
     fn failed_atomic_replacement_keeps_previous_file_and_memory() {
         let directory = Directory::new();
         let path = directory.0.join("settings.json");
