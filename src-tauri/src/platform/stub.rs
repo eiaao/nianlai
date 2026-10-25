@@ -29,6 +29,10 @@ impl Hooks {
     pub fn switched_to(&self) -> usize {
         0
     }
+    // 没有钩子，停留期间的按键规则无从生效。
+    pub fn begin_hint(&self, _: crate::platform::HintMode) -> Result<bool> {
+        Ok(false)
+    }
 }
 pub mod hook {
     use tauri_plugin_global_shortcut::Shortcut;

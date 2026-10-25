@@ -6,7 +6,9 @@ use crate::{
         keys::Table,
         request::{Mode as PasteMode, Request},
     },
-    platform::{self, HookEvent, Hooks, REPLAY_WAIT, Target, ime, paste, webview, window},
+    platform::{
+        self, HintEnd, HintMode, HookEvent, Hooks, REPLAY_WAIT, Target, ime, paste, webview, window,
+    },
     resuspend,
 };
 use serde_json::{Value, json};
@@ -83,6 +85,8 @@ pub const ELEVATED_HINT_DWELL: Duration = Duration::from_secs(3);
 struct Hint {
     since: Instant,
     dwell: Option<Duration>,
+    // 停留是怎么结束的（M0-6b）：收起前由各收起路径记下，写进 elevated_hint_hidden 的 ended_by。
+    ended_by: Option<&'static str>,
 }
 
 // 粘贴前的预判：面板要不要先别收起。判断顺序和 paste::perform 一致——复制模式、目标失效、用户切走
@@ -112,6 +116,22 @@ fn hint_hidden_fields(dwell: Duration, shown: Duration) -> Value {
         "shown_ms":shown.as_secs_f64() * 1000.0,
         "timed_out":shown >= dwell,
     })
+}
+
+// 上面的字段再加结束原因 ended_by（M0-6b）：escape / hotkey / key_passthrough / key_consumed / outside_click /
+// timeout，另有 frontend（前端 hide_panel）、quit；没记下原因的收起（例如出错后的兜底收起）为 null。不记按的是哪个键。
+fn hint_ended_fields(dwell: Duration, shown: Duration, ended_by: Option<&str>) -> Value {
+    let mut fields = hint_hidden_fields(dwell, shown);
+    fields["ended_by"] = json!(ended_by);
+    fields
+}
+
+// 停留被钩子报来的按键结束时记的收起来源：Esc 沿用快速模式原来的 escape_key，其他键是新来源。
+fn hint_key_hide_source(end: HintEnd) -> &'static str {
+    match end {
+        HintEnd::Escape => "escape_key",
+        HintEnd::KeyPassthrough | HintEnd::KeyConsumed => "elevated_hint_key",
+    }
 }
 
 pub struct Controller {
@@ -196,6 +216,15 @@ pub enum Action {
     },
     Hide {
         session: u64,
+    },
+    // 钩子报告点了面板外（原来走 Hide；单列出来只为停留结束时记 ended_by=outside_click，收起逻辑相同）。
+    OutsideClick {
+        session: u64,
+    },
+    // 管理员提示停留期间钩子报来的按键要收起面板（M0-6b）。
+    HintKey {
+        session: u64,
+        end: HintEnd,
     },
     Paste {
         session: u64,
@@ -474,8 +503,9 @@ impl Panel {
                                 json!({"session":session,"source":"outside_click",
                                     "point":point,"bounds":bounds,"current":current}),
                             );
-                            Action::Hide { session }
+                            Action::OutsideClick { session }
                         }
+                        HookEvent::HintKey(end) => Action::HintKey { session, end },
                     };
                     let _ = dispatch(&app, action);
                 },
@@ -528,7 +558,7 @@ impl Panel {
             self.log(
                 logger,
                 "elevated_hint_hidden",
-                hint_hidden_fields(dwell, hint.since.elapsed()),
+                hint_ended_fields(dwell, hint.since.elapsed(), hint.ended_by),
             );
         }
         let foreground = window::foreground();
@@ -715,6 +745,16 @@ impl Panel {
         self.replay_search(logger, ready, if ready { "ready" } else { "timeout" }, true)?;
         self.awaiting_search = false;
         self.log(logger, "search_ready", json!({"search_box_ready":ready,"foreground_ok":window::foreground()==window::handle(&self.window)?}));
+        // M0-6b：停留在搜索框就绪之前就开始了（例如切搜索模式途中点了条目），上面的补发卸掉了停留用的键盘钩子，
+        // 重新挂上。不在停留时不进这里。
+        if self.dwelling() {
+            let (hint_keys, hint_keys_error) = self.arm_hint_keys();
+            self.log(
+                logger,
+                "hint_keys_rearmed",
+                json!({"hint_keys":hint_keys,"hint_keys_error":hint_keys_error}),
+            );
+        }
         Ok(())
     }
     fn mode_name(&self) -> &'static str {
@@ -745,13 +785,43 @@ impl Panel {
         self.hint = Some(Hint {
             since: Instant::now(),
             dwell: Some(dwell),
+            ended_by: None,
         });
+        // M0-6b：让钩子按停留规则处理按键（快速模式组合键放行给目标、普通键吞掉；搜索模式吞掉；都立即收起）。
+        // 没挂上只记日志，停留照旧（按键退回 M0-6 的处理），到点、Esc、呼出键、点面板外照样收起。
+        let (hint_keys, hint_keys_error) = self.arm_hint_keys();
         // target_foreground：停留开始时目标是否仍在前台（快速模式应为 true；搜索模式前台是面板，为 false）。
         self.log(logger, "elevated_hint_shown", json!({
             "reason":"target_may_be_elevated","dwell_ms":dwell.as_millis() as u64,
             "panel_mode":self.mode_name(),"target_foreground":window::foreground()==self.target.window,
+            "hint_keys":hint_keys,"hint_keys_error":hint_keys_error,
         }));
         Ok(())
+    }
+    // 是否正在管理员提示停留中（结论已确认、在计时；预判占位不算）。
+    fn dwelling(&self) -> bool {
+        self.hint.as_ref().is_some_and(|hint| hint.dwell.is_some())
+    }
+    // 停留中要收起前记下结束原因，hide() 写进 elevated_hint_hidden。不在停留时什么也不做。
+    fn end_hint(&mut self, ended_by: &'static str) {
+        if let Some(hint) = self.hint.as_mut()
+            && hint.dwell.is_some()
+        {
+            hint.ended_by = Some(ended_by);
+        }
+    }
+    // 告诉钩子开始按停留规则处理按键（M0-6b）。返回（键盘钩子是否在位，出错时的错误文本）。
+    fn arm_hint_keys(&self) -> (bool, Option<String>) {
+        let mode = match self.mode {
+            Mode::Quick => HintMode::Quick,
+            Mode::Search => HintMode::Search,
+            Mode::Hidden | Mode::Auto => return (false, None),
+        };
+        match self.hooks.as_ref().map(|hooks| hooks.begin_hint(mode)) {
+            Some(Ok(armed)) => (armed, None),
+            Some(Err(error)) => (false, Some(error)),
+            None => (false, Some("钩子未安装".into())),
+        }
     }
     fn act(&mut self, app: &AppHandle, logger: &Logger, action: Action) -> platform::Result<()> {
         if self.auto_enabled {
@@ -833,6 +903,7 @@ impl Panel {
                         );
                     }
                     self.log(logger, "hide_source", json!({"source":"hotkey"}));
+                    self.end_hint("hotkey");
                     self.hide(logger)?;
                 }
             }
@@ -883,6 +954,7 @@ impl Panel {
                 self.emit("panel:key", json!({"key":key}));
                 if key == "Escape" {
                     self.log(logger, "hide_source", json!({"source":"escape_key"}));
+                    self.end_hint("escape");
                     self.hide(logger)?;
                 }
             }
@@ -924,7 +996,26 @@ impl Panel {
             {
                 self.finish_search(logger, false)?
             }
+            // 前端的 hide_panel（lib.rs 已记 hide_source=frontend）。
             Action::Hide { session } if self.current(session) => {
+                self.end_hint("frontend");
+                self.hide(logger)?;
+            }
+            // 点面板外：hide_source=outside_click 已由钩子回调记下，收起和原来走 Hide 时一样。
+            Action::OutsideClick { session } if self.current(session) => {
+                self.end_hint("outside_click");
+                self.hide(logger)?;
+            }
+            // 管理员提示停留期间的按键（M0-6b）：放行给目标的键（快速模式的组合键，key_passthrough）按下时就报；
+            // 吞掉的键（快速模式的普通键、搜索模式的键，key_consumed；Esc）抬起时才报，抬起也已吞掉；还有被吞的键
+            // 按着时钩子会等最后一个抬起再报。这里立即收起，焦点按原逻辑还。停留已结束（到点、其他路径先收了）就不再处理。
+            Action::HintKey { session, end } if self.current(session) && self.dwelling() => {
+                self.log(
+                    logger,
+                    "hide_source",
+                    json!({"source":hint_key_hide_source(end)}),
+                );
+                self.end_hint(end.name());
                 self.hide(logger)?;
             }
             Action::Paste {
@@ -972,6 +1063,7 @@ impl Panel {
                     self.hint = Some(Hint {
                         since: Instant::now(),
                         dwell: None,
+                        ended_by: None,
                     });
                     self.log(
                         logger,
@@ -1114,6 +1206,7 @@ impl Panel {
                     "hide_source",
                     json!({"source":"elevated_hint_timeout"}),
                 );
+                self.end_hint("timeout");
                 self.hide(logger)?;
             }
             // 停留期间不再发起粘贴（前端 busy 也保持着，这里是兜底）。
@@ -1158,6 +1251,7 @@ impl Panel {
                     .store(true, Ordering::Release);
                 self.auto_stop.take();
                 self.resuspend_stop.take();
+                self.end_hint("quit");
                 if self.mode != Mode::Hidden
                     && let Err(error) = self.hide(logger)
                 {
@@ -1330,6 +1424,49 @@ mod tests {
         assert_eq!(
             hint_hidden_fields(ELEVATED_HINT_DWELL, ELEVATED_HINT_DWELL)["timed_out"],
             true
+        );
+    }
+
+    // M0-6b：停留结束原因写进 elevated_hint_hidden，原有字段不变；不记按的是哪个键。
+    #[test]
+    fn hint_ended_fields_add_the_reason_only() {
+        let shown = Duration::from_millis(800);
+        for ended_by in [
+            "escape",
+            "hotkey",
+            "key_passthrough",
+            "key_consumed",
+            "outside_click",
+            "timeout",
+        ] {
+            let fields = hint_ended_fields(ELEVATED_HINT_DWELL, shown, Some(ended_by));
+            let mut expected = hint_hidden_fields(ELEVATED_HINT_DWELL, shown);
+            expected["ended_by"] = json!(ended_by);
+            assert_eq!(fields, expected, "{ended_by}");
+        }
+        assert_eq!(
+            hint_ended_fields(ELEVATED_HINT_DWELL, shown, None)["ended_by"],
+            Value::Null
+        );
+        assert_eq!(
+            HintEnd::Escape.name(),
+            "escape",
+            "钩子报的 Esc 和快速模式原路径记同一个 ended_by"
+        );
+        assert_eq!(HintEnd::KeyPassthrough.name(), "key_passthrough");
+        assert_eq!(HintEnd::KeyConsumed.name(), "key_consumed");
+    }
+
+    #[test]
+    fn hint_key_hide_sources() {
+        assert_eq!(hint_key_hide_source(HintEnd::Escape), "escape_key");
+        assert_eq!(
+            hint_key_hide_source(HintEnd::KeyPassthrough),
+            "elevated_hint_key"
+        );
+        assert_eq!(
+            hint_key_hide_source(HintEnd::KeyConsumed),
+            "elevated_hint_key"
         );
     }
 

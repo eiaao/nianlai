@@ -52,6 +52,44 @@ pub enum HookEvent {
         bounds: [i32; 4],
         current: [i32; 4],
     },
+    // 管理员提示停留期间的按键要收起面板（M0-6b），带上结束原因；不带按的是哪个键。
+    HintKey(HintEnd),
+}
+
+// 管理员提示停留时面板所处的模式，决定停留期间按键是放行给目标还是吞掉（M0-6b）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HintMode {
+    // 快速模式：面板不激活，目标仍有焦点。带 Ctrl / Alt / Win 的组合键放行给目标，普通键吞掉。
+    Quick,
+    // 搜索模式：面板有焦点，按键吞掉，不进搜索框。
+    Search,
+}
+impl HintMode {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Quick => "quick",
+            Self::Search => "search",
+        }
+    }
+}
+
+// 停留被按键提前结束的原因，写进 elevated_hint_hidden 的 ended_by。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HintEnd {
+    Escape,
+    // 这个键放行给了目标：快速模式下带 Ctrl / Alt / Win 的组合键（例如 Ctrl+V 里的 V），或搜索模式下面板已被切走。
+    KeyPassthrough,
+    // 这个键被吞掉了：快速模式下的普通键（数字、字母、Enter……），或搜索模式下的非修饰键。
+    KeyConsumed,
+}
+impl HintEnd {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Escape => "escape",
+            Self::KeyPassthrough => "key_passthrough",
+            Self::KeyConsumed => "key_consumed",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Serialize)]
