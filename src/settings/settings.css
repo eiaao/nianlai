@@ -1,0 +1,10 @@
+/* 设置窗口的全局基础样式。变量在 lib/theme.css，和面板共用。 */
+:root {
+  font-family: var(--font-family-ui);
+  font-size: var(--font-size-body);
+  color: var(--color-text-primary);
+  background: var(--color-bg-panel);
+}
+
+* { box-sizing: border-box; }
+html, body, #app { margin: 0; height: 100%; }

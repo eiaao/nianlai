@@ -17,6 +17,7 @@
   --font-family-ui: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", sans-serif;
   --font-size-caption: 11px;     /* 按键提示、状态、页脚、类型标签、槽位号 */
   --font-size-body: 13px;        /* 正文、搜索框 */
+  --font-size-title: 20px;       /* 设置占位页标题 */
   /* M0 现状专用 */
   --font-size-heading: 17px;     /* 面板标题“拈来” */
   --font-size-micro: 10px;       /* 条目的来源 · 时间、“部分格式未保存” */
@@ -26,6 +27,7 @@
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;
+  --space-6: 24px;                     /* 设置页内边距 */
   /* M0 现状专用：不在 4px 网格上，按用到的位置命名 */
   --space-header-inset: 14px;          /* 顶部区域上、左、右内边距 */
   --space-heading-gap: 9px;            /* 标题行各项之间 */
