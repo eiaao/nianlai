@@ -12,10 +12,11 @@ pub struct Hooks;
 impl Hooks {
     pub fn install(
         _: usize,
-        _: usize,
+        _: &Target,
         _: Shortcut,
         _: Logger,
         _: u64,
+        _: crate::platform::HookOptions,
         _: impl Fn(HookEvent) + Send + 'static,
     ) -> Result<Self> {
         Err("G0 仅支持 Windows".into())
@@ -29,9 +30,14 @@ impl Hooks {
     pub fn switched_to(&self) -> usize {
         0
     }
-    // 没有钩子，停留期间的按键规则无从生效。
-    pub fn begin_hint(&self, _: crate::platform::HintMode) -> Result<bool> {
-        Ok(false)
+    pub fn activation(&self, _: bool) -> Result<()> {
+        Ok(())
+    }
+    pub fn stop_inputs(&self, _: bool) -> Result<bool> {
+        Ok(true)
+    }
+    pub fn synchronize(&self) -> bool {
+        false
     }
     pub fn finish_hint(&self) -> Result<bool> {
         Ok(true)
@@ -65,6 +71,12 @@ pub mod window {
     }
     pub fn foreground() -> usize {
         0
+    }
+    pub fn tick_count() -> u32 {
+        0
+    }
+    pub fn valid(_: &Target) -> bool {
+        false
     }
     pub fn class_name(_: usize) -> String {
         String::new()
@@ -103,12 +115,18 @@ pub mod window {
     pub fn restore(target: &Target) -> FocusResult {
         confirm(target)
     }
+    pub fn confirm_strict(target: &Target) -> FocusResult {
+        confirm(target)
+    }
 }
 pub mod paste {
     use super::*;
     use crate::platform::ReplayKey;
     pub fn cancel_alt_menu() -> u32 {
         0
+    }
+    pub fn keys_released() -> bool {
+        true
     }
     pub fn replay(_: &[ReplayKey], _: usize, _: Instant) -> usize {
         0

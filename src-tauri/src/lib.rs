@@ -71,6 +71,10 @@ fn search_ready(app: AppHandle, session: u64) -> Result<(), String> {
     panel::dispatch(&app, Action::SearchReady { session })
 }
 #[tauri::command]
+fn retry_activation(app: AppHandle, session: u64) -> Result<(), String> {
+    panel::dispatch(&app, Action::RetryActivation { session })
+}
+#[tauri::command]
 fn hide_panel(app: AppHandle, session: u64) -> Result<(), String> {
     app.state::<Controller>().logger.event(
         "hide_source",
@@ -84,6 +88,7 @@ fn paste_item(
     session: u64,
     id: usize,
     mode: paste::request::Mode,
+    selection: Option<paste::permit::Selection>,
 ) -> Result<(), String> {
     panel::dispatch(
         &app,
@@ -91,6 +96,7 @@ fn paste_item(
             session,
             id,
             mode,
+            selection,
             started: Instant::now(),
         },
     )
@@ -214,6 +220,7 @@ pub fn run() {
             frontend_ready,
             start_search,
             search_ready,
+            retry_activation,
             hide_panel,
             paste_item,
             report_painted,

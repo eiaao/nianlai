@@ -8,6 +8,11 @@ pub const REPLAY_CAPACITY: usize = 32;
 
 pub type Result<T> = std::result::Result<T, String>;
 
+pub struct HookOptions {
+    pub monitor: std::sync::Arc<crate::paste::permit::Monitor>,
+    pub restricted: bool,
+}
+
 // 句柄仅作为不拥有资源的标识跨线程传递，使用前重新校验。
 #[derive(Clone, Default)]
 pub struct Target {
@@ -45,6 +50,7 @@ pub struct ReplayKey {
 
 pub enum HookEvent {
     Key(&'static str),
+    ForegroundRevision(u64),
     Search(Instant),
     // 点击坐标、安装钩子时记下的面板范围、点击当时面板的实际范围，用于排查误判。
     Outside {
@@ -63,14 +69,6 @@ pub enum HintMode {
     Quick,
     // 搜索模式：面板有焦点，按键吞掉，不进搜索框。
     Search,
-}
-impl HintMode {
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Quick => "quick",
-            Self::Search => "search",
-        }
-    }
 }
 
 // 停留被按键提前结束的原因，写进 elevated_hint_hidden 的 ended_by。

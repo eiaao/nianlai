@@ -12,10 +12,10 @@
   class:selected={index === panel.selected}
   aria-pressed={index === panel.selected}
   tabindex="-1"
-  disabled={panel.busy}
-  onpointerenter={() => { panel.selected = index; }}
+  disabled={panel.busy || !panel.interactive}
+  onpointerenter={() => { if (panel.interactive && !panel.busy) panel.selected = index; }}
   onpointerdown={(event) => event.preventDefault()}
-  onclick={() => panel.choose(index)}
+  onclick={(event) => panel.choose(index, "paste", event)}
 >
   <span class="badge" aria-hidden="true">{index < 9 ? index + 1 : "·"}</span>
   <span class="entry-content">

@@ -4,11 +4,10 @@ use crate::{
     log::{Logger, now_ms},
     paste::{
         keys::Table,
+        permit::{Monitor, Permit, Selection, Session as PermitSession, reliable_control},
         request::{Mode as PasteMode, Request},
     },
-    platform::{
-        self, HintEnd, HintMode, HookEvent, Hooks, REPLAY_WAIT, Target, ime, paste, webview, window,
-    },
+    platform::{self, HintEnd, HookEvent, Hooks, REPLAY_WAIT, Target, ime, paste, webview, window},
     resuspend,
 };
 use serde_json::{Value, json};
@@ -29,6 +28,16 @@ enum Mode {
     Quick,
     Search,
     Auto,
+}
+
+#[derive(Clone, Copy, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum Interaction {
+    Quick,
+    ActivationPending,
+    ActivationFailed,
+    Activated,
+    Passive,
 }
 
 enum ShowSource {
@@ -78,7 +87,7 @@ fn stamp(mut fields: Value, session: u64, target: &Target) -> Value {
 
 // 目标程序可能以管理员身份运行时，粘贴只会降级成"只复制"，面板停留这么久把提示给用户看完再自动收起。
 // 来源：M0-6（10-24 夜实测，面板在结论出来前约 36 ms 就收起了，"目标程序以管理员身份运行"的提示要
-// 下次呼出才看得到）。3 秒够读完一行提示，再长会一直挡着目标窗口；期间 Esc、呼出键、点面板外都能提前收起。
+// 下次呼出才看得到）。现为 3 秒被动提示，可点关闭或使用呼出键；不承诺目标下的按键立即关闭提示。
 pub const ELEVATED_HINT_DWELL: Duration = Duration::from_secs(3);
 
 // 管理员提示的停留状态。预判要停留时先占位（dwell 为 None，等粘贴结论），结论确认后才开始计时。
@@ -101,14 +110,18 @@ fn defers_hide_for_elevated(
     mode != PasteMode::Copy && target_valid && !external_switch && integrity["status"] != "allowed"
 }
 
-// 根据粘贴结论决定面板停留多久：只有"只复制 + 目标可能是管理员"停留 ELEVATED_HINT_DWELL；
-// 其他 copied_only 原因（目标失效、用户切走、发键前确认没过、发键失败等）和正常粘贴都不停留。
+// 已复制且需要被动反馈，或旧路径返回“目标可能是管理员”时停留；取消请求和其他粘贴结论不停留。
 fn dwell_after_paste(result: &Value) -> Option<Duration> {
-    (result["paste_result"] == "copied_only" && result["reason"] == "target_may_be_elevated")
+    if result["request_cancelled"] == true {
+        return None;
+    }
+    ((result["passive_hint"] == true && result["clipboard_written"] == true)
+        || (result["paste_result"] == "copied_only"
+            && result["reason"] == "target_may_be_elevated"))
         .then_some(ELEVATED_HINT_DWELL)
 }
 
-// 停留结束的日志字段：计划时长、实际停留时长、是不是到点自动收起（否则是 Esc / 呼出键 / 点面板外提前收的）。
+// 停留结束的日志字段：计划时长、实际停留时长，以及是否到点自动收起；提前结束来源单独记录。
 fn hint_hidden_fields(dwell: Duration, shown: Duration) -> Value {
     json!({
         "reason":"target_may_be_elevated",
@@ -165,6 +178,9 @@ struct Panel {
     target: Target,
     hotkey: Option<Shortcut>,
     hooks: Option<Hooks>,
+    interaction: Interaction,
+    monitor: Option<Arc<Monitor>>,
+    permits: Option<PermitSession>,
     started: Option<Instant>,
     shown: Option<Instant>,
     painted: bool,
@@ -172,6 +188,7 @@ struct Panel {
     awaiting_search: bool,
     memory: Arc<webview::MemoryState>,
     pasting: bool,
+    paste_cancel: Option<Arc<AtomicBool>>,
     // 管理员提示：粘贴预判为"目标可能是管理员"后面板不收起，这里记着停留状态；None 表示没在停留。
     hint: Option<Hint>,
     auto_enabled: bool,
@@ -224,6 +241,20 @@ pub enum Action {
     SearchReady {
         session: u64,
     },
+    RetryActivation {
+        session: u64,
+    },
+    ForegroundRevision {
+        session: u64,
+        revision: u64,
+    },
+    ReturnForPaste {
+        session: u64,
+        permit: Option<Permit>,
+        passive: bool,
+        requested: Instant,
+        reply: mpsc::SyncSender<platform::FocusResult>,
+    },
     SearchTimeout {
         session: u64,
     },
@@ -243,6 +274,7 @@ pub enum Action {
         session: u64,
         id: usize,
         mode: PasteMode,
+        selection: Option<Selection>,
         started: Instant,
     },
     // 粘贴键已发出：证据还在后台收集，此时就允许再次呼出。
@@ -291,6 +323,9 @@ impl Controller {
                 target: Target::default(),
                 hotkey: None,
                 hooks: None,
+                interaction: Interaction::Quick,
+                monitor: None,
+                permits: None,
                 started: None,
                 shown: None,
                 painted: false,
@@ -298,6 +333,7 @@ impl Controller {
                 awaiting_search: false,
                 memory: Arc::new(webview::MemoryState::default()),
                 pasting: false,
+                paste_cancel: None,
                 hint: None,
                 auto_enabled: plan.is_some(),
                 auto_plan: plan,
@@ -386,6 +422,27 @@ pub fn dispatch(app: &AppHandle, action: Action) -> Result<(), String> {
     .map_err(|e| e.to_string())
 }
 
+fn return_for_paste(
+    app: &AppHandle,
+    session: u64,
+    permit: Option<Permit>,
+    passive: bool,
+) -> Option<platform::FocusResult> {
+    let (reply, receiver) = mpsc::sync_channel(1);
+    dispatch(
+        app,
+        Action::ReturnForPaste {
+            session,
+            permit,
+            passive,
+            requested: Instant::now(),
+            reply,
+        },
+    )
+    .ok()?;
+    receiver.recv_timeout(REPLAY_WAIT).ok()
+}
+
 impl Panel {
     fn log(&self, logger: &Logger, event: &str, fields: Value) {
         logger.event(event, stamp(fields, self.session, &self.target));
@@ -404,7 +461,8 @@ impl Panel {
             self.emit(
                 "panel:shown",
                 json!({"hotkeyToShowMs":shown.duration_since(started).as_secs_f64()*1000.0,"history":history,
-                    "experiments":self.experiments.payload()}),
+                    "experiments":self.experiments.payload(),"interaction":self.interaction,
+                    "foregroundRevision":self.monitor.as_ref().map_or(0, |monitor| monitor.revision())}),
             );
         }
     }
@@ -430,6 +488,8 @@ impl Panel {
         self.foreground_taken = false;
         self.awaiting_search = false;
         self.hint = None;
+        self.monitor = None;
+        self.permits = None;
         self.auto_visible = None;
         let automatic = match source {
             ShowSource::Hotkey { target, alt } => {
@@ -459,6 +519,18 @@ impl Panel {
             }
         };
         let webview_started = Instant::now();
+        let restricted = automatic.is_none()
+            && defers_hide_for_elevated(
+                PasteMode::Paste,
+                true,
+                false,
+                &paste::compare_integrity(&self.target),
+            );
+        self.interaction = if restricted {
+            Interaction::ActivationPending
+        } else {
+            Interaction::Quick
+        };
         webview::set_visible(
             &self.window,
             true,
@@ -493,15 +565,32 @@ impl Panel {
             let session = self.session;
             let app = app.clone();
             let hook_logger = logger.clone();
-            self.hooks = Some(Hooks::install(
+            let monitor = Arc::new(Monitor::new(
                 window::handle(&self.window)?,
                 self.target.window,
+            ));
+            self.monitor = Some(monitor.clone());
+            self.permits = Some(PermitSession::new(
+                session,
+                self.target.clone(),
+                monitor.clone(),
+            ));
+            self.hooks = Some(Hooks::install(
+                window::handle(&self.window)?,
+                &self.target,
                 self.hotkey.ok_or("呼出键尚未注册")?,
                 logger.clone(),
                 session,
+                platform::HookOptions {
+                    monitor,
+                    restricted,
+                },
                 move |event| {
                     let action = match event {
                         HookEvent::Key(key) => Action::Key { session, key },
+                        HookEvent::ForegroundRevision(revision) => {
+                            Action::ForegroundRevision { session, revision }
+                        }
                         HookEvent::Search(started) => Action::Search {
                             session,
                             started: Some(started),
@@ -525,6 +614,43 @@ impl Panel {
             )?);
         }
         self.shown_event(app);
+        if restricted {
+            self.activate_restricted(logger)?;
+        }
+        Ok(())
+    }
+
+    fn set_interaction(&mut self, interaction: Interaction) {
+        self.interaction = interaction;
+        self.emit("panel:interaction", json!({"interaction":interaction}));
+    }
+    fn activate_restricted(&mut self, logger: &Logger) -> platform::Result<()> {
+        self.set_interaction(Interaction::ActivationPending);
+        let owner = window::handle(&self.window)?;
+        if let Some(hooks) = self.hooks.as_ref() {
+            hooks.activation(false)?;
+        }
+        window::no_activate(&self.window, false)?;
+        let result = window::activate(owner);
+        let ready =
+            result.success && window::foreground() == owner && webview::focus(&self.window).is_ok();
+        if let Some(hooks) = self.hooks.as_ref() {
+            hooks.activation(ready)?;
+        }
+        self.foreground_taken |= ready;
+        if !ready {
+            window::no_activate(&self.window, true)?;
+        }
+        self.set_interaction(if ready {
+            Interaction::Activated
+        } else {
+            Interaction::ActivationFailed
+        });
+        self.log(
+            logger,
+            "restricted_activation",
+            json!({"foreground_path":result.path,"foreground_ok":ready}),
+        );
         Ok(())
     }
     fn hide_auto(
@@ -563,6 +689,18 @@ impl Panel {
         if self.mode == Mode::Hidden {
             return Ok(false);
         }
+        if self.pasting && self.hooks.is_none() {
+            // worker 持有输入钩子时，先撤销请求；等全部按键松开后由它收起，不能在这里抢先归还。
+            if let Some(cancel) = &self.paste_cancel {
+                cancel.store(true, Ordering::Release);
+            }
+            if let Some(monitor) = &self.monitor {
+                monitor.stopped();
+            }
+            self.set_interaction(Interaction::Passive);
+            self.log(logger, "hide_deferred", json!({"reason":"paste_key_drain"}));
+            return Ok(false);
+        }
         // 超时、外部点击、呼出键和排队的按键收起都必须通过同一道检查。
         // 钩子线程在确认没有待配对键后立即卸钩，不留检查后再吞键的窗口；退出不等待。
         if hint_needs_key_drain(
@@ -578,7 +716,7 @@ impl Panel {
             );
             return Ok(false);
         }
-        // 管理员提示停留中被收起（到点、Esc、呼出键、点面板外都走这里）：记一条停留结束，含实际时长。
+        // 被动提示到点或经显式关闭路径收起时，记录停留结束及实际时长。
         // 预判后还没等到结论就收起的（占位、dwell 为 None）只清掉标记，不算停留过。
         if let Some(hint) = self.hint.take()
             && let Some(dwell) = hint.dwell
@@ -591,7 +729,8 @@ impl Panel {
         }
         let foreground = window::foreground();
         let panel = window::handle(&self.window)?;
-        let may_restore = foreground == panel || foreground == self.target.window;
+        let may_restore = self.interaction != Interaction::Passive
+            && (foreground == panel || foreground == self.target.window);
         if let Err(error) = self.replay_search(logger, false, "hidden", false) {
             self.log(logger, "replay_cleanup_failed", json!({"error":error}));
         }
@@ -627,7 +766,12 @@ impl Panel {
         logger: &Logger,
         started: Option<Instant>,
     ) -> platform::Result<()> {
-        if self.mode != Mode::Quick {
+        if self.mode != Mode::Quick
+            || !matches!(
+                self.interaction,
+                Interaction::Quick | Interaction::Activated
+            )
+        {
             return Ok(());
         }
         self.mode = Mode::Search;
@@ -794,8 +938,7 @@ impl Panel {
             Mode::Auto => "auto",
         }
     }
-    // 粘贴结论确认是"目标可能是管理员、只复制了"：开始停留计时，到点自动收起。期间不碰窗口样式、不还焦点、
-    // 钩子照旧——快速模式下面板仍不激活；搜索模式下焦点等收起时按原逻辑还（还不回去只会记在 focus_restored 里）。
+    // 复制和松键清理完成、受控归还已尝试后，开始被动提示计时；输入钩子已撤下，到点自动收起。
     fn begin_hint(
         &mut self,
         app: &AppHandle,
@@ -816,14 +959,14 @@ impl Panel {
             dwell: Some(dwell),
             ended_by: None,
         });
-        // M0-6b：让钩子按停留规则处理按键（快速模式组合键放行给目标、普通键吞掉；搜索模式吞掉；都立即收起）。
-        // 没挂上只记日志，停留照旧（按键退回 M0-6 的处理），到点、Esc、呼出键、点面板外照样收起。
-        let (hint_keys, hint_keys_error) = self.arm_hint_keys();
-        // target_foreground：停留开始时目标是否仍在前台（快速模式应为 true；搜索模式前台是面板，为 false）。
+        // 已批准 A：归还后只保留被动反馈，不再承诺管理员目标下能截键或按键立即关闭。
+        self.set_interaction(Interaction::Passive);
+        window::no_activate(&self.window, true)?;
+        // target_foreground 只记录此刻目标是否在前台，不把归还尝试当成已成功。
         self.log(logger, "elevated_hint_shown", json!({
             "reason":"target_may_be_elevated","dwell_ms":dwell.as_millis() as u64,
             "panel_mode":self.mode_name(),"target_foreground":window::foreground()==self.target.window,
-            "hint_keys":hint_keys,"hint_keys_error":hint_keys_error,
+            "hint_keys":false,"hint_keys_error":null,
         }));
         Ok(())
     }
@@ -837,19 +980,6 @@ impl Panel {
             && hint.dwell.is_some()
         {
             hint.ended_by = Some(hint_end_reason(hint.ended_by, ended_by));
-        }
-    }
-    // 告诉钩子开始按停留规则处理按键（M0-6b）。返回（键盘钩子是否在位，出错时的错误文本）。
-    fn arm_hint_keys(&self) -> (bool, Option<String>) {
-        let mode = match self.mode {
-            Mode::Quick => HintMode::Quick,
-            Mode::Search => HintMode::Search,
-            Mode::Hidden | Mode::Auto => return (false, None),
-        };
-        match self.hooks.as_ref().map(|hooks| hooks.begin_hint(mode)) {
-            Some(Ok(armed)) => (armed, None),
-            Some(Err(error)) => (false, Some(error)),
-            None => (false, Some("钩子未安装".into())),
         }
     }
     fn act(&mut self, app: &AppHandle, logger: &Logger, action: Action) -> platform::Result<()> {
@@ -979,7 +1109,94 @@ impl Panel {
                     self.shown_event(app);
                 }
             }
-            Action::Key { session, key } if self.current(session) && self.mode == Mode::Quick => {
+            Action::ForegroundRevision { session, revision } if self.current(session) => {
+                self.emit("panel:foreground-revision", json!({"revision":revision}));
+            }
+            Action::RetryActivation { session }
+                if self.current(session)
+                    && !self.pasting
+                    && self.interaction == Interaction::ActivationFailed =>
+            {
+                self.activate_restricted(logger)?;
+            }
+            Action::ReturnForPaste {
+                session,
+                permit,
+                passive,
+                requested,
+                reply,
+            } => {
+                let mut focus = window::confirm(&self.target);
+                if session == self.session && self.pasting && self.mode != Mode::Hidden {
+                    let foreground = window::foreground();
+                    let can_restore = requested.elapsed() < REPLAY_WAIT
+                        && !app.state::<Controller>().stopping.load(Ordering::Acquire)
+                        && window::valid(&self.target)
+                        && permit
+                            .as_ref()
+                            .is_some_and(|permit| permit.current(&self.target, foreground));
+                    if passive {
+                        self.set_interaction(Interaction::Passive);
+                    }
+                    window::no_activate(&self.window, true)?;
+                    let armed_at = window::tick_count();
+                    if !can_restore && let Some(permit) = permit.as_ref() {
+                        permit.revoke();
+                    }
+                    if can_restore
+                        && permit
+                            .as_ref()
+                            .is_some_and(|permit| permit.arm_return(foreground, armed_at))
+                    {
+                        if foreground == window::handle(&self.window)? {
+                            // WinEvent 与 GetTickCount 同 tick 时无法证明先后，跨到下一 tick 再进行受控归还。
+                            let waiting = Instant::now();
+                            while window::tick_count() == armed_at
+                                && waiting.elapsed() < Duration::from_millis(30)
+                            {
+                                std::thread::sleep(Duration::from_millis(1));
+                            }
+                            if window::tick_count() != armed_at
+                                && requested.elapsed() < REPLAY_WAIT
+                                && !app.state::<Controller>().stopping.load(Ordering::Acquire)
+                                && permit.as_ref().is_some_and(|permit| {
+                                    permit.return_pending(&self.target, window::foreground())
+                                })
+                            {
+                                focus = window::restore(&self.target);
+                            } else if let Some(permit) = permit.as_ref() {
+                                // 等待期间切走、到期或退出后只复制，不能让提前观察到的目标事件保留发送资格。
+                                permit.revoke();
+                            }
+                        } else {
+                            focus = window::confirm(&self.target);
+                        }
+                    }
+                    if !passive {
+                        self.mode = Mode::Hidden;
+                        self.awaiting_search = false;
+                        window::hide(&self.window)?;
+                        self.emit("panel:hidden", json!({}));
+                        webview::set_visible(
+                            &self.window,
+                            false,
+                            logger.clone(),
+                            session,
+                            self.memory.clone(),
+                        )?;
+                        self.log(logger, "hidden", json!({"source":"paste"}));
+                    }
+                }
+                let _ = reply.send(focus);
+            }
+            Action::Key { session, key }
+                if self.current(session)
+                    && self.mode == Mode::Quick
+                    && matches!(
+                        self.interaction,
+                        Interaction::Quick | Interaction::Activated
+                    ) =>
+            {
                 self.emit("panel:key", json!({"key":key}));
                 if key == "Escape" {
                     self.log(logger, "hide_source", json!({"source":"escape_key"}));
@@ -987,7 +1204,14 @@ impl Panel {
                     self.hide(logger)?;
                 }
             }
-            Action::Search { session, started } if self.current(session) && self.hint.is_none() => {
+            Action::Search { session, started }
+                if self.current(session)
+                    && self.hint.is_none()
+                    && matches!(
+                        self.interaction,
+                        Interaction::Quick | Interaction::Activated
+                    ) =>
+            {
                 self.begin_search(app, logger, started)?
             }
             // 管理员提示停留期间不切搜索模式（不抢焦点、不开新的键处理）：快速模式下钩子已把这些键吞掉并
@@ -1051,122 +1275,144 @@ impl Panel {
                 session,
                 id,
                 mode,
+                selection,
                 started,
-            } if self.current(session) && !self.pasting && self.hint.is_none() => {
+            } if self.current(session)
+                && !self.pasting
+                && self.hint.is_none()
+                && matches!(
+                    self.interaction,
+                    Interaction::Quick | Interaction::Activated
+                ) =>
+            {
                 let owner = window::handle(&self.window)?;
                 let foreground = window::foreground();
-                let switched_to = self.hooks.as_ref().map_or(0, Hooks::switched_to);
-                let external_switch =
-                    switched_to != 0 || (foreground != owner && foreground != self.target.window);
-                if external_switch {
-                    // 排查用：记下抢走前台的窗口，只记类名和进程名，不记标题。
-                    let other = if switched_to != 0 {
-                        switched_to
-                    } else {
-                        foreground
-                    };
-                    self.log(
-                        logger,
-                        "paste_switch",
-                        json!({"detected_by":if switched_to != 0 { "foreground_event" } else { "foreground_check" },
-                            "switched_class":window::class_name(other),"switched_process":window::process_of(other)}),
+                let search = self.mode == Mode::Search;
+                let restricted = self.interaction == Interaction::Activated;
+                let external_switch = !search
+                    && self
+                        .hooks
+                        .as_ref()
+                        .is_some_and(|hooks| hooks.switched_to() != 0);
+                let permits = self.permits.as_mut().ok_or("前台监控尚未建立")?;
+                let permit = if search {
+                    match selection {
+                        Some(selection) => {
+                            match permits.select(session, id, mode, selection, foreground) {
+                                Ok(permit) => Some(permit),
+                                Err(reason) => {
+                                    self.log(logger, "paste_rejected", json!({"reason":reason}));
+                                    self.emit("panel:error", json!({"message":"选择期间窗口状态已变化，请重新选择条目。"}));
+                                    return Ok(());
+                                }
+                            }
+                        }
+                        None => {
+                            self.emit(
+                                "panel:error",
+                                json!({"message":"请在搜索面板重新选择条目。"}),
+                            );
+                            return Ok(());
+                        }
+                    }
+                } else if selection.is_some() {
+                    self.emit(
+                        "panel:error",
+                        json!({"message":"面板模式已变化，请重新选择条目。"}),
                     );
-                }
-                let target = self.target.clone();
-                let restore_focus = self.foreground_taken || foreground == owner;
-                // M0-6：目标可能是管理员时粘贴只会降级成只复制，面板先不收起，等结论出来当场停留提示。
-                // 钩子留着（快速模式下按键照旧被吞、Esc 照旧收起、点面板外照旧收起），也不在这里还焦点。
-                let integrity = paste::compare_integrity(&target);
-                let keep_visible = defers_hide_for_elevated(
-                    mode,
-                    window::valid(&target),
-                    external_switch,
-                    &integrity,
-                );
-                let hooks = if keep_visible {
-                    None
+                    return Ok(());
                 } else {
-                    self.hooks.take()
+                    Some(permits.quick(id, mode))
                 };
-                if keep_visible {
+                let mut copy_only_reason = None;
+                if search && !reliable_control(&self.target) && copy_only_reason.is_none() {
+                    copy_only_reason = Some("target_control_unverified");
+                }
+                if restricted && mode != PasteMode::Copy {
+                    copy_only_reason = Some("target_may_be_elevated");
+                }
+                if restricted {
                     self.hint = Some(Hint {
                         since: Instant::now(),
                         dwell: None,
                         ended_by: None,
                     });
-                    self.log(
-                        logger,
-                        "elevated_target",
-                        json!({"integrity":integrity,"panel_mode":self.mode_name()}),
-                    );
-                } else {
-                    self.mode = Mode::Hidden;
-                    self.awaiting_search = false;
-                    window::hide(&self.window)?;
-                    self.emit("panel:hidden", json!({}));
-                    webview::set_visible(
-                        &self.window,
-                        false,
-                        logger.clone(),
-                        self.session,
-                        self.memory.clone(),
-                    )?;
-                    self.log(logger, "hide_source", json!({"source":"paste"}));
-                    self.log(logger, "hidden", json!({}));
                 }
+                let hooks = self.hooks.take();
+                let target = self.target.clone();
                 self.pasting = true;
+                let cancelled = Arc::new(AtomicBool::new(false));
+                self.paste_cancel = Some(cancelled.clone());
                 let controller = app.state::<Controller>();
                 let clipboard = controller.clipboard.clone();
                 let history = controller.history.clone();
                 let keys = controller.keys.clone();
                 let stopping = controller.stopping.clone();
-                let worker_logger = logger.clone();
                 let app = app.clone();
-                if std::thread::Builder::new()
-                    .name("paste-request".into())
-                    .spawn(move || {
-                        if let Some(hooks) = hooks {
-                            match hooks.remove_keyboard() {
-                                Ok(batch) if batch.started.is_some() || !batch.keys.is_empty() || batch.dropped > 0 => {
-                                    worker_logger.event("search_replay", json!({"session":session,
-                                        "replayed_keys":0,"dropped_keys":batch.dropped+batch.keys.len(),
-                                        "wait_ms":batch.started.map(|at| at.elapsed().as_secs_f64()*1000.0),
-                                        "search_box_ready":false,"reason":"paste"}));
+                if std::thread::Builder::new().name("paste-request".into()).spawn(move || {
+                    // 监听线程仍在 worker 中存活；只先停止输入拦截，读库和发送期间继续记录前台。
+                    let drain = || {
+                        let Some(hooks) = hooks.as_ref() else { return false; };
+                        loop {
+                            if stopping.load(Ordering::Acquire) { return false; }
+                            let abandon = cancelled.load(Ordering::Acquire)
+                                || !permit.as_ref().is_some_and(|permit| permit.current(&target, window::foreground()));
+                            match hooks.stop_inputs(abandon) {
+                                Ok(true) => return hooks.synchronize() && !abandon,
+                                Ok(false) => std::thread::sleep(Duration::from_millis(5)),
+                                Err(_) => {
+                                    while !paste::keys_released() && !stopping.load(Ordering::Acquire) {
+                                        std::thread::sleep(Duration::from_millis(5));
+                                    }
+                                    return false;
                                 }
-                                Err(_) => worker_logger.event("replay_cleanup_failed", json!({"session":session,"reason":"hook_cleanup_failed"})),
-                                _ => {}
                             }
-                            // 不在这里再读切换标记：面板隐藏后系统自动激活的窗口会被误记成用户切走。
-                            drop(hooks);
                         }
-                        let sent = || {
-                            let _ = dispatch(&app, Action::PasteSent { session });
-                        };
-                        // 先按原流程还焦点，再读取大内容。读完不再还焦点，避免抢回用户在读库期间切走的窗口。
-                        // 面板没收起（管理员提示）时不还：搜索模式下要等停留结束、收起时再按原逻辑还。
-                        let restored = (restore_focus && !external_switch && !keep_visible).then(|| window::restore(&target));
-                        let read_started = Instant::now();
-                        let loaded = history.get(id);
-                        let exports = history.exports();
-                        let store_read_ms = read_started.elapsed().as_secs_f64() * 1000.0;
-                        // 面板没收起时它自己持有前台不算切走（搜索模式下前台本来就是面板）。
-                        let foreground = window::foreground();
-                        let external_switch = external_switch
-                            || (foreground != target.window && !(keep_visible && foreground == owner));
-                        let mut result = match loaded {
-                            Ok(Some(content)) => paste::execute(Request {
-                                target, panel: owner, record_id: id, content, mode, started,
-                                external_switch, restore_focus: false,
-                            }, &keys, &clipboard, &stopping, &sent, exports.as_deref()),
-                            Ok(None) => json!({"clipboard_written":false,"reason":"record_missing"}),
-                            Err(code) => json!({"clipboard_written":false,"reason":"store_read_failed","error_code":code}),
-                        };
-                        if let Some(restored) = restored { result["restore"] = json!(restored); }
-                        result["store_read_ms"] = json!(store_read_ms);
-                        let _ = dispatch(&app, Action::PasteFinished { session, result });
-                    })
-                    .is_err()
-                {
+                    };
+                    let drained = restricted || drain();
+                    let read_started = Instant::now();
+                    let loaded = history.get(id);
+                    let exports = history.exports();
+                    let store_read_ms = read_started.elapsed().as_secs_f64()*1000.0;
+                    let mut restored = None;
+                    if !restricted && !stopping.load(Ordering::Acquire) {
+                        if let Some(hooks) = hooks.as_ref() { hooks.synchronize(); }
+                        restored = return_for_paste(&app, session, permit.clone(), false);
+                    }
+                    let sent = || { let _ = dispatch(&app, Action::PasteSent { session }); };
+                    let mut result = match loaded {
+                        Ok(Some(content)) => paste::execute(Request {
+                            session, target:target.clone(), panel:owner, record_id:id, content, mode, started,
+                            external_switch:external_switch || !drained, permit:permit.clone(), copy_only_reason, cancelled:cancelled.clone(),
+                        }, &keys, &clipboard, &stopping, &sent, exports.as_deref()),
+                        Ok(None) => json!({"clipboard_written":false,"reason":"record_missing"}),
+                        Err(code) => json!({"clipboard_written":false,"reason":"store_read_failed","error_code":code}),
+                    };
+                    if restricted {
+                        let paired = drain();
+                        let copied = result["clipboard_written"] == true && !cancelled.load(Ordering::Acquire);
+                        result["input_cleanup"] = json!(if paired { "paired" } else { "cancelled_physical_release" });
+                        if !stopping.load(Ordering::Acquire) {
+                            restored = return_for_paste(&app, session, if paired { permit } else { None }, copied);
+                        }
+                        if copied {
+                        let focus = window::confirm_strict(&target);
+                        result["hint_message"] = json!(if restored.is_some() && focus.foreground.success
+                            && focus.focus_restored && reliable_control(&target) {
+                            "已复制，请按 Ctrl+V 手动粘贴"
+                        } else {
+                            "已复制，请先点击目标输入位置，再按 Ctrl+V"
+                        });
+                        result["passive_hint"] = json!(true);
+                        }
+                    }
+                    if let Some(restored) = restored { result["restore"] = json!(restored); }
+                    result["request_cancelled"] = json!(cancelled.load(Ordering::Acquire));
+                    result["store_read_ms"] = json!(store_read_ms);
+                    // execute 已完成发键及内容证据收集，至此才终止前台监控。
+                    drop(hooks);
+                    let _ = dispatch(&app, Action::PasteFinished { session, result });
+                }).is_err() {
                     self.pasting = false;
                     return Err("粘贴线程启动失败".into());
                 }
@@ -1180,12 +1426,21 @@ impl Panel {
             } => {
                 // 证据收集期间可能已经再次呼出，日志要用这次粘贴自己的会话号和目标，不能用当前的。
                 result["session"] = json!(session);
+                if session == self.session
+                    && self
+                        .paste_cancel
+                        .as_ref()
+                        .is_some_and(|cancel| cancel.load(Ordering::Acquire))
+                {
+                    result["request_cancelled"] = json!(true);
+                }
                 logger.event("paste", result.clone());
                 if result["clipboard_written"] == true && self.mode != Mode::Hidden {
                     self.emit("panel:history-changed", json!({}));
                 }
                 if session == self.session {
                     self.pasting = false;
+                    self.paste_cancel = None;
                     // 预判时没收起的面板：按实际结论决定是停留提示还是现在收起。
                     let deferred = self.hint.take().is_some() && self.current(session);
                     let dwell = if deferred {
@@ -1193,7 +1448,9 @@ impl Panel {
                     } else {
                         None
                     };
-                    if result["clipboard_written"] == false {
+                    if result["clipboard_written"] == false
+                        && result["reason"] != "request_cancelled"
+                    {
                         let message = if result["reason"] == "record_missing" {
                             "这条记录已不在历史里"
                         } else if result["reason"] == "store_read_failed" {
@@ -1202,7 +1459,7 @@ impl Panel {
                             "写入剪贴板失败，请重试。"
                         };
                         self.emit("panel:error", json!({"message":message}));
-                    } else {
+                    } else if result["clipboard_written"] == true {
                         if let Some(dwell) = dwell {
                             // 告诉前端面板还开着、要停留：页脚当场显示提示，停留期间不再发起粘贴。
                             result["hint_dwell_ms"] = json!(dwell.as_millis() as u64);
@@ -1374,6 +1631,18 @@ mod tests {
             None
         );
         assert_eq!(dwell_after_paste(&json!({})), None);
+        assert_eq!(
+            dwell_after_paste(&json!({"paste_result":"copied", "clipboard_written":true,
+            "passive_hint":true})),
+            Some(ELEVATED_HINT_DWELL)
+        );
+        assert_eq!(
+            dwell_after_paste(
+                &json!({"paste_result":"copied_only", "reason":"target_may_be_elevated",
+            "clipboard_written":true, "passive_hint":true, "request_cancelled":true})
+            ),
+            None
+        );
     }
 
     #[test]

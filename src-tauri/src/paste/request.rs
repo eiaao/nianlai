@@ -33,6 +33,7 @@ pub fn conclude(mode: Mode, sent: bool, confirmed: bool, degraded: bool) -> Outc
 }
 
 pub struct Request {
+    pub session: u64,
     pub target: Target,
     pub panel: usize,
     pub record_id: usize,
@@ -40,7 +41,9 @@ pub struct Request {
     pub mode: Mode,
     pub started: Instant,
     pub external_switch: bool,
-    pub restore_focus: bool,
+    pub permit: Option<super::permit::Permit>,
+    pub copy_only_reason: Option<&'static str>,
+    pub cancelled: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[cfg(test)]

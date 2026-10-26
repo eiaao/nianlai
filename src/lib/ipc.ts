@@ -12,11 +12,15 @@ export type SearchReply = { request_id: number; items: HistoryItem[] };
 export type SessionEvent = { session: number };
 export type Experiments = { searchBoxFocus?: boolean };
 export type Timing = SessionEvent & { hotkeyToShowMs: number; showToPaintMs?: number };
-export type PanelShown = Timing & { history: HistorySnapshot; experiments?: Experiments };
+export type PanelInteraction = "quick" | "activation_pending" | "activation_failed" | "activated" | "passive";
+export type PanelShown = Timing & { history: HistorySnapshot; experiments?: Experiments; interaction: PanelInteraction; foregroundRevision: number };
+export type PanelInteractionEvent = SessionEvent & { interaction: PanelInteraction };
+export type ForegroundRevision = SessionEvent & { revision: number };
 export type PanelKey = SessionEvent & { key: string };
 export type PanelMode = SessionEvent & { mode: "search" };
 export type PanelError = SessionEvent & { message: string };
 export type PasteMode = "paste" | "copy" | "text";
+export type SearchSelection = Readonly<{ revision: number; nonce: number }>;
 export type PasteResult = SessionEvent & {
   paste_result: "copied" | "sent" | "confirmed" | "copied_only";
   reason: string | null;
@@ -25,8 +29,9 @@ export type PasteResult = SessionEvent & {
   layer3: { conclusion: string };
   as_text: { conversion: "paths" | "image_path" | "plain_text" | null; error?: string } | null;
   selected_to_result_ms: number;
-  // 后端判定面板要停留（目标程序是管理员、只复制了）时带上停留毫秒数；其他结论没有这个字段。
+  // 只复制后的被动提示；权限和原控件是否恢复由后端确认，前端不根据 reason 猜测。
   hint_dwell_ms?: number;
+  hint_message?: string;
 };
 
 // ---------- 命令 ----------
@@ -34,9 +39,11 @@ export const getHistory = () => invoke<HistorySnapshot>("get_history");
 export const searchHistory = (query: string, requestId: number) => invoke<SearchReply>("search_history", { query, requestId });
 export const frontendReady = () => invoke("frontend_ready");
 export const startSearch = (session: number) => invoke("start_search", { session });
+export const retryActivation = (session: number) => invoke("retry_activation", { session });
 export const searchReady = (session: number) => invoke("search_ready", { session });
 export const hidePanel = (session: number) => invoke("hide_panel", { session });
-export const pasteItem = (session: number, id: number, mode: PasteMode) => invoke("paste_item", { session, id, mode });
+export const pasteItem = (session: number, id: number, mode: PasteMode, selection?: SearchSelection) =>
+  invoke("paste_item", { session, id, mode, ...(selection ? { selection } : {}) });
 export const reportPainted = (session: number) => invoke("report_painted", { session });
 // 只报输入类型和时序，不报内容。
 export const reportSearchInput = (session: number, inputType: string, composing: boolean, afterReadyMs: number) =>
@@ -48,6 +55,8 @@ type Handler<T> = (payload: T) => void;
 const on = <T>(name: string) => (handler: Handler<T>): Promise<UnlistenFn> => listen<T>(name, ({ payload }) => handler(payload));
 
 export const onPanelShown = on<PanelShown>("panel:shown");
+export const onPanelInteraction = on<PanelInteractionEvent>("panel:interaction");
+export const onForegroundRevision = on<ForegroundRevision>("panel:foreground-revision");
 export const onPanelKey = on<PanelKey>("panel:key");
 export const onHistoryChanged = on<SessionEvent>("panel:history-changed");
 export const onPanelMode = on<PanelMode>("panel:mode");

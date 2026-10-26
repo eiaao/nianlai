@@ -1,8 +1,10 @@
 use super::{foreground, paste::INPUT_MARKER};
 use crate::{
     log::Logger,
+    paste::permit::Monitor,
     platform::{
-        HintEnd, HintMode, HookEvent, REPLAY_CAPACITY, REPLAY_WAIT, ReplayBatch, ReplayKey, Result,
+        HintEnd, HintMode, HookEvent, HookOptions, REPLAY_CAPACITY, REPLAY_WAIT, ReplayBatch,
+        ReplayKey, Result, Target,
     },
 };
 use serde_json::json;
@@ -132,7 +134,9 @@ impl TraceCounts {
 enum TracePhase {
     #[default]
     BeforeHint,
+    #[cfg(test)]
     HintQuick,
+    #[cfg(test)]
     HintSearch,
 }
 
@@ -180,6 +184,7 @@ impl HookTrace {
         }
     }
 
+    #[cfg(test)]
     fn begin_hint(&mut self, mode: HintMode, now: Instant) {
         self.phase_since = now;
         self.phase = match mode {
@@ -209,7 +214,9 @@ impl HookTrace {
         let elapsed = |since| now.saturating_duration_since(since).as_millis() as u64;
         let phase = match self.phase {
             TracePhase::BeforeHint => "before_hint",
+            #[cfg(test)]
             TracePhase::HintQuick => "hint_quick",
+            #[cfg(test)]
             TracePhase::HintSearch => "hint_search",
         };
         json!({
@@ -268,18 +275,23 @@ fn report_trace(logger: &Logger, session: u64, stage: &str, source: &str, handle
 }
 
 enum Command {
+    Activation {
+        ready: bool,
+        reply: mpsc::SyncSender<()>,
+    },
+    StopInputs {
+        abandon: bool,
+        reply: mpsc::SyncSender<Result<bool>>,
+    },
+    Fence {
+        reply: mpsc::SyncSender<()>,
+    },
     Begin {
         started: Instant,
         reply: mpsc::SyncSender<Instant>,
     },
     Stop {
         reply: mpsc::SyncSender<Result<Option<Instant>>>,
-    },
-    // 管理员提示开始停留（M0-6b）：之后的按键先按停留规则处理。搜索模式下键盘钩子已在首键补发时卸掉，
-    // 在这个线程里重新挂上（同一个消息循环，不另开线程）；回执为键盘钩子是否在位。
-    Hint {
-        mode: HintMode,
-        reply: mpsc::SyncSender<bool>,
     },
     // 正常结束提示前在钩子线程检查配对；可以结束时当场卸钩，防止回执之后又吞掉新键。
     FinishHint {
@@ -446,6 +458,7 @@ impl HintState {
         }
     }
     // 提示开始前已经放行的按下，重复和抬起仍放行；原路径吞掉的键由调用方排除。
+    #[cfg(test)]
     fn with_passed(pressed: impl IntoIterator<Item = u16>) -> Self {
         let mut state = Self::new();
         for vk in pressed {
@@ -493,8 +506,13 @@ struct Context {
     sender: mpsc::SyncSender<HookEvent>,
     window: usize,
     target: usize,
+    target_focus: usize,
     // 第一个切到前台的外部窗口；0 表示没切走。
     switched: Arc<AtomicUsize>,
+    monitor: Arc<Monitor>,
+    restricted: Option<bool>,
+    draining: bool,
+    drain_passed: [bool; 256],
     foreground_trace: Option<foreground::Trace>,
     bounds: RECT,
     hotkey: (u16, Modifiers),
@@ -511,7 +529,7 @@ struct Context {
 impl Context {
     fn original_hint_keys_held(&self) -> bool {
         // 搜索首键已补发后的旧 swallowed 数组不代表仍按住；只有钩子一直在位时才看它。
-        (self.hint == Some(HintMode::Quick) || self.pending.is_some())
+        ((self.hint.is_some() && self.hint != Some(HintMode::Search)) || self.pending.is_some())
             && self.swallowed.contains(&true)
     }
     fn notify_hint_close(&mut self) {
@@ -577,6 +595,7 @@ pub struct Hooks {
     replay: mpsc::Receiver<ReplayKey>,
     dropped: Arc<AtomicUsize>,
     switched: Arc<AtomicUsize>,
+    monitor: Arc<Monitor>,
 }
 
 unsafe extern "system" fn foreground_changed(
@@ -597,8 +616,48 @@ unsafe extern "system" fn foreground_changed(
                     context.window,
                     context.target,
                 );
+            if let Some(revision) =
+                context
+                    .monitor
+                    .observe(hwnd.0 as usize, event_time, super::window::foreground())
+                && context
+                    .sender
+                    .try_send(HookEvent::ForegroundRevision(revision))
+                    .is_err()
+            {
+                // 通知队列丢失意味着前后端无法确定选择顺序，本会话不再允许自动发送。
+                context.monitor.stopped();
+            }
             if let Some(trace) = &context.foreground_trace {
                 trace.record(hwnd.0 as usize, event_thread, event_time, latched);
+            }
+        }
+    });
+}
+
+unsafe extern "system" fn original_destroyed(
+    _: HWINEVENTHOOK,
+    _: u32,
+    hwnd: windows::Win32::Foundation::HWND,
+    object: i32,
+    child: i32,
+    _: u32,
+    _: u32,
+) {
+    if object != 0 || child != 0 {
+        return;
+    }
+    CONTEXT.with(|context| {
+        if let Some(context) = context.borrow().as_ref()
+            && (hwnd.0 as usize == context.target || hwnd.0 as usize == context.target_focus)
+        {
+            let revision = context.monitor.target_destroyed();
+            if context
+                .sender
+                .try_send(HookEvent::ForegroundRevision(revision))
+                .is_err()
+            {
+                context.monitor.stopped();
             }
         }
     });
@@ -708,7 +767,11 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
         trace_callback(TraceRoute::SelfMarker);
         return unsafe { CallNextHookEx(None, code, wparam, lparam) };
     }
-    let vk = key.vkCode as u16;
+    let vk = normalized_vk(
+        key.vkCode as u16,
+        key.scanCode as u16,
+        key.flags.contains(LLKHF_EXTENDED),
+    );
     let pressed = wparam.0 as u32 == WM_KEYDOWN || wparam.0 as u32 == WM_SYSKEYDOWN;
     let mut hint_handled = false;
     let mut context_missing = false;
@@ -718,6 +781,11 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
             context_missing = true;
             return false;
         };
+        if context.draining && vk <= 255 && !context.swallowed[vk as usize] {
+            // 搜索的原生 Enter 已送达面板；只跟踪它和后来的放行键，等抬起后才归还前台。
+            context.drain_passed[vk as usize] = pressed;
+            return false;
+        }
         // M0-6b：管理员提示停留中才进这个分支；不在停留时 hint 为 None，下面的原逻辑一行没改。
         if let Some(mode) = context.hint
             && let Some(swallow) = context.hint_key(vk, pressed, mode)
@@ -735,10 +803,22 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
             context.swallowed[vk as usize] = false;
             if let Some(action) = context.release_action[vk as usize].take()
                 && context.pending.is_none()
+                && !context.draining
+                && context
+                    .restricted
+                    .is_none_or(|ready| ready && super::window::foreground() == context.window)
             {
                 let _ = context.sender.try_send(HookEvent::Key(action));
             }
             return true;
+        }
+        if let Some(swallow) = activation_route(
+            context.restricted,
+            super::window::foreground() == context.window,
+            context.draining,
+            context.swallowed[vk as usize],
+        ) {
+            return swallow;
         }
         let mods = modifiers();
         let exit = matches!(vk, 0x51 | 0x4c)
@@ -856,6 +936,58 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
     }
 }
 
+// 已吞按键保持配对；失焦、未就绪或等待松键时，新按下交给实际前台。
+fn activation_route(
+    restricted: Option<bool>,
+    focused: bool,
+    draining: bool,
+    swallowed: bool,
+) -> Option<bool> {
+    if restricted.is_none() && !draining {
+        return None;
+    }
+    if swallowed {
+        return Some(true);
+    }
+    (draining || restricted == Some(false) || !focused).then_some(false)
+}
+
+fn normalized_vk(vk: u16, scan: u16, extended: bool) -> u16 {
+    match vk {
+        0x10 => {
+            if scan == 0x36 {
+                0xA1
+            } else {
+                0xA0
+            }
+        }
+        0x11 => {
+            if extended {
+                0xA3
+            } else {
+                0xA2
+            }
+        }
+        0x12 => {
+            if extended {
+                0xA5
+            } else {
+                0xA4
+            }
+        }
+        _ => vk,
+    }
+}
+fn drain_tracked(vk: u16) -> bool {
+    matches!(vk, 0x08..=0x0F | 0x13..=0xFF)
+}
+fn drain_snapshot(swallowed: &[bool; 256], physical: impl Fn(u16) -> bool) -> [bool; 256] {
+    std::array::from_fn(|vk| drain_tracked(vk as u16) && !swallowed[vk] && physical(vk as u16))
+}
+fn inputs_released(swallowed: &[bool; 256], passed: &[bool; 256]) -> bool {
+    !swallowed.contains(&true) && !passed.contains(&true)
+}
+
 unsafe extern "system" fn mouse(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code >= 0
         && matches!(
@@ -888,12 +1020,17 @@ unsafe extern "system" fn mouse(code: i32, wparam: WPARAM, lparam: LPARAM) -> LR
 impl Hooks {
     pub fn install(
         window: usize,
-        target: usize,
+        target: &Target,
         shortcut: Shortcut,
         logger: Logger,
         session: u64,
+        options: HookOptions,
         callback: impl Fn(HookEvent) + Send + 'static,
     ) -> Result<Self> {
+        let target_focus = target.focus;
+        let target = target.window;
+        let monitor = options.monitor;
+        let restricted = options.restricted;
         let bounds = super::window::rect(window)?;
         let vk = shortcut_vk(&shortcut).ok_or("不支持此快捷键")?;
         let (sender, receiver) = mpsc::sync_channel(128);
@@ -912,11 +1049,13 @@ impl Hooks {
         let overflow = dropped.clone();
         let switched = Arc::new(AtomicUsize::new(0));
         let switched_context = switched.clone();
+        let monitor_context = monitor.clone();
         let thread = thread::Builder::new().name("panel-hooks".into()).spawn(move || unsafe {
             HOOK_TRACE.with(|trace| *trace.borrow_mut() = HookTrace::from_switch(
                 std::env::var_os("NIANLAI_G0_HOOK_TRACE").as_deref()));
             CONTEXT.with(|context| *context.borrow_mut() = Some(Context {
-                sender, window, target, switched:switched_context, bounds, hotkey: (vk, shortcut.mods), replay: replay_sender,
+                sender, window, target, target_focus, switched:switched_context, monitor:monitor_context.clone(),
+                restricted:restricted.then_some(false), draining:false, drain_passed:[false;256], bounds, hotkey: (vk, shortcut.mods), replay: replay_sender,
                 foreground_trace: foreground::Trace::from_env(&logger, session, window, target),
                 dropped: overflow, pending: None, swallowed: [false; 256], release_action: [None; 256],
                 hint: None, hint_state: HintState::new(),
@@ -926,10 +1065,13 @@ impl Hooks {
             let module = GetModuleHandleW(None).ok().map(|m| HINSTANCE(m.0));
             let mut keyboard_hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard), module, 0).ok();
             trace_install(keyboard_hook.is_some());
-            let mouse_hook = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse), module, 0).ok();
+            let mut mouse_hook = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse), module, 0).ok();
             let foreground_hook = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND,
                 None, Some(foreground_changed), 0, 0, WINEVENT_OUTOFCONTEXT);
-            let installed = keyboard_hook.is_some() && mouse_hook.is_some() && !foreground_hook.is_invalid();
+            let destroy_hook = SetWinEventHook(EVENT_OBJECT_DESTROY, EVENT_OBJECT_DESTROY,
+                None, Some(original_destroyed), 0, 0, WINEVENT_OUTOFCONTEXT);
+            let installed = keyboard_hook.is_some() && mouse_hook.is_some() && !foreground_hook.is_invalid() && !destroy_hook.is_invalid();
+            if installed { monitor_context.started(); }
             logger.event("hooks_installed", json!({"session":session,"keyboard_hook":keyboard_hook.is_some(),"mouse_hook":mouse_hook.is_some(),
                 "bounds":[bounds.left, bounds.top, bounds.right, bounds.bottom]}));
             report_trace(&logger, session, "installed", "install", keyboard_hook.is_some());
@@ -941,6 +1083,57 @@ impl Hooks {
                     if message.message == HOOK_COMMAND {
                         while let Ok(command) = commands.try_recv() {
                             match command {
+                                Command::Activation { ready, reply } => {
+                                    CONTEXT.with(|context| {
+                                        if let Some(context) = context.borrow_mut().as_mut() {
+                                            context.restricted = Some(ready);
+                                        }
+                                    });
+                                    let _ = reply.send(());
+                                }
+                                Command::Fence { reply } => { let _ = reply.send(()); }
+                                Command::StopInputs { abandon, reply } => {
+                                    let reinstalled = keyboard_hook.is_none();
+                                    if reinstalled {
+                                        keyboard_hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard), module, 0).ok();
+                                    }
+                                    let ready = CONTEXT.with(|context| {
+                                        let mut context = context.borrow_mut();
+                                        let Some(context) = context.as_mut() else { return true; };
+                                        if !context.draining {
+                                            if reinstalled { context.swallowed = [false;256]; context.release_action = [None;256]; }
+                                            context.drain_passed = drain_snapshot(&context.swallowed, |vk| down(i32::from(vk)));
+                                            context.draining = true;
+                                        }
+                                        if abandon && super::window::foreground() != 0 {
+                                            // 撤销后不再归还或发送；跨完整性可能缺回调，只依据可见的物理松键清理。
+                                            for vk in 0..256 {
+                                                if !down(vk as i32) {
+                                                    context.swallowed[vk] = false;
+                                                    context.drain_passed[vk] = false;
+                                                    context.release_action[vk] = None;
+                                                }
+                                            }
+                                        }
+                                        inputs_released(&context.swallowed, &context.drain_passed)
+                                            && !context.hint_state.has_swallowed(false)
+                                    });
+                                    let result = if keyboard_hook.is_none() { Err("松键监听安装失败".to_owned()) } else if !ready { Ok(false) } else {
+                                        let result = if let Some(hook) = keyboard_hook {
+                                            UnhookWindowsHookEx(hook).map_err(|e| e.to_string())
+                                        } else { Ok(()) };
+                                        result.and_then(|()| {
+                                            keyboard_hook = None;
+                                            if let Some(hook) = mouse_hook {
+                                                UnhookWindowsHookEx(hook).map_err(|e| e.to_string())?;
+                                                mouse_hook = None;
+                                            }
+                                            Ok(true)
+                                        })
+                                    };
+                                    if result.is_err() { monitor_context.stopped(); }
+                                    let _ = reply.send(result);
+                                }
                                 Command::Begin { started, reply } => {
                                     let started = CONTEXT.with(|context| {
                                         let mut context = context.borrow_mut();
@@ -961,32 +1154,6 @@ impl Hooks {
                                     logger.event("keyboard_hook_removed", json!({"session":session,"keyboard_hook":keyboard_hook.is_some(),"mouse_hook":true,"error":result.as_ref().err()}));
                                     // 回执排在卸钩之后；收到回执再取队列，才不会漏掉最后一次回调。
                                     let _ = reply.send(result);
-                                }
-                                Command::Hint { mode, reply } => {
-                                    report_trace(&logger, session, "before_hint", "begin_hint", keyboard_hook.is_some());
-                                    let reinstalled = keyboard_hook.is_none();
-                                    if reinstalled {
-                                        keyboard_hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard), module, 0).ok();
-                                        trace_install(keyboard_hook.is_some());
-                                    }
-                                    HOOK_TRACE.with(|trace| {
-                                        if let Some(trace) = trace.borrow_mut().as_mut() { trace.begin_hint(mode, Instant::now()); }
-                                    });
-                                    CONTEXT.with(|context| {
-                                        if let Some(context) = context.borrow_mut().as_mut() {
-                                            if context.hint.is_none() {
-                                                // 钩子一直在位时排除原路径仍在吞的键；重新挂上时原数组已过时。
-                                                context.hint_state = HintState::with_passed((0u16..=255).filter(|vk| {
-                                                    (reinstalled || !context.swallowed[*vk as usize]) && down(i32::from(*vk))
-                                                }));
-                                            }
-                                            context.hint = Some(mode);
-                                        }
-                                    });
-                                    logger.event("hint_keys", json!({"session":session,"panel_mode":mode.name(),
-                                        "keyboard_hook":keyboard_hook.is_some(),"reinstalled":reinstalled}));
-                                    report_trace(&logger, session, "hint_armed", "begin_hint", keyboard_hook.is_some());
-                                    let _ = reply.send(keyboard_hook.is_some());
                                 }
                                 Command::FinishHint { reply } => {
                                     let ready = CONTEXT.with(|context| {
@@ -1012,9 +1179,11 @@ impl Hooks {
                 }
             }
             report_trace(&logger, session, "before_unhook", "thread_exit", keyboard_hook.is_some());
+            monitor_context.stopped();
             if let Some(hook) = keyboard_hook.take() { let _ = UnhookWindowsHookEx(hook); }
             if let Some(hook) = mouse_hook { let _ = UnhookWindowsHookEx(hook); }
             if !foreground_hook.is_invalid() { let _ = UnhookWinEvent(foreground_hook); }
+            if !destroy_hook.is_invalid() { let _ = UnhookWinEvent(destroy_hook); }
             CONTEXT.with(|context| *context.borrow_mut() = None);
             report_trace(&logger, session, "finished", "thread_exit", keyboard_hook.is_some());
             HOOK_TRACE.with(|trace| *trace.borrow_mut() = None);
@@ -1029,6 +1198,7 @@ impl Hooks {
                 replay,
                 dropped,
                 switched,
+                monitor,
             }),
             Err(error) => {
                 let _ = thread.join();
@@ -1043,6 +1213,37 @@ impl Hooks {
         self.switched.load(Ordering::Acquire)
     }
 
+    pub fn activation(&self, ready: bool) -> Result<()> {
+        let (reply, receiver) = mpsc::sync_channel(1);
+        self.command(Command::Activation { ready, reply })?;
+        receiver
+            .recv_timeout(REPLAY_WAIT)
+            .map_err(|e| e.to_string())
+    }
+    pub fn stop_inputs(&self, abandon: bool) -> Result<bool> {
+        let (reply, receiver) = mpsc::sync_channel(1);
+        let result = self
+            .command(Command::StopInputs { abandon, reply })
+            .and_then(|()| {
+                receiver
+                    .recv_timeout(REPLAY_WAIT)
+                    .map_err(|e| e.to_string())?
+            });
+        if result.is_err() {
+            self.monitor.stopped();
+        }
+        result
+    }
+    pub fn synchronize(&self) -> bool {
+        let (reply, receiver) = mpsc::sync_channel(1);
+        let ok = self.command(Command::Fence { reply }).is_ok()
+            && receiver.recv_timeout(REPLAY_WAIT).is_ok();
+        if !ok {
+            self.monitor.stopped();
+        }
+        ok
+    }
+
     fn command(&self, command: Command) -> Result<()> {
         self.commands.send(command).map_err(|e| e.to_string())?;
         unsafe {
@@ -1054,15 +1255,6 @@ impl Hooks {
     pub fn begin_search(&self, started: Instant) -> Result<Instant> {
         let (reply, receiver) = mpsc::sync_channel(1);
         self.command(Command::Begin { started, reply })?;
-        receiver
-            .recv_timeout(REPLAY_WAIT)
-            .map_err(|e| e.to_string())
-    }
-
-    // 管理员提示开始停留：之后的按键按停留规则处理，搜索模式下顺带重新挂上键盘钩子。返回键盘钩子是否在位。
-    pub fn begin_hint(&self, mode: HintMode) -> Result<bool> {
-        let (reply, receiver) = mpsc::sync_channel(1);
-        self.command(Command::Hint { mode, reply })?;
         receiver
             .recv_timeout(REPLAY_WAIT)
             .map_err(|e| e.to_string())
@@ -1107,6 +1299,63 @@ impl Drop for Hooks {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn activation_requires_panel_foreground_but_preserves_existing_key_pairs() {
+        for ready in [false, true] {
+            for focused in [false, true] {
+                assert_eq!(
+                    activation_route(Some(ready), focused, false, false),
+                    if ready && focused { None } else { Some(false) }
+                );
+                assert_eq!(
+                    activation_route(Some(ready), focused, false, true),
+                    Some(true)
+                );
+                assert_eq!(
+                    activation_route(Some(ready), focused, true, false),
+                    Some(false)
+                );
+            }
+        }
+        assert_eq!(
+            activation_route(None, false, false, false),
+            None,
+            "普通 quick 保留原路由"
+        );
+    }
+
+    #[test]
+    fn drain_waits_for_native_enter_and_every_other_consumed_or_passed_key() {
+        let mut swallowed = [false; 256];
+        swallowed[0x41] = true;
+        let mut passed = drain_snapshot(&swallowed, |vk| {
+            matches!(vk, 0x01 | 0x10 | 0x11 | 0x0D | 0xA2)
+        });
+        assert!(
+            !passed[0x01] && !passed[0x10] && !passed[0x11],
+            "鼠标与通用修饰键别名不进入键盘配对表"
+        );
+        assert!(passed[0x0D] && passed[0xA2]);
+        assert!(!inputs_released(&swallowed, &passed));
+        passed[0x0D] = false;
+        assert!(!inputs_released(&swallowed, &passed));
+        passed[normalized_vk(0x11, 0, false) as usize] = false;
+        assert!(
+            !inputs_released(&swallowed, &passed),
+            "选择键松开仍需等早先吞掉的 A"
+        );
+        swallowed[0x41] = false;
+        passed[0x42] = true;
+        assert!(
+            !inputs_released(&swallowed, &passed),
+            "drain 后来的放行键也要等抬起"
+        );
+        passed[0x42] = false;
+        assert!(inputs_released(&swallowed, &passed));
+        assert_eq!(normalized_vk(0x10, 0x36, false), 0xA1);
+        assert_eq!(normalized_vk(0x12, 0, true), 0xA5);
+    }
 
     const ESC: u16 = 0x1B;
     const V: u16 = 0x56;
@@ -1537,7 +1786,12 @@ mod tests {
                 sender,
                 window: 0,
                 target: 0,
+                target_focus: 0,
                 switched: Arc::new(AtomicUsize::new(0)),
+                monitor: Arc::new(Monitor::new(0, 0)),
+                restricted: None,
+                draining: false,
+                drain_passed: [false; 256],
                 foreground_trace: None,
                 bounds: RECT::default(),
                 hotkey: (V, Modifiers::CONTROL),

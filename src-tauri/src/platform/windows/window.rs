@@ -33,6 +33,9 @@ pub fn handle(panel: &WebviewWindow) -> Result<usize> {
 pub fn foreground() -> usize {
     unsafe { GetForegroundWindow().0 as usize }
 }
+pub fn tick_count() -> u32 {
+    unsafe { windows::Win32::System::SystemInformation::GetTickCount() }
+}
 
 pub fn capture() -> Target {
     unsafe {
@@ -341,23 +344,35 @@ pub fn confirm(target: &Target) -> FocusResult {
     }
 }
 
+// 新搜索许可和手动粘贴提示必须确认已捕获的原生控件；未知焦点不再当作成功。
+pub fn confirm_strict(target: &Target) -> FocusResult {
+    let mut result = confirm(target);
+    result.focus_restored &= original_control_valid(target);
+    result
+}
+
+fn original_control_valid(target: &Target) -> bool {
+    let mut process = 0;
+    target.focus != 0
+        && unsafe {
+            IsWindow(Some(hwnd(target.focus))).as_bool()
+                && GetWindowThreadProcessId(hwnd(target.focus), Some(&mut process)) == target.thread
+                && process == target.process
+                && GetAncestor(hwnd(target.focus), GA_ROOT).0 as usize == target.window
+        }
+        && class_name(target.focus) == target.focus_class
+}
+
 pub fn restore(target: &Target) -> FocusResult {
     if !valid(target) {
         return confirm(target);
     }
     let foreground_result = activate(target.window);
-    if foreground_result.success && target.focus != 0 {
+    if foreground_result.success && original_control_valid(target) {
         unsafe {
             let focus = hwnd(target.focus);
-            let mut process = 0;
-            let thread = GetWindowThreadProcessId(focus, Some(&mut process));
-            if IsWindow(Some(focus)).as_bool()
-                && thread == target.thread
-                && process == target.process
-            {
-                let _attached = Attached::new(thread);
-                let _ = SetFocus(Some(focus));
-            }
+            let _attached = Attached::new(target.thread);
+            let _ = SetFocus(Some(focus));
         }
     }
     let mut result = confirm(target);

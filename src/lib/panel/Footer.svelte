@@ -8,10 +8,10 @@
 <footer>
   {#if panel.message}<p class="result" role="status">{panel.message}</p>{/if}
   <div class="status">
-    <span class="mode"><i class:search={panel.mode === "search"}></i>{panel.mode === "quick" ? "快速取用" : "搜索模式"}</span>
+    <span class="mode"><i class:search={panel.mode === "search"}></i>{panel.interaction === "activation_pending" ? "等待激活" : panel.interaction === "activation_failed" ? "未取得焦点" : panel.mode === "search" ? "搜索模式" : panel.interaction === "activated" ? "复制取用" : "快速取用"}</span>
     <span class="timing" title="快捷键到显示 / 显示到前端首帧">{panel.timing ? panel.timing.hotkeyToShowMs.toFixed(1) : "—"} / {panel.timing?.showToPaintMs?.toFixed(1) ?? "—"} ms</span>
     <!-- 面板常压在输入框上方，按钮容易被误点，退出只留快捷键。 -->
-    <span class="quit">退出：Ctrl+Alt+Shift+Q</span>
+    {#if panel.interactive}<span class="quit">退出：Ctrl+Alt+Shift+Q</span>{/if}
   </div>
   {#if panel.version}<p class="version">v{panel.version}</p>{/if}
 </footer>

@@ -37,6 +37,15 @@ const MODIFIERS: [u16; 8] = [0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0x5B, 0x5C];
 fn held(vk: u16) -> bool {
     unsafe { GetAsyncKeyState(vk as i32) < 0 }
 }
+fn cancelled(request: &Request, stopping: &AtomicBool) -> bool {
+    stopping.load(Ordering::Acquire) || request.cancelled.load(Ordering::Acquire)
+}
+pub fn keys_released() -> bool {
+    // 排除鼠标和通用修饰键别名，只查询低层键盘回调能配对的左右修饰键。
+    !(0x08..=0xFF)
+        .filter(|vk| !matches!(vk, 0x10..=0x12))
+        .any(held)
+}
 fn input(vk: u16, scan: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {
     INPUT {
         r#type: INPUT_KEYBOARD,
@@ -230,28 +239,52 @@ struct Checks {
     focus: bool,
     modifiers: bool,
     hidden: bool,
+    permission: bool,
 }
 impl Checks {
     fn all(self) -> bool {
-        self.foreground && self.focus && self.modifiers && self.hidden
+        self.foreground && self.focus && self.modifiers && self.hidden && self.permission
     }
-    fn values(self) -> [bool; 4] {
-        [self.foreground, self.focus, self.modifiers, self.hidden]
+    fn values(self) -> [bool; 5] {
+        [
+            self.foreground,
+            self.focus,
+            self.modifiers,
+            self.hidden,
+            self.permission,
+        ]
     }
 }
 fn checks(request: &Request) -> Checks {
-    let focus = window::confirm(&request.target);
+    let focus = if request
+        .permit
+        .as_ref()
+        .is_some_and(|permit| permit.search())
+    {
+        window::confirm_strict(&request.target)
+    } else {
+        window::confirm(&request.target)
+    };
     Checks {
         foreground: focus.foreground.success,
         focus: focus.focus_restored,
         modifiers: !MODIFIERS.iter().any(|&vk| held(vk)),
         hidden: !unsafe { IsWindowVisible(window::hwnd(request.panel)) }.as_bool(),
+        permission: request.permit.as_ref().is_some_and(|permit| {
+            permit.can_send(
+                request.session,
+                request.record_id,
+                request.mode,
+                &request.target,
+                window::foreground(),
+            )
+        }),
     }
 }
 
 fn preflight(request: &Request, stopping: &AtomicBool) -> (bool, Value) {
     let started = Instant::now();
-    let mut times = [None; 4];
+    let mut times = [None; 5];
     let mut released = 0;
     let mut release_attempted = false;
     let mut current;
@@ -263,12 +296,17 @@ fn preflight(request: &Request, stopping: &AtomicBool) -> (bool, Value) {
                 times[index] = Some(elapsed);
             }
         }
-        if current.all() || stopping.load(Ordering::Acquire) {
+        if current.all() || cancelled(request, stopping) {
             break;
         }
         if started.elapsed() >= Duration::from_millis(300) {
             // 只有焦点仍安全时才补抬起，避免把按键送进用户刚切换的窗口。
-            if !current.modifiers && current.foreground && current.focus && current.hidden {
+            if !current.modifiers
+                && current.foreground
+                && current.focus
+                && current.hidden
+                && current.permission
+            {
                 let releases: Vec<_> = MODIFIERS
                     .iter()
                     .copied()
@@ -302,16 +340,23 @@ fn preflight(request: &Request, stopping: &AtomicBool) -> (bool, Value) {
                 .min(Duration::from_millis(300).saturating_sub(started.elapsed())),
         );
     }
-    let names = ["foreground", "focus", "modifiers", "panel_hidden"];
+    let names = [
+        "foreground",
+        "focus",
+        "modifiers",
+        "panel_hidden",
+        "permission",
+    ];
     let failed: Vec<_> = names
         .into_iter()
         .zip(current.values())
         .filter_map(|(name, ok)| if ok { None } else { Some(name) })
         .collect();
     (
-        current.all() && !stopping.load(Ordering::Acquire),
+        current.all() && !cancelled(request, stopping),
         json!({
             "foreground_ms":times[0],"focus_ms":times[1],"modifiers_ms":times[2],"panel_hidden_ms":times[3],
+            "permission_ms":times[4],
             "timed_out":!current.all(),"failed_checks":failed,"release_attempted":release_attempted,"released_modifiers":released,
             "deadline_reached":started.elapsed() >= Duration::from_millis(300),
         }),
@@ -332,6 +377,9 @@ fn copy(
     report: &mut Value,
     reason: &'static str,
 ) -> Result<Outcome, String> {
+    if request.cancelled.load(Ordering::Acquire) {
+        return Err("request_cancelled".into());
+    }
     clipboard.write(
         record(request),
         written.clone(),
@@ -353,14 +401,10 @@ fn perform(
     on_sent: &dyn Fn(),
     report: &mut Value,
 ) -> Result<Outcome, String> {
-    if stopping.load(Ordering::Acquire) {
+    if cancelled(request, stopping) {
         return Err("request_cancelled".into());
     }
-    // 只认面板隐藏前的判断；隐藏后前台由系统重新指定，交给还焦点和发键前确认处理。
     let external_switch = request.external_switch;
-    if request.restore_focus && !external_switch && window::valid(&request.target) {
-        report["restore"] = json!(window::restore(&request.target));
-    }
     if request.mode == Mode::Copy {
         return copy(request, written, clipboard, report, "user_copy");
     }
@@ -369,6 +413,22 @@ fn perform(
     }
     if external_switch {
         return copy(request, written, clipboard, report, "external_switch");
+    }
+    if let Some(reason) = request.copy_only_reason {
+        return copy(request, written, clipboard, report, reason);
+    }
+    if !request
+        .permit
+        .as_ref()
+        .is_some_and(|permit| permit.current(&request.target, window::foreground()))
+    {
+        return copy(
+            request,
+            written,
+            clipboard,
+            report,
+            "selection_boundary_changed",
+        );
     }
     let integrity = compare_integrity(&request.target);
     let allowed = integrity["status"] == "allowed";
@@ -384,7 +444,7 @@ fn perform(
     }
     let (ready, confirmation) = preflight(request, stopping);
     report["preflight"] = confirmation;
-    if stopping.load(Ordering::Acquire) {
+    if cancelled(request, stopping) {
         return Err("request_cancelled".into());
     }
     if !ready {
@@ -398,7 +458,7 @@ fn perform(
         .map(|probe| probe.baseline())
         .unwrap_or_default();
     report["layer3"] = json!(before);
-    if stopping.load(Ordering::Acquire) {
+    if cancelled(request, stopping) {
         return Err("request_cancelled".into());
     }
     // UIA 和打开剪贴板期间用户可能改变焦点，所以在写入与发键前分别复核。
@@ -412,7 +472,7 @@ fn perform(
         true,
     )?;
     report["clipboard_written"] = json!(true);
-    if stopping.load(Ordering::Acquire) || !checks(request).all() {
+    if cancelled(request, stopping) || !checks(request).all() {
         report["clipboard_materialized"] = json!(clipboard.materialize());
         report["reason"] = json!("conditions_changed");
         return Ok(Outcome::CopiedOnly);
@@ -459,7 +519,7 @@ fn perform(
     report["layer3"] = json!(layer3);
     while sent_at.elapsed() < Duration::from_secs(1)
         && !observation.lock().unwrap().observed()
-        && !stopping.load(Ordering::Acquire)
+        && !cancelled(request, stopping)
     {
         thread::sleep(Duration::from_millis(5));
     }
@@ -526,14 +586,15 @@ mod tests {
     use super::*;
     #[test]
     fn requires_all_four_preflight_conditions() {
-        for mask in 0..16 {
+        for mask in 0..32 {
             let conditions = Checks {
                 foreground: mask & 1 != 0,
                 focus: mask & 2 != 0,
                 modifiers: mask & 4 != 0,
                 hidden: mask & 8 != 0,
+                permission: mask & 16 != 0,
             };
-            assert_eq!(conditions.all(), mask == 15);
+            assert_eq!(conditions.all(), mask == 31);
         }
     }
 
