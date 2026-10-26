@@ -4,7 +4,7 @@ use crate::{
     paste::permit::Monitor,
     platform::{
         HintEnd, HintMode, HookEvent, HookOptions, REPLAY_CAPACITY, REPLAY_WAIT, ReplayBatch,
-        ReplayKey, Result, Target,
+        ReplayKey, Result, Target, key_state,
     },
 };
 use serde_json::json;
@@ -17,12 +17,16 @@ use std::{
         mpsc,
     },
     thread::{self, JoinHandle},
-    time::Instant,
+    time::{Duration, Instant},
 };
 use tauri_plugin_global_shortcut::{Modifiers, Shortcut};
 use windows::Win32::{
-    Foundation::{HINSTANCE, LPARAM, LRESULT, RECT, WPARAM},
-    System::{LibraryLoader::GetModuleHandleW, Threading::GetCurrentThreadId},
+    Foundation::{HANDLE, HINSTANCE, LPARAM, LRESULT, RECT, WPARAM},
+    System::{
+        LibraryLoader::GetModuleHandleW,
+        StationsAndDesktops::{GetThreadDesktop, GetUserObjectInformationW, UOI_IO},
+        Threading::{GetCurrentProcessId, GetCurrentThreadId},
+    },
     UI::{
         Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent},
         Input::KeyboardAndMouse::{GetAsyncKeyState, MAPVK_VK_TO_CHAR, MapVirtualKeyW},
@@ -513,6 +517,13 @@ struct Context {
     restricted: Option<bool>,
     draining: bool,
     drain_passed: [bool; 256],
+    drain_snapshot_counts: key_state::Counts,
+    drain_ignored_callbacks: key_state::Counts,
+    drain_requires_recheck: bool,
+    drain_recheck_available: bool,
+    drain_recheck_samples: usize,
+    drain_rechecked_releases: usize,
+    drain_rechecked_presses: usize,
     foreground_trace: Option<foreground::Trace>,
     bounds: RECT,
     hotkey: (u16, Modifiers),
@@ -596,6 +607,7 @@ pub struct Hooks {
     dropped: Arc<AtomicUsize>,
     switched: Arc<AtomicUsize>,
     monitor: Arc<Monitor>,
+    rechecked_releases: Arc<AtomicUsize>,
 }
 
 unsafe extern "system" fn foreground_changed(
@@ -783,7 +795,10 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
         };
         if context.draining && vk <= 255 && !context.swallowed[vk as usize] {
             // 搜索的原生 Enter 已送达面板；只跟踪它和后来的放行键，等抬起后才归还前台。
-            context.drain_passed[vk as usize] = pressed;
+            key_state::track(&mut context.drain_passed, vk, pressed);
+            if !key_state::pairable(vk) {
+                context.drain_ignored_callbacks.record(vk);
+            }
             return false;
         }
         // M0-6b：管理员提示停留中才进这个分支；不在停留时 hint 为 None，下面的原逻辑一行没改。
@@ -804,9 +819,7 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
             if let Some(action) = context.release_action[vk as usize].take()
                 && context.pending.is_none()
                 && !context.draining
-                && context
-                    .restricted
-                    .is_none_or(|ready| ready && super::window::foreground() == context.window)
+                && context.restricted.is_none()
             {
                 let _ = context.sender.try_send(HookEvent::Key(action));
             }
@@ -939,7 +952,7 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
 // 已吞按键保持配对；失焦、未就绪或等待松键时，新按下交给实际前台。
 fn activation_route(
     restricted: Option<bool>,
-    focused: bool,
+    _focused: bool,
     draining: bool,
     swallowed: bool,
 ) -> Option<bool> {
@@ -949,7 +962,7 @@ fn activation_route(
     if swallowed {
         return Some(true);
     }
-    (draining || restricted == Some(false) || !focused).then_some(false)
+    Some(false)
 }
 
 fn normalized_vk(vk: u16, scan: u16, extended: bool) -> u16 {
@@ -978,14 +991,130 @@ fn normalized_vk(vk: u16, scan: u16, extended: bool) -> u16 {
         _ => vk,
     }
 }
-fn drain_tracked(vk: u16) -> bool {
-    matches!(vk, 0x08..=0x0F | 0x13..=0xFF)
-}
 fn drain_snapshot(swallowed: &[bool; 256], physical: impl Fn(u16) -> bool) -> [bool; 256] {
-    std::array::from_fn(|vk| drain_tracked(vk as u16) && !swallowed[vk] && physical(vk as u16))
+    key_state::snapshot(swallowed, physical)
 }
 fn inputs_released(swallowed: &[bool; 256], passed: &[bool; 256]) -> bool {
     !swallowed.contains(&true) && !passed.contains(&true)
+}
+
+fn thread_input_desktop_receiving_input() -> windows::core::Result<bool> {
+    unsafe {
+        // GetThreadDesktop 返回借用句柄，API 明确禁止调用 CloseDesktop；UOI_IO 直接证明它正接收输入。
+        let desktop = GetThreadDesktop(GetCurrentThreadId())?;
+        let mut receiving_input = 0i32;
+        GetUserObjectInformationW(
+            HANDLE(desktop.0),
+            UOI_IO,
+            Some(std::ptr::addr_of_mut!(receiving_input).cast()),
+            size_of::<i32>() as u32,
+            None,
+        )?;
+        Ok(receiving_input != 0)
+    }
+}
+
+fn native_panel_input_readable(panel: usize) -> bool {
+    if panel == 0 || super::window::foreground() != panel {
+        return false;
+    }
+    unsafe {
+        let mut process = 0;
+        if GetWindowThreadProcessId(super::window::hwnd(panel), Some(&mut process)) == 0
+            || process != GetCurrentProcessId()
+        {
+            return false;
+        }
+    }
+    thread_input_desktop_receiving_input().unwrap_or(false) && super::window::foreground() == panel
+}
+
+fn drain_ready(
+    swallowed: &[bool; 256],
+    passed: &[bool; 256],
+    requires_recheck: bool,
+    recheck_available: bool,
+    abandon: bool,
+) -> bool {
+    inputs_released(swallowed, passed) && (!requires_recheck || recheck_available || abandon)
+}
+
+#[derive(Default)]
+struct DrainTrace {
+    started: Option<Instant>,
+    reported_waiting: bool,
+    reported_abandon: bool,
+    finished: bool,
+}
+impl DrainTrace {
+    fn observe(&mut self, now: Instant, abandon: bool, finished: bool) -> Vec<&'static str> {
+        if self.finished {
+            return Vec::new();
+        }
+        let mut stages = Vec::new();
+        let started = match self.started {
+            Some(started) => started,
+            None => {
+                self.started = Some(now);
+                stages.push("started");
+                now
+            }
+        };
+        if !finished
+            && !self.reported_waiting
+            && now.saturating_duration_since(started) >= Duration::from_secs(1)
+        {
+            self.reported_waiting = true;
+            stages.push("waiting");
+        }
+        if abandon && !self.reported_abandon {
+            self.reported_abandon = true;
+            stages.push("abandoned");
+        }
+        if finished {
+            self.finished = true;
+            stages.push("finished");
+        }
+        stages
+    }
+}
+
+fn report_drain(
+    logger: &Logger,
+    session: u64,
+    trace: &mut DrainTrace,
+    abandon: bool,
+    finished: bool,
+    keyboard_hook: bool,
+    error: Option<&str>,
+) {
+    let now = Instant::now();
+    for stage in trace.observe(now, abandon, finished) {
+        let mut fields =
+            CONTEXT.with(|context| {
+                context.borrow().as_ref().map_or_else(|| json!({}), |context| json!({
+                "pending_swallowed":context.swallowed.iter().filter(|&&held| held).count(),
+                "pending_passed":context.drain_passed.iter().filter(|&&held| held).count(),
+                "snapshot_counts":context.drain_snapshot_counts,
+                "ignored_callback_counts":context.drain_ignored_callbacks,
+                "physical_recheck_available":context.drain_recheck_available,
+                "physical_recheck_samples":context.drain_recheck_samples,
+                "physical_rechecked_releases":context.drain_rechecked_releases,
+                "physical_rechecked_presses":context.drain_rechecked_presses,
+            }))
+            });
+        fields["session"] = json!(session);
+        fields["stage"] = json!(stage);
+        fields["abandon"] = json!(abandon);
+        fields["elapsed_ms"] = json!(
+            trace
+                .started
+                .map(|started| now.saturating_duration_since(started).as_secs_f64() * 1000.0)
+        );
+        fields["keyboard_hook"] = json!(keyboard_hook);
+        fields["error"] = json!(error);
+        logger.event("input_drain", fields);
+    }
 }
 
 unsafe extern "system" fn mouse(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -1050,17 +1179,24 @@ impl Hooks {
         let switched = Arc::new(AtomicUsize::new(0));
         let switched_context = switched.clone();
         let monitor_context = monitor.clone();
+        let rechecked_releases = Arc::new(AtomicUsize::new(0));
+        let releases_context = rechecked_releases.clone();
         let thread = thread::Builder::new().name("panel-hooks".into()).spawn(move || unsafe {
             HOOK_TRACE.with(|trace| *trace.borrow_mut() = HookTrace::from_switch(
                 std::env::var_os("NIANLAI_G0_HOOK_TRACE").as_deref()));
             CONTEXT.with(|context| *context.borrow_mut() = Some(Context {
                 sender, window, target, target_focus, switched:switched_context, monitor:monitor_context.clone(),
-                restricted:restricted.then_some(false), draining:false, drain_passed:[false;256], bounds, hotkey: (vk, shortcut.mods), replay: replay_sender,
+                restricted:restricted.then_some(false), draining:false, drain_passed:[false;256],
+                drain_snapshot_counts:key_state::Counts::default(), drain_ignored_callbacks:key_state::Counts::default(),
+                drain_requires_recheck:false, drain_recheck_available:false, drain_recheck_samples:0,
+                drain_rechecked_releases:0, drain_rechecked_presses:0,
+                bounds, hotkey: (vk, shortcut.mods), replay: replay_sender,
                 foreground_trace: foreground::Trace::from_env(&logger, session, window, target),
                 dropped: overflow, pending: None, swallowed: [false; 256], release_action: [None; 256],
                 hint: None, hint_state: HintState::new(),
             }));
             let mut message = MSG::default();
+            let mut drain_trace = DrainTrace::default();
             let _ = PeekMessageW(&mut message, None, 0, 0, PM_NOREMOVE);
             let module = GetModuleHandleW(None).ok().map(|m| HINSTANCE(m.0));
             let mut keyboard_hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard), module, 0).ok();
@@ -1095,15 +1231,38 @@ impl Hooks {
                                 Command::StopInputs { abandon, reply } => {
                                     let reinstalled = keyboard_hook.is_none();
                                     if reinstalled {
-                                        keyboard_hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard), module, 0).ok();
+                                        let install = SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard), module, 0);
+                                        let error_code = install.as_ref().err().map(|error| error.code().0);
+                                        keyboard_hook = install.ok();
+                                        trace_install(keyboard_hook.is_some());
+                                        logger.event("drain_hook_install", json!({"session":session,
+                                            "success":keyboard_hook.is_some(),"error_code":error_code}));
+                                        report_trace(&logger, session, "drain_reinstalled", "stop_inputs", keyboard_hook.is_some());
                                     }
                                     let ready = CONTEXT.with(|context| {
                                         let mut context = context.borrow_mut();
                                         let Some(context) = context.as_mut() else { return true; };
                                         if !context.draining {
                                             if reinstalled { context.swallowed = [false;256]; context.release_action = [None;256]; }
-                                            context.drain_passed = drain_snapshot(&context.swallowed, |vk| down(i32::from(vk)));
+                                            let pressed:[bool;256] = std::array::from_fn(|vk| down(vk as i32));
+                                            context.drain_snapshot_counts = key_state::Counts::sample(|vk| pressed[vk as usize]);
+                                            context.drain_passed = drain_snapshot(&context.swallowed, |vk| pressed[vk as usize]);
+                                            context.drain_requires_recheck = reinstalled || context.restricted.is_some()
+                                                || super::window::foreground() == context.window;
                                             context.draining = true;
+                                        }
+                                        if !abandon && context.drain_requires_recheck {
+                                            let readable = native_panel_input_readable(context.window);
+                                            let recheck = key_state::recheck(&mut context.drain_passed, &context.swallowed,
+                                                readable, |vk| down(i32::from(vk)), || native_panel_input_readable(context.window));
+                                            context.drain_recheck_available = recheck.is_some();
+                                            if let Some(recheck) = recheck {
+                                                context.drain_recheck_samples = context.drain_recheck_samples.saturating_add(1);
+                                                context.drain_rechecked_releases = context.drain_rechecked_releases.saturating_add(recheck.released);
+                                                context.drain_rechecked_presses = context.drain_rechecked_presses.saturating_add(recheck.newly_pressed);
+                                                let _ = releases_context.fetch_update(Ordering::Relaxed, Ordering::Relaxed,
+                                                    |count| Some(count.saturating_add(recheck.released)));
+                                            }
                                         }
                                         if abandon && super::window::foreground() != 0 {
                                             // 撤销后不再归还或发送；跨完整性可能缺回调，只依据可见的物理松键清理。
@@ -1115,7 +1274,8 @@ impl Hooks {
                                                 }
                                             }
                                         }
-                                        inputs_released(&context.swallowed, &context.drain_passed)
+                                        drain_ready(&context.swallowed, &context.drain_passed, context.drain_requires_recheck,
+                                            context.drain_recheck_available, abandon)
                                             && !context.hint_state.has_swallowed(false)
                                     });
                                     let result = if keyboard_hook.is_none() { Err("松键监听安装失败".to_owned()) } else if !ready { Ok(false) } else {
@@ -1132,6 +1292,8 @@ impl Hooks {
                                         })
                                     };
                                     if result.is_err() { monitor_context.stopped(); }
+                                    report_drain(&logger, session, &mut drain_trace, abandon,
+                                        !matches!(result, Ok(false)), keyboard_hook.is_some(), result.as_ref().err().map(String::as_str));
                                     let _ = reply.send(result);
                                 }
                                 Command::Begin { started, reply } => {
@@ -1179,6 +1341,9 @@ impl Hooks {
                 }
             }
             report_trace(&logger, session, "before_unhook", "thread_exit", keyboard_hook.is_some());
+            if drain_trace.started.is_some() && !drain_trace.finished {
+                report_drain(&logger, session, &mut drain_trace, true, true, keyboard_hook.is_some(), Some("监听线程退出"));
+            }
             monitor_context.stopped();
             if let Some(hook) = keyboard_hook.take() { let _ = UnhookWindowsHookEx(hook); }
             if let Some(hook) = mouse_hook { let _ = UnhookWindowsHookEx(hook); }
@@ -1199,6 +1364,7 @@ impl Hooks {
                 dropped,
                 switched,
                 monitor,
+                rechecked_releases,
             }),
             Err(error) => {
                 let _ = thread.join();
@@ -1233,6 +1399,13 @@ impl Hooks {
             self.monitor.stopped();
         }
         result
+    }
+    pub fn input_release_evidence(&self) -> &'static str {
+        if self.rechecked_releases.load(Ordering::Acquire) > 0 {
+            "active_panel_physical_recheck"
+        } else {
+            "no_pending_or_observed_up"
+        }
     }
     pub fn synchronize(&self) -> bool {
         let (reply, receiver) = mpsc::sync_channel(1);
@@ -1301,12 +1474,53 @@ mod tests {
     use super::*;
 
     #[test]
-    fn activation_requires_panel_foreground_but_preserves_existing_key_pairs() {
+    fn current_thread_input_desktop_query_is_available_readonly() {
+        let receiving_input = thread_input_desktop_receiving_input()
+            .expect("只读 GetThreadDesktop/UOI_IO 查询必须可用");
+        eprintln!("input_desktop_query available=true receiving_input={receiving_input}");
+    }
+
+    #[test]
+    fn ime_synthetic_and_reserved_states_cannot_hold_search_drain_open() {
+        let swallowed = [false; 256];
+        let passed = drain_snapshot(&swallowed, |vk| matches!(vk, 0xE5 | 0xE7 | 0xD8));
+        assert!(
+            inputs_released(&swallowed, &passed),
+            "PROCESSKEY、PACKET 与保留虚拟状态没有物理抬起配对保证，不能阻止搜索选择完成"
+        );
+        let passed = drain_snapshot(&swallowed, |vk| matches!(vk, 0xE5 | 0x0D));
+        assert!(
+            !inputs_released(&swallowed, &passed),
+            "原生 Enter 仍须等抬起"
+        );
+    }
+
+    #[test]
+    fn activated_panel_new_keys_are_owned_by_dom_even_with_foreground() {
+        assert_eq!(
+            activation_route(Some(true), true, false, false),
+            Some(false),
+            "面板已激活时，新按键必须进入 DOM，不能再依赖管理员场景未送达的低层钩子动作"
+        );
+        assert_eq!(
+            activation_route(Some(true), true, false, true),
+            Some(true),
+            "历史吞键仍需保持配对"
+        );
+        assert_eq!(
+            activation_route(None, true, false, false),
+            None,
+            "普通快速模式继续走原钩子路由"
+        );
+    }
+
+    #[test]
+    fn activation_leaves_new_keys_to_dom_but_preserves_existing_key_pairs() {
         for ready in [false, true] {
             for focused in [false, true] {
                 assert_eq!(
                     activation_route(Some(ready), focused, false, false),
-                    if ready && focused { None } else { Some(false) }
+                    Some(false)
                 );
                 assert_eq!(
                     activation_route(Some(ready), focused, false, true),
@@ -1323,6 +1537,32 @@ mod tests {
             None,
             "普通 quick 保留原路由"
         );
+    }
+
+    #[test]
+    fn drain_diagnostics_are_bounded_across_thousands_of_poll_cycles() {
+        let started = Instant::now();
+        let mut trace = DrainTrace::default();
+        let mut stages = Vec::new();
+        for cycle in 0..5000 {
+            stages.extend(trace.observe(
+                started + Duration::from_millis(cycle * 5),
+                cycle >= 1000,
+                cycle >= 4000,
+            ));
+        }
+        assert_eq!(stages, ["started", "waiting", "abandoned", "finished"]);
+    }
+
+    #[test]
+    fn native_drain_needs_readable_context_and_cannot_poll_away_swallowed_keys() {
+        let mut swallowed = [false; 256];
+        let passed = [false; 256];
+        assert!(!drain_ready(&swallowed, &passed, true, false, false));
+        assert!(drain_ready(&swallowed, &passed, true, true, false));
+        swallowed[0x41] = true;
+        assert!(!drain_ready(&swallowed, &passed, true, true, false));
+        assert!(!drain_ready(&swallowed, &passed, true, true, true));
     }
 
     #[test]
@@ -1792,6 +2032,13 @@ mod tests {
                 restricted: None,
                 draining: false,
                 drain_passed: [false; 256],
+                drain_snapshot_counts: key_state::Counts::default(),
+                drain_ignored_callbacks: key_state::Counts::default(),
+                drain_requires_recheck: false,
+                drain_recheck_available: false,
+                drain_recheck_samples: 0,
+                drain_rechecked_releases: 0,
+                drain_rechecked_presses: 0,
                 foreground_trace: None,
                 bounds: RECT::default(),
                 hotkey: (V, Modifiers::CONTROL),

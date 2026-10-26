@@ -776,6 +776,24 @@ impl Panel {
         }
         self.mode = Mode::Search;
         self.awaiting_search = true;
+        if self.interaction == Interaction::Activated {
+            // 激活式面板已经由 DOM 持有焦点及输入法组合，切搜索只做模式握手，不再次聚焦或补发首字。
+            self.emit("panel:mode", json!({"mode":"search"}));
+            self.log(
+                logger,
+                "search_dom_handoff",
+                json!({
+                    "foreground_ok":window::foreground()==window::handle(&self.window)?
+                }),
+            );
+            let app = app.clone();
+            let session = self.session;
+            std::thread::spawn(move || {
+                std::thread::sleep(REPLAY_WAIT);
+                let _ = dispatch(&app, Action::SearchTimeout { session });
+            });
+            return Ok(());
+        }
         let started = self
             .hooks
             .as_ref()
@@ -925,7 +943,11 @@ impl Panel {
             );
             return Ok(());
         }
-        self.replay_search(logger, ready, if ready { "ready" } else { "timeout" }, true)?;
+        if self.interaction == Interaction::Activated {
+            self.replay_search(logger, false, "activated_dom", false)?;
+        } else {
+            self.replay_search(logger, ready, if ready { "ready" } else { "timeout" }, true)?;
+        }
         self.awaiting_search = false;
         self.log(logger, "search_ready", json!({"search_box_ready":ready,"foreground_ok":window::foreground()==window::handle(&self.window)?}));
         Ok(())
@@ -1192,10 +1214,7 @@ impl Panel {
             Action::Key { session, key }
                 if self.current(session)
                     && self.mode == Mode::Quick
-                    && matches!(
-                        self.interaction,
-                        Interaction::Quick | Interaction::Activated
-                    ) =>
+                    && self.interaction == Interaction::Quick =>
             {
                 self.emit("panel:key", json!({"key":key}));
                 if key == "Escape" {
@@ -1348,6 +1367,7 @@ impl Panel {
                 let history = controller.history.clone();
                 let keys = controller.keys.clone();
                 let stopping = controller.stopping.clone();
+                let worker_logger = logger.clone();
                 let app = app.clone();
                 if std::thread::Builder::new().name("paste-request".into()).spawn(move || {
                     // 监听线程仍在 worker 中存活；只先停止输入拦截，读库和发送期间继续记录前台。
@@ -1360,10 +1380,23 @@ impl Panel {
                             match hooks.stop_inputs(abandon) {
                                 Ok(true) => return hooks.synchronize() && !abandon,
                                 Ok(false) => std::thread::sleep(Duration::from_millis(5)),
-                                Err(_) => {
+                                Err(error) => {
+                                    let waiting = Instant::now();
+                                    let mut reported_waiting = false;
+                                    worker_logger.event("input_drain_fallback", json!({"session":session,
+                                        "stage":"started","error":error,"counts":paste::key_state_counts()}));
                                     while !paste::keys_released() && !stopping.load(Ordering::Acquire) {
+                                        if !reported_waiting && waiting.elapsed() >= Duration::from_secs(1) {
+                                            reported_waiting = true;
+                                            worker_logger.event("input_drain_fallback", json!({"session":session,
+                                                "stage":"waiting","elapsed_ms":waiting.elapsed().as_secs_f64()*1000.0,
+                                                "counts":paste::key_state_counts()}));
+                                        }
                                         std::thread::sleep(Duration::from_millis(5));
                                     }
+                                    worker_logger.event("input_drain_fallback", json!({"session":session,
+                                        "stage":"finished","elapsed_ms":waiting.elapsed().as_secs_f64()*1000.0,
+                                        "stopping":stopping.load(Ordering::Acquire),"counts":paste::key_state_counts()}));
                                     return false;
                                 }
                             }
@@ -1388,10 +1421,17 @@ impl Panel {
                         Ok(None) => json!({"clipboard_written":false,"reason":"record_missing"}),
                         Err(code) => json!({"clipboard_written":false,"reason":"store_read_failed","error_code":code}),
                     };
+                    if !restricted {
+                        result["input_cleanup"] = json!(if drained {
+                            hooks.as_ref().map_or("unavailable", Hooks::input_release_evidence)
+                        } else { "cancelled_physical_release" });
+                    }
                     if restricted {
                         let paired = drain();
                         let copied = result["clipboard_written"] == true && !cancelled.load(Ordering::Acquire);
-                        result["input_cleanup"] = json!(if paired { "paired" } else { "cancelled_physical_release" });
+                        result["input_cleanup"] = json!(if paired {
+                            hooks.as_ref().map_or("unavailable", Hooks::input_release_evidence)
+                        } else { "cancelled_physical_release" });
                         if !stopping.load(Ordering::Acquire) {
                             restored = return_for_paste(&app, session, if paired { permit } else { None }, copied);
                         }

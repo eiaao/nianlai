@@ -30,10 +30,12 @@ async function compilePanel() {
     writeFileSync(ipcPath, `
 export const calls = [];
 let rejectNext = false;
+let rejectSearch = false;
 let pendingPaste = null;
 const handlers = new Map();
-export function reset() { calls.length = 0; rejectNext = false; pendingPaste = null; handlers.clear(); }
+export function reset() { calls.length = 0; rejectNext = false; rejectSearch = false; pendingPaste = null; handlers.clear(); }
 export function rejectNextPaste() { rejectNext = true; }
+export function rejectNextSearch() { rejectSearch = true; }
 export function deferNextPaste() {
   let resolve, reject;
   const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
@@ -49,7 +51,10 @@ export async function pasteItem(session, id, mode, selection) {
 }
 export async function hidePanel(session) { calls.push({ command: "hidePanel", session }); }
 export async function retryActivation(session) { calls.push({ command: "retryActivation", session }); }
-export async function startSearch(session) { calls.push({ command: "startSearch", session }); }
+export async function startSearch(session) {
+  calls.push({ command: "startSearch", session });
+  if (rejectSearch) { rejectSearch = false; throw new Error("模拟搜索切换失败"); }
+}
 export async function frontendReady() {}
 export async function reportPainted() {}
 export async function searchReady() {}
@@ -98,18 +103,21 @@ const submissions = [
   ...Array.from({ length: 9 }, (_, index) => ({ name: `Ctrl+${index + 1}`, key: String(index + 1), ctrlKey: true, mode: "paste", index })),
 ];
 
-function keydown(panel, options) {
+function keyboard(panel, options, type) {
   const event = {
-    type: "keydown", isTrusted: true, timeStamp: performance.now(),
+    type, isTrusted: true, timeStamp: performance.now(),
     key: options.key, keyCode: options.key === "Enter" ? 13 : 0,
+    code: /^[1-9]$/.test(options.key) ? `Digit${options.key}` : options.key, location: 0,
     ctrlKey: false, altKey: false, metaKey: false, shiftKey: false,
     repeat: false, isComposing: false, target: panel.input, defaultPrevented: false,
     ...options,
     preventDefault() { this.defaultPrevented = true; },
   };
-  panel.keydown(event);
+  panel[type](event);
   return event;
 }
+const keydown = (panel, options) => keyboard(panel, options, "keydown");
+const keyup = (panel, options) => keyboard(panel, options, "keyup");
 
 function click(options = {}) {
   return { type: "click", isTrusted: true, timeStamp: performance.now(), button: 0, detail: 1, ...options };
@@ -122,6 +130,351 @@ const items = () => Array.from({ length: 9 }, (_, index) => ({
 const shown = (options = {}) => ({
   session: 37, interaction: "quick", foregroundRevision: 3, hotkeyToShowMs: 1,
   history: { items: items(), total: 9, recording: true, last_recorded_ms: null, store_status: null }, ...options,
+});
+
+test("Activated DOM 快速取用、焦点准备与自然搜索输入", async (suite) => {
+  const { PanelState, ipc, cleanup } = await compilePanel();
+  suite.after(cleanup);
+  const actions = submissions.map((action) => action.name.startsWith("Ctrl+") && action.key !== "Enter"
+    ? { ...action, name: action.key, ctrlKey: false } : action);
+  const expected = (action) => ({ command: "pasteItem", session: 37, id: 101 + action.index, mode: action.mode });
+
+  for (const action of actions) {
+    await suite.test(`${action.name} 固定首次按下的条目和模式，等确认键及修饰键真实松开`, async (context) => {
+      const { panel } = await activatedPanel(context, PanelState, ipc);
+      const event = keydown(panel, action);
+      assert.equal(event.defaultPrevented, true);
+      assert.deepEqual(ipc.calls, []);
+      keyup(panel, action);
+      if (action.ctrlKey || action.shiftKey) {
+        assert.deepEqual(ipc.calls, [], "Enter 已松开但修饰键仍下按时不能归还前台");
+        keyup(panel, { key: action.ctrlKey ? "Control" : "Shift", code: action.ctrlKey ? "ControlLeft" : "ShiftLeft" });
+      }
+      assert.deepEqual(ipc.calls, [expected(action)]);
+    });
+  }
+
+  await suite.test("重复按下不替换选择，只有重复事件的键不能单独提交", async (context) => {
+    const { panel } = await activatedPanel(context, PanelState, ipc);
+    keydown(panel, { key: "Enter", repeat: true });
+    keyup(panel, { key: "Enter" });
+    assert.deepEqual(ipc.calls, []);
+    keydown(panel, { key: "Enter" });
+    panel.selected = 6;
+    keydown(panel, { key: "Enter", repeat: true });
+    keyup(panel, { key: "Enter" });
+    assert.deepEqual(ipc.calls, [{ command: "pasteItem", session: 37, id: 102, mode: "paste" }]);
+  });
+
+  await suite.test("不可信事件、无按下的抬起及不同 code 不能提交", async (context) => {
+    const { panel } = await activatedPanel(context, PanelState, ipc);
+    keyup(panel, { key: "Enter" });
+    keydown(panel, { key: "Enter", isTrusted: false });
+    keyup(panel, { key: "Enter" });
+    assert.deepEqual(ipc.calls, []);
+    keydown(panel, { key: "Enter" });
+    keyup(panel, { key: "Enter", code: "NumpadEnter" });
+    keyup(panel, { key: "Enter", isTrusted: false });
+    assert.deepEqual(ipc.calls, []);
+    keyup(panel, { key: "Enter" });
+    assert.deepEqual(ipc.calls, [{ command: "pasteItem", session: 37, id: 102, mode: "paste" }]);
+  });
+
+  await suite.test("按下后列表变化仍绑定原条目，条目移除时取消", async (context) => {
+    const { panel } = await activatedPanel(context, PanelState, ipc);
+    keydown(panel, { key: "Enter" });
+    panel.history = { ...panel.history, items: items().reverse() };
+    keyup(panel, { key: "Enter" });
+    assert.deepEqual(ipc.calls, [{ command: "pasteItem", session: 37, id: 102, mode: "paste" }]);
+    panel.busy = false;
+    keydown(panel, { key: "1" });
+    panel.history = { ...panel.history, items: [] };
+    keyup(panel, { key: "1" });
+    assert.equal(ipc.calls.length, 1);
+  });
+
+  await suite.test("方向和翻页键允许重复导航，确认还要等待其它已观察键抬起", async (context) => {
+    const { panel } = await activatedPanel(context, PanelState, ipc);
+    keydown(panel, { key: "ArrowDown" });
+    keydown(panel, { key: "ArrowDown", repeat: true });
+    assert.equal(panel.selected, 3);
+    keydown(panel, { key: "End" });
+    keyup(panel, { key: "End" });
+    assert.equal(panel.selected, 8);
+    keydown(panel, { key: "PageUp" });
+    keyup(panel, { key: "PageUp" });
+    assert.equal(panel.selected, 1);
+    keydown(panel, { key: "Enter" });
+    keyup(panel, { key: "Enter" });
+    assert.deepEqual(ipc.calls, []);
+    keyup(panel, { key: "ArrowDown" });
+    assert.deepEqual(ipc.calls, [{ command: "pasteItem", session: 37, id: 102, mode: "paste" }]);
+  });
+
+  await suite.test("Esc 只在匹配可信松键后收起", async (context) => {
+    const { panel } = await activatedPanel(context, PanelState, ipc);
+    keydown(panel, { key: "Escape" });
+    assert.deepEqual(ipc.calls, []);
+    keyup(panel, { key: "Escape" });
+    assert.deepEqual(ipc.calls, [{ command: "hidePanel", session: 37 }]);
+  });
+
+  for (const boundary of ["inputBlur", "windowBlur", "hidden", "session", "mode"]) {
+    await suite.test(`${boundary} 清除待松键选择，迟到 keyup 不能提交`, async (context) => {
+      const { panel, runFrame } = await activatedPanel(context, PanelState, ipc);
+      keydown(panel, { key: "Enter" });
+      if (boundary === "inputBlur" || boundary === "windowBlur") {
+        document.activeElement = null;
+        panel[boundary]();
+      } else if (boundary === "hidden") ipc.emit("hidden", { session: 37 });
+      else if (boundary === "session") {
+        ipc.emit("shown", shown({ session: 38, interaction: "activated" }));
+        await flush(); await runFrame(); await runFrame();
+      } else {
+        const switching = ipc.emit("mode", { session: 37, mode: "search" });
+        await flush(); await runFrame(); await runFrame(); await switching;
+      }
+      keyup(panel, { key: "Enter" });
+      assert.deepEqual(ipc.calls, []);
+    });
+  }
+
+  await suite.test("焦点准备失败可见、可本地鼠标重试，不误调后端 retry_activation", async (context) => {
+    const { panel, runFrame, allowFocus } = await activatedPanel(context, PanelState, ipc, { focusRefused: true });
+    assert.equal(panel.domFocus, "failed");
+    assert.equal(panel.interactive, false);
+    assert.equal(panel.inputSurface, true, "准备期间必须能先挂载真实输入框");
+    assert.equal(panel.filtered.length, 0);
+    allowFocus();
+    panel.retryDomFocus(click({ isTrusted: false }));
+    assert.equal(panel.domFocus, "failed");
+    panel.retryDomFocus(click());
+    await flush(); await runFrame(); await runFrame();
+    assert.equal(panel.domFocus, "ready");
+    assert.equal(document.activeElement, panel.input);
+    assert.equal(panel.locked, false);
+    assert.equal(panel.filtered.length, 9);
+    assert.deepEqual(ipc.calls, []);
+  });
+
+  await suite.test("文档失焦时即使 activeElement 为 input 也不能报本地就绪", async (context) => {
+    const harness = await createPanel(context, PanelState, ipc, { interaction: "activation_pending" });
+    document.hasFocus = () => false;
+    ipc.emit("interaction", { session: 37, interaction: "activated" });
+    await flush(); await harness.runFrame(); await harness.runFrame();
+    assert.equal(document.activeElement, harness.panel.input);
+    assert.equal(harness.panel.domFocus, "failed");
+    assert.equal(harness.panel.interactive, false);
+  });
+
+  await suite.test("没有动画帧回调时焦点准备超时失败，不无限隐藏列表", async (context) => {
+    context.mock.timers.enable({ apis: ["setTimeout"] });
+    const { panel } = await createPanel(context, PanelState, ipc, { interaction: "activation_pending" });
+    ipc.emit("interaction", { session: 37, interaction: "activated" });
+    await flush();
+    context.mock.timers.tick(501);
+    assert.equal(panel.domFocus, "failed");
+    assert.equal(panel.interactive, false);
+  });
+
+  await suite.test("普通首字由 beforeinput 自然承载，切换中数字不误取用且不重放、不重聚焦", async (context) => {
+    const { panel, runFrame, focusCalls } = await activatedPanel(context, PanelState, ipc);
+    const callsBefore = focusCalls();
+    assert.equal(keydown(panel, { key: "a", code: "KeyA" }).defaultPrevented, false);
+    const event = beforeInput(panel);
+    assert.equal(event.defaultPrevented, false);
+    panel.query = "合成首字";
+    assert.equal(panel.searchStarting, true);
+    assert.equal(panel.interactive, false);
+    keydown(panel, { key: "1" });
+    keyup(panel, { key: "1" });
+    beforeInput(panel);
+    assert.deepEqual(ipc.calls, [{ command: "startSearch", session: 37 }]);
+    const switching = ipc.emit("mode", { session: 37, mode: "search" });
+    await flush(); await runFrame(); await runFrame(); await switching;
+    assert.equal(panel.query, "合成首字");
+    assert.equal(panel.searchStarting, false);
+    assert.equal(panel.mode, "search");
+    assert.equal(focusCalls(), callsBefore, "已聚焦的同一输入框不能在搜索切换中再聚焦");
+    assert.deepEqual(ipc.calls, [{ command: "startSearch", session: 37 }]);
+  });
+
+  await suite.test("IME compositionstart 先进入搜索，同一输入框组合不被切换打断", async (context) => {
+    const { panel, runFrame, advance, focusCalls } = await activatedPanel(context, PanelState, ipc);
+    const callsBefore = focusCalls();
+    panel.startComposition({ type: "compositionstart", isTrusted: true, target: panel.input, timeStamp: performance.now() });
+    beforeInput(panel, { inputType: "insertCompositionText", isComposing: true });
+    panel.query = "合成中文";
+    const switching = ipc.emit("mode", { session: 37, mode: "search" });
+    await flush(); await runFrame(); await runFrame(); await switching;
+    assert.equal(panel.composing, true);
+    assert.equal(panel.query, "合成中文");
+    assert.equal(focusCalls(), callsBefore);
+    keydown(panel, { key: "Enter", isComposing: true });
+    assert.deepEqual(ipc.calls, [{ command: "startSearch", session: 37 }]);
+    panel.endComposition();
+    advance(50);
+    keydown(panel, { key: "Enter" });
+    keyup(panel, { key: "Enter" });
+    assert.equal(ipc.calls.at(-1).command, "pasteItem");
+    assert.deepEqual(ipc.calls.at(-1).selection, { revision: 3, nonce: 1 });
+  });
+
+  for (const action of [{ key: "/", code: "Slash" }, { key: "f", code: "KeyF", ctrlKey: true }]) {
+    await suite.test(`${action.key === "/" ? "/" : "Ctrl+F"} 阻止默认输入并保留空查询搜索入口`, async (context) => {
+      const { panel } = await activatedPanel(context, PanelState, ipc);
+      const event = keydown(panel, action);
+      assert.equal(event.defaultPrevented, true);
+      assert.equal(panel.query, "");
+      assert.equal(panel.searchStarting, true);
+      assert.deepEqual(ipc.calls, [{ command: "startSearch", session: 37 }]);
+    });
+  }
+
+  await suite.test("搜索切换 IPC 失败或超时可见，不回退 Quick 误选", async (context) => {
+    const { panel } = await activatedPanel(context, PanelState, ipc);
+    ipc.rejectNextSearch();
+    keydown(panel, { key: "/", code: "Slash" });
+    await flush();
+    assert.equal(panel.searchStarting, false);
+    assert.equal(panel.searchStartFailed, true);
+    keydown(panel, { key: "1" });
+    keyup(panel, { key: "1" });
+    assert.deepEqual(ipc.calls, [{ command: "startSearch", session: 37 }]);
+    panel.close();
+    assert.equal(ipc.calls.at(-1).command, "hidePanel");
+  });
+
+  await suite.test("普通 Quick 仍只由 panel:key 处理，DOM 字符不替它触发搜索", async (context) => {
+    const { panel } = await createPanel(context, PanelState, ipc);
+    panel.mode = "quick";
+    keydown(panel, { key: "1" });
+    keyup(panel, { key: "1" });
+    beforeInput(panel);
+    assert.deepEqual(ipc.calls, []);
+    ipc.emit("key", { session: 37, key: "1" });
+    assert.deepEqual(ipc.calls, [{ command: "pasteItem", session: 37, id: 101, mode: "paste" }]);
+  });
+
+  for (const action of [{ key: "Enter", ctrlKey: true, mode: "text" }, { key: "Enter", shiftKey: true, mode: "copy" }]) {
+    await suite.test(`Activated Search ${action.mode} 保留按下时快照，先松 Enter 再松修饰键才提交`, async (context) => {
+      const { panel } = await activatedSearch(context, PanelState, ipc);
+      keydown(panel, action);
+      assert.deepEqual(ipc.calls, []);
+      keyup(panel, action);
+      panel.searchItems = items().reverse();
+      panel.selected = 6;
+      assert.deepEqual(ipc.calls, []);
+      keyup(panel, { key: action.ctrlKey ? "Control" : "Shift", code: action.ctrlKey ? "ControlLeft" : "ShiftLeft" });
+      assert.deepEqual(ipc.calls, [{ command: "pasteItem", session: 37, id: 102, mode: action.mode, selection: { revision: 3, nonce: 1 } }]);
+    });
+  }
+
+  await suite.test("Activated Search 松键期间 revision 变化取消，下一新选择用递增 nonce", async (context) => {
+    const { panel, advance } = await activatedSearch(context, PanelState, ipc);
+    keydown(panel, { key: "Enter" });
+    advance(1);
+    ipc.emit("foreground-revision", { session: 37, revision: 4 });
+    keyup(panel, { key: "Enter" });
+    assert.deepEqual(ipc.calls, []);
+    assert.equal(panel.busy, false);
+    assert.match(panel.message, /重新选择/);
+    keydown(panel, { key: "Enter" });
+    keyup(panel, { key: "Enter" });
+    assert.deepEqual(ipc.calls, [{ command: "pasteItem", session: 37, id: 102, mode: "paste", selection: { revision: 4, nonce: 2 } }]);
+  });
+
+  await suite.test("Activated Search 方向长按加 Ctrl+数字等所有已观察键抬起", async (context) => {
+    const { panel } = await activatedSearch(context, PanelState, ipc);
+    keydown(panel, { key: "ArrowDown" });
+    keydown(panel, { key: "ArrowDown", repeat: true });
+    keydown(panel, { key: "1", ctrlKey: true });
+    keyup(panel, { key: "1", ctrlKey: true });
+    keyup(panel, { key: "Control", code: "ControlLeft" });
+    assert.deepEqual(ipc.calls, []);
+    keyup(panel, { key: "ArrowDown" });
+    assert.deepEqual(ipc.calls, [{ command: "pasteItem", session: 37, id: 101, mode: "paste", selection: { revision: 3, nonce: 1 } }]);
+  });
+
+  await suite.test("Activated 鼠标选择同样等待已观察修饰键，不凭 click 跳过配对", async (context) => {
+    const { panel } = await activatedSearch(context, PanelState, ipc);
+    await panel.choose(0, "copy", click({ ctrlKey: true }));
+    assert.deepEqual(ipc.calls, []);
+    keyup(panel, { key: "Control", code: "ControlLeft" });
+    assert.deepEqual(ipc.calls, [{ command: "pasteItem", session: 37, id: 101, mode: "copy", selection: { revision: 3, nonce: 1 } }]);
+  });
+
+  await suite.test("Activated 鼠标等待松键时不刷新 revision，前台变化后取消", async (context) => {
+    const { panel, advance } = await activatedSearch(context, PanelState, ipc);
+    keydown(panel, { key: "ArrowDown" });
+    await panel.choose(0, "paste", click());
+    advance(1);
+    ipc.emit("foreground-revision", { session: 37, revision: 4 });
+    keyup(panel, { key: "ArrowDown" });
+    assert.deepEqual(ipc.calls, []);
+    await panel.choose(0, "paste", click());
+    assert.deepEqual(ipc.calls, [{ command: "pasteItem", session: 37, id: 101, mode: "paste", selection: { revision: 4, nonce: 2 } }]);
+  });
+
+  await suite.test("搜索切换没有 mode 回执会超时失败，不能永久停留准备态", async (context) => {
+    const { panel } = await activatedPanel(context, PanelState, ipc);
+    context.mock.timers.enable({ apis: ["setTimeout"] });
+    keydown(panel, { key: "/", code: "Slash" });
+    context.mock.timers.tick(1001);
+    assert.equal(panel.searchStarting, false);
+    assert.equal(panel.searchStartFailed, true);
+    assert.equal(panel.interactive, false);
+    assert.match(panel.message, /重新呼出/);
+  });
+
+  await suite.test("Esc 撤销等待修饰键的选择，全部真实松键后只关闭", async (context) => {
+    const { panel } = await activatedPanel(context, PanelState, ipc);
+    keydown(panel, { key: "Enter", ctrlKey: true });
+    keyup(panel, { key: "Enter", ctrlKey: true });
+    keydown(panel, { key: "Escape", ctrlKey: true });
+    keyup(panel, { key: "Escape", ctrlKey: true });
+    assert.deepEqual(ipc.calls, []);
+    keyup(panel, { key: "Control", code: "ControlLeft" });
+    assert.deepEqual(ipc.calls, [{ command: "hidePanel", session: 37 }]);
+  });
+
+  await suite.test("已经提交且 busy 时新 Esc 仍能在匹配松键后请求关闭", async (context) => {
+    const { panel } = await activatedPanel(context, PanelState, ipc);
+    keydown(panel, { key: "Enter" });
+    keyup(panel, { key: "Enter" });
+    assert.equal(panel.busy, true);
+    keydown(panel, { key: "Escape" });
+    assert.equal(ipc.calls.length, 1);
+    keyup(panel, { key: "Escape" });
+    assert.equal(ipc.calls.length, 2);
+    assert.equal(ipc.calls[1].command, "hidePanel");
+  });
+
+  await suite.test("重复或组合中的 Esc 不能产生关闭请求", async (context) => {
+    const { panel } = await activatedPanel(context, PanelState, ipc);
+    keydown(panel, { key: "Escape", repeat: true });
+    keyup(panel, { key: "Escape" });
+    panel.composing = true;
+    keydown(panel, { key: "Escape", isComposing: true });
+    keyup(panel, { key: "Escape", isComposing: true });
+    assert.deepEqual(ipc.calls, []);
+  });
+
+  await suite.test("迟到的其它键或修饰键 keyup 不清除当前待选择的 held 证据", async (context) => {
+    const { panel, advance } = await activatedPanel(context, PanelState, ipc);
+    keydown(panel, { key: "ArrowDown" });
+    advance(1);
+    keydown(panel, { key: "Enter", ctrlKey: true });
+    keyup(panel, { key: "Enter", ctrlKey: true });
+    keyup(panel, { key: "Control", code: "ControlLeft", timeStamp: 1000 });
+    keyup(panel, { key: "ArrowDown", timeStamp: 1000 });
+    assert.deepEqual(ipc.calls, []);
+    keyup(panel, { key: "Control", code: "ControlLeft" });
+    assert.deepEqual(ipc.calls, []);
+    keyup(panel, { key: "ArrowDown" });
+    assert.equal(ipc.calls.length, 1);
+    assert.equal(ipc.calls[0].id, 103);
+  });
 });
 const pasteResult = (options = {}) => ({
   session: 37, paste_result: "copied_only", reason: "target_may_be_elevated", actual_key: null,
@@ -138,7 +491,7 @@ async function createPanel(context, PanelState, ipc, options = {}) {
   for (const [name, value] of Object.entries({
     requestAnimationFrame: (callback) => { const id = ++frameId; frames.set(id, callback); return id; },
     cancelAnimationFrame: (id) => frames.delete(id),
-    document: { activeElement: null },
+    document: { activeElement: null, hasFocus: () => true },
   })) {
     const descriptor = Object.getOwnPropertyDescriptor(globalThis, name);
     Object.defineProperty(globalThis, name, { value, writable: true, configurable: true });
@@ -146,7 +499,9 @@ async function createPanel(context, PanelState, ipc, options = {}) {
   }
   ipc.reset();
   const panel = new PanelState();
-  panel.input = { focus() { document.activeElement = this; }, blur() { if (document.activeElement === this) document.activeElement = null; } };
+  let focusCalls = 0;
+  let focusRefused = options.focusRefused === true;
+  panel.input = { focus() { focusCalls += 1; if (!focusRefused) document.activeElement = this; }, blur() { if (document.activeElement === this) document.activeElement = null; } };
   const disconnect = panel.connect();
   context.after(() => { disconnect(); restoreGlobals.forEach((restore) => restore()); });
   await flush();
@@ -157,6 +512,7 @@ async function createPanel(context, PanelState, ipc, options = {}) {
   assert.equal(panel.busy, false);
   return {
     panel, advance: (milliseconds) => { now += milliseconds; },
+    focusCalls: () => focusCalls, allowFocus: () => { focusRefused = false; },
     runFrame: async () => {
       const current = [...frames];
       frames.clear();
@@ -164,6 +520,34 @@ async function createPanel(context, PanelState, ipc, options = {}) {
       await flush();
     },
   };
+}
+
+async function activatedPanel(context, PanelState, ipc, options = {}) {
+  const harness = await createPanel(context, PanelState, ipc, { ...options, interaction: "activation_pending" });
+  ipc.emit("interaction", { session: 37, interaction: "activated" });
+  await flush();
+  await harness.runFrame();
+  await harness.runFrame();
+  return harness;
+}
+
+async function activatedSearch(context, PanelState, ipc) {
+  const harness = await activatedPanel(context, PanelState, ipc);
+  harness.panel.searchPointer({ type: "pointerdown", isTrusted: true, target: harness.panel.input, timeStamp: performance.now(), preventDefault() {} });
+  const switching = ipc.emit("mode", { session: 37, mode: "search" });
+  await flush(); await harness.runFrame(); await harness.runFrame(); await switching;
+  ipc.calls.length = 0;
+  return harness;
+}
+
+function beforeInput(panel, options = {}) {
+  const event = {
+    type: "beforeinput", isTrusted: true, timeStamp: performance.now(), target: panel.input,
+    inputType: "insertText", isComposing: false, defaultPrevented: false, ...options,
+    preventDefault() { this.defaultPrevented = true; },
+  };
+  panel.beforeInput(event);
+  return event;
 }
 
 test("搜索提交键的首次按下、自动重复和组合输入保护", async (suite) => {
@@ -465,22 +849,22 @@ test("搜索选择快照与受限激活交互的反例", async (suite) => {
     assert.deepEqual(ipc.calls, [{ command: "retryActivation", session: 37 }]);
   });
 
-  await suite.test("已激活列表仍是 quick，数字由 panel:key 取用且不授予搜索许可", async (context) => {
-    const { panel } = await createPanel(context, PanelState, ipc, { interaction: "activation_pending" });
-    ipc.emit("interaction", { session: 37, interaction: "activated" });
+  await suite.test("已激活列表仍是 quick，DOM 数字松开取用且 panel:key 不双发", async (context) => {
+    const { panel } = await activatedPanel(context, PanelState, ipc);
     assert.equal(panel.mode, "quick");
     assert.equal(panel.filtered.length, 9);
     keydown(panel, { key: "1" });
     assert.equal(panel.mode, "quick");
     assert.deepEqual(ipc.calls, []);
     ipc.emit("key", { session: 37, key: "1" });
+    assert.deepEqual(ipc.calls, []);
+    keyup(panel, { key: "1" });
     assert.deepEqual(ipc.calls, [{ command: "pasteItem", session: 37, id: 101, mode: "paste" }]);
   });
 
   await suite.test("activated 可显式进入搜索，重复 activated 不能重置搜索，DOM 选择仍需快照", async (context) => {
-    const { panel, runFrame } = await createPanel(context, PanelState, ipc, { interaction: "activation_pending" });
-    ipc.emit("interaction", { session: 37, interaction: "activated" });
-    panel.searchPointer({ preventDefault() {} });
+    const { panel, runFrame } = await activatedPanel(context, PanelState, ipc);
+    panel.searchPointer({ type: "pointerdown", isTrusted: true, target: panel.input, timeStamp: performance.now(), preventDefault() {} });
     assert.deepEqual(ipc.calls, [{ command: "startSearch", session: 37 }]);
     ipc.calls.length = 0;
     const switching = ipc.emit("mode", { session: 37, mode: "search" });
@@ -492,6 +876,8 @@ test("搜索选择快照与受限激活交互的反例", async (suite) => {
     assert.equal(panel.mode, "search");
     assert.equal(panel.locked, false);
     keydown(panel, { key: "Enter" });
+    assert.deepEqual(ipc.calls, [], "Activated Search 也必须等待选择键松开");
+    keyup(panel, { key: "Enter" });
     assert.deepEqual(ipc.calls, [expected()]);
   });
 

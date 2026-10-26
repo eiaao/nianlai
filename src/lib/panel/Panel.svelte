@@ -11,7 +11,7 @@
   onMount(panel.connect);
 </script>
 
-<svelte:window onkeydown={panel.keydown} oncontextmenu={(event) => event.preventDefault()} />
+<svelte:window onkeydown={panel.keydown} onkeyup={panel.keyup} onblur={panel.windowBlur} oncontextmenu={(event) => event.preventDefault()} />
 
 <main aria-label="拈来剪贴板样机">
   {#if !panel.visible}
@@ -26,8 +26,8 @@
       <div class="heading"><strong>拈来</strong><span>G0 · 样机四</span><span class="count">{panel.query ? `${panel.filtered.length} / ` : ""}{panel.history.total} 条</span></div>
       <div class="recording" class:inactive={!panel.history.recording} role="status">{panel.history.recording ? "记录中" : "未在记录"}{panel.history.last_recorded_ms ? ` · 上次 ${formatTime(panel.history.last_recorded_ms)}` : ""}{panel.mode === "quick" && panel.history.total > 300 ? " · 显示最近 300 条" : ""}</div>
       {#if panel.history.store_status}<div class="store-status" role="status">{panel.history.store_status}</div>{/if}
+      {#if panel.inputSurface}<SearchBox {panel} />{/if}
       {#if panel.interactive}
-        <SearchBox {panel} />
         <div class="hint">
           {#if panel.interaction === "activated"}
             {panel.mode === "quick" ? "↑ ↓ 选择 · 1–9 复制 · Enter 复制 · Ctrl+Enter 转为文本复制 · Shift+Enter 复制 · Esc 收起" : "↑ ↓ 选择 · Ctrl+1–9 复制 · Enter 复制 · Ctrl+Enter 转为文本复制 · Shift+Enter 复制 · Esc 返回"}
@@ -42,7 +42,14 @@
       <HistoryList {panel} />
     {:else}
       <section class="activation" aria-label="面板激活状态">
-        <p role="status">{panel.interaction === "activation_pending" || panel.activationRetrying ? "正在取得键盘焦点，请稍候…" : "未取得键盘焦点，请点击面板重试"}</p>
+        {#if panel.interaction === "activated"}
+          <p role="status">{panel.searchStartFailed ? "未能进入搜索，请关闭面板后重新呼出。" : panel.searchStarting ? "正在进入搜索…" : panel.domFocus === "failed" ? "未取得输入焦点，请点击重试" : "正在取得输入焦点，请稍候…"}</p>
+          {#if panel.domFocus === "failed" && !panel.searchStarting && !panel.searchStartFailed}
+            <button type="button" onclick={(event) => panel.retryDomFocus(event)}>点击重试输入焦点</button>
+          {/if}
+        {:else}
+          <p role="status">{panel.interaction === "activation_pending" || panel.activationRetrying ? "正在取得键盘焦点，请稍候…" : "未取得键盘焦点，请点击面板重试"}</p>
+        {/if}
         {#if panel.interaction === "activation_failed"}
           <button type="button" disabled={panel.activationRetrying} onclick={(event) => panel.retryActivation(event)}>点击重试</button>
         {/if}

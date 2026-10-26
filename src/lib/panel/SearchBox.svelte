@@ -1,6 +1,6 @@
 <script lang="ts">
-  // 搜索框。快速模式下只读、不在 Tab 序列里（按键由钩子转发），点一下请求进入搜索模式；
-  // 输入法组合、首个输入的上报都交给 PanelState。
+  // 普通 Quick 只读且走钩子；Activated 先挂载同一可编辑输入框，真实焦点就绪后开放取用。
+  // 数字等命令键由 PanelState 阻止默认输入，普通首字和输入法自然保留在此框中。
   import type { PanelState } from "../state.svelte";
 
   let { panel }: { panel: PanelState } = $props();
@@ -18,7 +18,8 @@
   spellcheck="false"
   autocomplete="off"
   onpointerdown={panel.searchPointer}
-  onbeforeinput={panel.reportFirstInput}
+  onbeforeinput={panel.beforeInput}
+  onblur={panel.inputBlur}
   oncompositionstart={panel.startComposition}
   oncompositionend={panel.endComposition}
 />

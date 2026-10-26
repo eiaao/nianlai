@@ -12,8 +12,8 @@
   class:selected={index === panel.selected}
   aria-pressed={index === panel.selected}
   tabindex="-1"
-  disabled={panel.busy || !panel.interactive}
-  onpointerenter={() => { if (panel.interactive && !panel.busy) panel.selected = index; }}
+  disabled={panel.busy || panel.awaitingRelease || !panel.interactive}
+  onpointerenter={() => { if (panel.interactive && !panel.busy && !panel.awaitingRelease) panel.selected = index; }}
   onpointerdown={(event) => event.preventDefault()}
   onclick={(event) => panel.choose(index, "paste", event)}
 >

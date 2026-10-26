@@ -36,6 +36,9 @@ impl Hooks {
     pub fn stop_inputs(&self, _: bool) -> Result<bool> {
         Ok(true)
     }
+    pub fn input_release_evidence(&self) -> &'static str {
+        "unsupported"
+    }
     pub fn synchronize(&self) -> bool {
         false
     }
@@ -127,6 +130,9 @@ pub mod paste {
     }
     pub fn keys_released() -> bool {
         true
+    }
+    pub fn key_state_counts() -> crate::platform::key_state::Counts {
+        Default::default()
     }
     pub fn replay(_: &[ReplayKey], _: usize, _: Instant) -> usize {
         0

@@ -7,6 +7,11 @@ import type { HistoryItem, HistorySnapshot, PanelInteraction, PasteMode, SearchS
 // 缺少后端确认时不猜权限或原输入控件是否恢复。
 export const COPIED_HINT = "已复制，请先点击目标输入位置，再按 Ctrl+V";
 
+type DomChoice = {
+  session: number; panelMode: "quick" | "search"; id: number | null; mode: PasteMode;
+  selection?: SearchSelection; code: string | null; downAt: number; released: boolean;
+};
+
 export const formatTime = (millis: number) => new Date(millis).toLocaleTimeString("zh-CN", { hour12: false });
 
 export class PanelState {
@@ -15,15 +20,21 @@ export class PanelState {
   mode = $state<"quick" | "search">("quick");
   interaction = $state<PanelInteraction>("quick");
   visible = $state(false);
-  interactive = $derived(this.visible && (this.interaction === "quick" || this.interaction === "activated"));
+  busy = $state(false);
+  domFocus = $state<"idle" | "pending" | "ready" | "failed">("idle");
+  searchStarting = $state(false);
+  searchStartFailed = $state(false);
+  awaitingRelease = $state(false);
+  inputSurface = $derived(this.visible && (this.interaction === "quick" || this.interaction === "activated"));
+  interactive = $derived(this.inputSurface && (this.interaction === "quick" || this.domFocus === "ready") && !this.searchStarting && !this.searchStartFailed);
   activationRetrying = $state(false);
   // 实验 NIANLAI_G0_SEARCHBOX_FOCUS（后端随 panel:shown 下发）：开着时快速模式也让搜索框持有页面内焦点。
-  // 只用于不激活的普通 quick；activated 初始列表保持只读，数字仍由钩子处理。
+  // 只用于不激活的普通 quick；activated 使用同一真实输入框承载首字和输入法。
   searchBoxFocus = $state(false);
-  locked = $derived(!this.interactive || (this.mode === "quick" && !this.searchBoxFocus));
+  locked = $derived(!this.inputSurface || (this.interaction === "quick" && this.mode === "quick" && !this.searchBoxFocus)
+    || (this.interaction === "activated" && this.busy));
   selected = $state(0);
   session = $state(0);
-  busy = $state(false);
   timing = $state<Timing | null>(null);
   message = $state("");
   version = $state("");
@@ -49,6 +60,14 @@ export class PanelState {
   private foregroundSnapshot: { session: number; revision: number; receivedAt: number } | null = null;
   private selectionNonce = 0;
   private selectionEvents = new WeakSet<KeyboardEvent | MouseEvent>();
+  private domEvents = new WeakSet<KeyboardEvent>();
+  private heldDomKeys = new Map<string, number>();
+  private pendingDom: DomChoice | null = null;
+  private focusGeneration = 0;
+  private focusTimer: ReturnType<typeof setTimeout> | null = null;
+  private focusFrames = new Set<number>();
+  private searchTimer: ReturnType<typeof setTimeout> | null = null;
+  private searchAfterFocus = false;
 
   /** 登记面板的两个副作用（搜索、选中项夹紧和滚动）。必须在根组件初始化期间调用，顺序不要换。 */
   watch() {
@@ -124,6 +143,160 @@ export class PanelState {
     }
   }
 
+  private inputHasFocus() {
+    return document.hasFocus() && document.activeElement === this.input;
+  }
+
+  private clearDomChoice(clearHeld = false) {
+    this.pendingDom = null;
+    this.awaitingRelease = false;
+    if (clearHeld) this.heldDomKeys.clear();
+    if (["请松开按键以完成取用。", "请松开按键以收起面板。"].includes(this.message)) this.message = "";
+  }
+
+  private cancelDomFocus() {
+    this.focusGeneration += 1;
+    if (this.focusTimer !== null) clearTimeout(this.focusTimer);
+    this.focusTimer = null;
+    this.focusFrames.forEach(cancelAnimationFrame);
+    this.focusFrames.clear();
+  }
+
+  private finishDomFocus(ready: boolean, generation: number) {
+    if (generation !== this.focusGeneration || !this.visible || this.interaction !== "activated") return;
+    const openSearch = ready && this.searchAfterFocus;
+    this.searchAfterFocus = false;
+    this.cancelDomFocus();
+    this.domFocus = ready ? "ready" : "failed";
+    if (!ready) this.clearDomChoice(true);
+    if (openSearch) this.requestActivatedSearch();
+  }
+
+  private prepareDomFocus(openSearch = false) {
+    if (!this.visible || this.interaction !== "activated" || this.busy) return;
+    this.cancelDomFocus();
+    this.clearDomChoice(true);
+    this.domFocus = "pending";
+    this.searchAfterFocus = openSearch;
+    const generation = this.focusGeneration;
+    const session = this.session;
+    const current = () => generation === this.focusGeneration && this.visible && this.session === session && this.interaction === "activated";
+    const frame = (callback: () => void) => {
+      const id = requestAnimationFrame(() => { this.focusFrames.delete(id); if (current()) callback(); });
+      this.focusFrames.add(id);
+    };
+    // 动画帧停滞也必须结束准备态，失败后由鼠标本地重试，不冒充后端激活失败。
+    this.focusTimer = setTimeout(() => this.finishDomFocus(false, generation), 500);
+    void tick().then(() => {
+      if (!current()) return;
+      try { if (!this.inputHasFocus()) this.input?.focus({ preventScroll: true }); }
+      catch { this.finishDomFocus(false, generation); return; }
+      frame(() => frame(() => this.finishDomFocus(this.inputHasFocus(), generation)));
+    });
+  }
+
+  private ensureDomInput(event: Event) {
+    if (!this.visible || this.interaction !== "activated" || event.isTrusted !== true || event.target !== this.input || !this.inputHasFocus()) return false;
+    // 实际输入事件也能确认焦点；不再调用 focus，避免打断已经开始的组合。
+    if (this.domFocus !== "ready") this.finishDomFocus(true, this.focusGeneration);
+    return true;
+  }
+
+  private clearSearchTimer() {
+    if (this.searchTimer !== null) clearTimeout(this.searchTimer);
+    this.searchTimer = null;
+  }
+
+  private requestActivatedSearch() {
+    if (!this.visible || this.interaction !== "activated" || this.mode !== "quick" || this.busy
+      || this.searchStarting || this.searchStartFailed || !this.inputHasFocus()) return;
+    const session = this.session;
+    this.clearDomChoice();
+    this.searchStarting = true;
+    const failed = () => {
+      if (!this.visible || this.session !== session || this.mode !== "quick" || !this.searchStarting) return;
+      this.clearSearchTimer();
+      this.searchStarting = false;
+      this.searchStartFailed = true;
+      this.message = "未能进入搜索，请关闭面板后重新呼出。";
+    };
+    this.searchTimer = setTimeout(failed, 1000);
+    void ipc.startSearch(session).catch(failed);
+  }
+
+  retryDomFocus = (event: MouseEvent) => {
+    if (event.isTrusted === true && event.type === "click" && event.button === 0 && event.detail > 0
+      && this.visible && this.interaction === "activated" && !this.searchStartFailed) this.prepareDomFocus();
+  };
+
+  inputBlur = () => {
+    this.clearDomChoice(true);
+    if (this.visible && this.interaction === "activated") {
+      this.cancelDomFocus();
+      this.domFocus = "failed";
+    }
+    if (this.composing) { this.composing = false; this.compositionEnded = performance.now(); this.searchRevision += 1; }
+  };
+
+  windowBlur = () => this.inputBlur();
+
+  private domCode(event: KeyboardEvent) {
+    return event.code || `${event.key}:${event.location}`;
+  }
+
+  private observeModifiers(event: KeyboardEvent | MouseEvent) {
+    for (const [key, held] of [["Control", event.ctrlKey], ["Shift", event.shiftKey], ["Alt", event.altKey], ["Meta", event.metaKey]] as const) {
+      if (held) this.heldDomKeys.set(`@${key}`, Math.max(this.heldDomKeys.get(`@${key}`) ?? -Infinity, event.timeStamp));
+    }
+  }
+
+  private armDomChoice(choice: DomChoice) {
+    if (this.pendingDom) return;
+    this.pendingDom = choice;
+    this.awaitingRelease = true;
+    this.message = choice.id === null ? "请松开按键以收起面板。" : "请松开按键以完成取用。";
+    this.releaseDomChoice();
+  }
+
+  private releaseDomChoice() {
+    const choice = this.pendingDom;
+    if (!choice || !choice.released || this.heldDomKeys.size) return;
+    this.clearDomChoice();
+    if (!this.visible || this.session !== choice.session || this.interaction !== "activated" || !this.inputHasFocus() || this.composing) return;
+    // 关闭动作优先于复制，即使请求已在处理或搜索正在切换，也允许后端取消。
+    if (choice.id === null) { void this.command(() => ipc.hidePanel(choice.session), choice.session); return; }
+    if (this.mode !== choice.panelMode || !this.interactive || this.busy) return;
+    if (choice.selection && (!this.foregroundSnapshot || choice.selection.revision !== this.foregroundRevision)) {
+      this.message = "选择期间前台状态已变化，请重新选择条目。";
+      return;
+    }
+    const index = this.filtered.findIndex((item) => item.id === choice.id);
+    if (index < 0) { this.message = "条目已更新，请重新选择。"; return; }
+    this.selected = index;
+    this.busy = true;
+    void this.command(() => ipc.pasteItem(choice.session, choice.id!, choice.mode, choice.selection), choice.session);
+  }
+
+  keyup = (event: KeyboardEvent) => {
+    if (this.interaction !== "activated" || !this.ensureDomInput(event) || event.isTrusted !== true || this.domEvents.has(event)
+      || !Number.isFinite(event.timeStamp) || event.timeStamp > performance.now()) return;
+    this.domEvents.add(event);
+    const code = this.domCode(event);
+    // 迟到的任何释放事件都不能清除新一轮按下证据，修饰键也遵守同一时间边界。
+    if (event.timeStamp < (this.pendingDom?.downAt ?? -Infinity)
+      || event.timeStamp < (this.heldDomKeys.get(code) ?? -Infinity)) return;
+    this.heldDomKeys.delete(code);
+    for (const [key, held] of [["Control", event.ctrlKey], ["Shift", event.shiftKey], ["Alt", event.altKey], ["Meta", event.metaKey]] as const) {
+      if ((event.key === key || event.key === `${key}Graph`) && !held && event.timeStamp >= (this.heldDomKeys.get(`@${key}`) ?? -Infinity)) this.heldDomKeys.delete(`@${key}`);
+    }
+    if (this.pendingDom?.code === code) {
+      event.preventDefault();
+      if (event.timeStamp < this.pendingDom.downAt || event.isComposing || this.composing) this.clearDomChoice();
+      else this.pendingDom.released = true;
+    }
+    this.releaseDomChoice();
+  };
+
   // 回调一收到通知就保存同一单调时钟的时间。乱序/重复保留高水位，但挡住这之前已生成的 DOM 事件。
   private receiveForegroundRevision(revision: number, receivedAt: number) {
     if (!Number.isSafeInteger(revision) || revision < 0 || !Number.isFinite(receivedAt) || receivedAt < 0
@@ -133,6 +306,10 @@ export class PanelState {
     }
     this.foregroundRevision = Math.max(this.foregroundRevision, revision);
     this.foregroundSnapshot = { session: this.session, revision: this.foregroundRevision, receivedAt };
+    if (this.pendingDom?.selection && this.pendingDom.selection.revision !== this.foregroundRevision) {
+      this.clearDomChoice();
+      this.message = "选择期间前台状态已变化，请重新选择条目。";
+    }
   }
 
   private captureSelection(event?: KeyboardEvent | MouseEvent): SearchSelection | null {
@@ -169,14 +346,21 @@ export class PanelState {
     if (this.interaction === interaction) return;
     const enteringPassive = interaction === "passive" && this.interaction !== "passive";
     this.interaction = interaction;
+    this.clearDomChoice(true);
+    this.clearSearchTimer();
+    this.searchStarting = false;
+    this.searchStartFailed = false;
+    this.cancelDomFocus();
+    this.domFocus = "idle";
     if (interaction !== "quick") {
       this.searchRequest += 1;
       this.mode = "quick";
       this.searchBoxFocus = false;
       this.composing = false;
       this.firstInput = null;
-      this.input?.blur();
+      if (interaction !== "activated") this.input?.blur();
     }
+    if (interaction === "activated") this.prepareDomFocus();
     if (enteringPassive) { this.busy = true; this.message = "正在确认复制结果…"; }
   }
 
@@ -185,7 +369,7 @@ export class PanelState {
   };
 
   choose = async (index = this.selected, pasteMode: PasteMode = "paste", event?: KeyboardEvent | MouseEvent) => {
-    if (!this.visible || !this.interactive || this.busy || !this.filtered[index]) return;
+    if (!this.visible || !this.interactive || this.busy || this.pendingDom || !this.filtered[index]) return;
     // 第一次 await 之前固定全部请求字段；绝不在 IPC/读库返回后换用更新的条目或 revision。
     const session = this.session;
     const id = this.filtered[index].id;
@@ -194,6 +378,25 @@ export class PanelState {
     if (selection === null) {
       this.message = this.foregroundSnapshot ? "无法确认选择与前台状态的先后，请重新选择条目。" : "前台状态不可用，请关闭面板后重新呼出。";
       return;
+    }
+    if (this.interaction === "activated") {
+      if (!event || event.isTrusted !== true || !this.inputHasFocus()) return;
+      if (event.type === "keydown") {
+        const key = event as KeyboardEvent;
+        if (key.repeat || key.isComposing || this.composing || key.keyCode === 229
+          || performance.now() - this.compositionEnded < 50 || key.timeStamp - this.compositionEnded < 50) return;
+        this.observeModifiers(key);
+        this.heldDomKeys.set(this.domCode(key), key.timeStamp);
+        this.armDomChoice({ session, panelMode: this.mode, id, mode, selection, code: this.domCode(key), downAt: key.timeStamp, released: false });
+        return;
+      }
+      if (event.type !== "click" || (event as MouseEvent).button !== 0 || (event as MouseEvent).detail <= 0 || this.composing
+        || performance.now() - this.compositionEnded < 50 || event.timeStamp - this.compositionEnded < 50) return;
+      this.observeModifiers(event as MouseEvent);
+      if (this.heldDomKeys.size) {
+        this.armDomChoice({ session, panelMode: this.mode, id, mode, selection, code: null, downAt: event.timeStamp, released: true });
+        return;
+      }
     }
     this.selected = index;
     this.message = "";
@@ -213,13 +416,55 @@ export class PanelState {
       case "Enter": void this.choose(this.selected, "paste", event); break;
       case "Shift+Enter": void this.choose(this.selected, "copy", event); break;
       case "Ctrl+Enter": void this.choose(this.selected, "text", event); break;
-      case "Escape": this.close(); break;
+      case "Escape":
+        if (this.interaction === "activated" && event) this.armDomChoice({ session: this.session, panelMode: this.mode,
+          id: null, mode: "copy", code: this.domCode(event), downAt: event.timeStamp, released: false });
+        else this.close();
+        break;
       default: if (/^[1-9]$/.test(key)) void this.choose(Number(key) - 1, "paste", event);
     }
   };
 
-  // 搜索模式下面板有焦点，按键从页面来；快速模式的按键由钩子经 panel:key 转来，见 connect()。
+  // 普通 Quick 走钩子；Activated 在同一真实输入框中处理快速键和自然搜索输入。
   keydown = (event: KeyboardEvent) => {
+    if (this.interaction === "activated") {
+      if (!this.ensureDomInput(event) || event.type !== "keydown" || this.domEvents.has(event)
+        || !Number.isFinite(event.timeStamp) || event.timeStamp < 0 || event.timeStamp > performance.now()) return;
+      this.domEvents.add(event);
+      this.heldDomKeys.set(this.domCode(event), event.timeStamp);
+      this.observeModifiers(event);
+      if (event.isComposing || this.composing || event.keyCode === 229) { this.clearDomChoice(); return; }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        if (!event.repeat && performance.now() - this.compositionEnded >= 50 && event.timeStamp - this.compositionEnded >= 50) {
+          this.clearDomChoice();
+          this.armDomChoice({ session: this.session, panelMode: this.mode, id: null, mode: "copy",
+            code: this.domCode(event), downAt: event.timeStamp, released: false });
+        }
+        return;
+      }
+      if (this.busy || this.searchStartFailed) { event.preventDefault(); return; }
+      if (this.mode === "quick") {
+        if (this.searchStarting) return;
+        if ((!event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey && event.key === "/")
+          || (event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey && event.key.toLowerCase() === "f")) {
+          event.preventDefault();
+          if (!event.repeat) this.requestActivatedSearch();
+          return;
+        }
+        const unmodified = !event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey;
+        const action = event.key === "Enter" && !event.altKey && !event.metaKey && !(event.ctrlKey && event.shiftKey)
+          ? event.ctrlKey ? "Ctrl+Enter" : event.shiftKey ? "Shift+Enter" : "Enter"
+          : unmodified && (/^[1-9]$/.test(event.key) || ["Escape", "ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End"].includes(event.key)) ? event.key : null;
+        if (action) {
+          event.preventDefault();
+          const navigation = ["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End"].includes(action);
+          if (performance.now() - this.compositionEnded < 50 || event.timeStamp - this.compositionEnded < 50 || (!navigation && event.repeat)) return;
+          this.navigate(action, event);
+        } else if ((event.ctrlKey && ["p", "r", "+", "-", "=", "0"].includes(event.key.toLowerCase())) || ["F5", "F7"].includes(event.key)) event.preventDefault();
+        return;
+      }
+    }
     if (!this.visible || !this.interactive || this.mode !== "search") return;
     if (event.isComposing || this.composing || event.keyCode === 229) return;
     // 提交动作忽略长按重复；保留原 50ms 组合上屏保护和方向键长按导航。
@@ -253,7 +498,21 @@ export class PanelState {
     void ipc.reportSearchInput(this.session, event.inputType, event.isComposing, afterReadyMs).catch(() => {});
   };
 
+  beforeInput = (event: InputEvent) => {
+    this.reportFirstInput(event);
+    if (!this.visible || this.interaction !== "activated" || this.mode !== "quick") return;
+    if (this.busy || this.searchStartFailed || !this.ensureDomInput(event)) { event.preventDefault(); return; }
+    if (event.inputType.startsWith("insert")) this.requestActivatedSearch();
+  };
+
   searchPointer = (event: PointerEvent) => {
+    if (this.visible && this.interaction === "activated" && !this.busy && !this.searchStartFailed) {
+      if (event.isTrusted !== true) return;
+      event.preventDefault();
+      if (!this.inputHasFocus() || this.domFocus !== "ready") this.prepareDomFocus(true);
+      else this.requestActivatedSearch();
+      return;
+    }
     if (this.visible && this.interactive && this.mode === "quick" && !this.busy) {
       event.preventDefault();
       const session = this.session;
@@ -270,13 +529,22 @@ export class PanelState {
     finally { if (this.session === session) this.activationRetrying = false; }
   };
 
-  close = () => {
+  close = (event?: MouseEvent) => {
     if (!this.visible) return;
     const session = this.session;
+    this.clearDomChoice();
+    if (this.interaction === "activated" && event?.isTrusted === true && this.heldDomKeys.size && this.inputHasFocus()) {
+      this.armDomChoice({ session, panelMode: this.mode, id: null, mode: "copy", code: null, downAt: event.timeStamp, released: true });
+      return;
+    }
     void this.command(() => ipc.hidePanel(session), session);
   };
 
-  startComposition = () => { this.composing = true; };
+  startComposition = (event?: CompositionEvent) => {
+    this.composing = true;
+    this.clearDomChoice();
+    if (event && this.mode === "quick" && this.ensureDomInput(event)) this.requestActivatedSearch();
+  };
 
   endComposition = () => { this.composing = false; this.compositionEnded = performance.now(); this.searchRevision += 1; };
 
@@ -336,6 +604,13 @@ export class PanelState {
         this.composing = false;
         this.compositionEnded = -Infinity;
         this.firstInput = null;
+        this.clearDomChoice(true);
+        this.domEvents = new WeakSet();
+        this.cancelDomFocus();
+        this.domFocus = "idle";
+        this.clearSearchTimer();
+        this.searchStarting = false;
+        this.searchStartFailed = false;
         this.foregroundRevision = -1;
         this.foregroundSnapshot = null;
         this.selectionNonce = 0;
@@ -345,7 +620,8 @@ export class PanelState {
         this.timing = { session: payload.session, hotkeyToShowMs: payload.hotkeyToShowMs };
         const current = this.session;
         // 实验开着时等 readonly 摘掉再聚焦，让焦点一直停在搜索框；关着时照旧 blur，按键全交给钩子。
-        if (this.searchBoxFocus) void tick().then(() => { if (!disposed && this.visible && this.session === current && this.interaction === "quick" && this.mode === "quick") this.input?.focus({ preventScroll: true }); });
+        if (this.interaction === "activated") this.prepareDomFocus();
+        else if (this.searchBoxFocus) void tick().then(() => { if (!disposed && this.visible && this.session === current && this.interaction === "quick" && this.mode === "quick") this.input?.focus({ preventScroll: true }); });
         else this.input?.blur();
         frame(() => frame(() => {
           if (this.visible && this.session === current) void this.command(() => ipc.reportPainted(current));
@@ -359,22 +635,28 @@ export class PanelState {
         if (this.visible && payload.session === this.session) this.receiveForegroundRevision(payload.revision, receivedAt);
       });
       await subscribe(ipc.onPanelKey, (payload) => {
-        if (this.visible && payload.session === this.session && this.interactive && this.mode === "quick") this.navigate(payload.key);
+        if (this.visible && payload.session === this.session && this.interaction === "quick" && this.mode === "quick") this.navigate(payload.key);
       });
       await subscribe(ipc.onHistoryChanged, (payload) => {
         if (this.visible && payload.session === this.session) void refreshHistory();
       });
       await subscribe(ipc.onPanelMode, async (payload) => {
-        if (!this.visible || payload.session !== this.session || !this.interactive) return;
+        if (!this.visible || payload.session !== this.session || !this.inputSurface) return;
+        const activated = this.interaction === "activated";
+        if (this.pendingDom?.id !== null) this.clearDomChoice();
+        this.clearSearchTimer();
+        this.searchStarting = false;
+        this.searchStartFailed = false;
         this.mode = payload.mode;
         await tick();
-        if (disposed || !this.visible || payload.session !== this.session || !this.interactive || this.mode !== "search") return;
-        this.input?.focus({ preventScroll: true });
+        if (disposed || !this.visible || payload.session !== this.session || !this.inputSurface || this.mode !== "search") return;
+        if (!activated) this.input?.focus({ preventScroll: true });
+        else if (!this.inputHasFocus()) { this.domFocus = "failed"; return; }
         // 输入法要等 Blink 把“这是搜索框”报给浏览器进程、TSF 切到可编辑文档后才接管按键；没有用户手势时
         // 这份报告要等下一帧。等两帧再让后端补发首键，否则首字母可能绕过输入法直接上屏。
         await new Promise<void>((resolve) => frame(resolve));
         await new Promise<void>((resolve) => frame(resolve));
-        if (!disposed && this.visible && payload.session === this.session && this.interactive && this.mode === "search" && document.activeElement === this.input) {
+        if (!disposed && this.visible && payload.session === this.session && this.interactive && this.mode === "search" && document.activeElement === this.input && (!activated || document.hasFocus())) {
           this.firstInput = { session: payload.session, readyAt: performance.now() };
           const session = payload.session;
           await this.command(() => ipc.searchReady(session), session);
@@ -388,6 +670,12 @@ export class PanelState {
         this.composing = false;
         this.firstInput = null;
         this.foregroundSnapshot = null;
+        this.clearDomChoice(true);
+        this.cancelDomFocus();
+        this.domFocus = "idle";
+        this.clearSearchTimer();
+        this.searchStarting = false;
+        this.searchStartFailed = false;
         // 实验开着时焦点留在搜索框，下次呼出不用再聚焦。
         if (!this.searchBoxFocus) this.input?.blur();
       });
@@ -428,6 +716,10 @@ export class PanelState {
       if (!disposed) await this.command(() => ipc.frontendReady());
     };
     void initialize().catch(() => { this.message = "初始化失败，请重启样机并查看日志。"; });
-    return () => { disposed = true; this.searchRequest += 1; this.foregroundSnapshot = null; unlisten.forEach((stop) => stop()); frames.forEach(cancelAnimationFrame); };
+    return () => {
+      disposed = true; this.searchRequest += 1; this.foregroundSnapshot = null;
+      this.clearDomChoice(true); this.cancelDomFocus(); this.clearSearchTimer();
+      unlisten.forEach((stop) => stop()); frames.forEach(cancelAnimationFrame);
+    };
   };
 }

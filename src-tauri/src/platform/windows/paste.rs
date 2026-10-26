@@ -6,7 +6,7 @@ use crate::{
         keys::{Key, Match, Table},
         request::{Mode, Outcome, Request, conclude},
     },
-    platform::{REPLAY_WAIT, ReplayKey, Target},
+    platform::{REPLAY_WAIT, ReplayKey, Target, key_state},
 };
 use serde_json::{Value, json};
 use std::{
@@ -41,10 +41,10 @@ fn cancelled(request: &Request, stopping: &AtomicBool) -> bool {
     stopping.load(Ordering::Acquire) || request.cancelled.load(Ordering::Acquire)
 }
 pub fn keys_released() -> bool {
-    // 排除鼠标和通用修饰键别名，只查询低层键盘回调能配对的左右修饰键。
-    !(0x08..=0xFF)
-        .filter(|vk| !matches!(vk, 0x10..=0x12))
-        .any(held)
+    key_state::released(held)
+}
+pub fn key_state_counts() -> key_state::Counts {
+    key_state::Counts::sample(held)
 }
 fn input(vk: u16, scan: u16, flags: KEYBD_EVENT_FLAGS) -> INPUT {
     INPUT {
