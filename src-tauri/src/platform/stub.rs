@@ -118,6 +118,14 @@ pub mod window {
     pub fn restore(target: &Target) -> FocusResult {
         confirm(target)
     }
+    pub fn restore_for_paste(
+        target: &Target,
+        _: &crate::paste::permit::Permit,
+        _: &crate::log::Logger,
+        _: u64,
+    ) -> FocusResult {
+        confirm(target)
+    }
     pub fn confirm_strict(target: &Target) -> FocusResult {
         confirm(target)
     }

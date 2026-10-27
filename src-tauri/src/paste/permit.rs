@@ -94,6 +94,13 @@ impl Monitor {
         state.revision = state.revision.saturating_add(1);
         state.revision
     }
+    // 非预期回调无法证明前台归还，撤销现有许可；不与前台事件共用时间高水位。
+    pub fn uncertain(&self) -> u64 {
+        let mut state = self.state.lock().unwrap();
+        state.revision = state.revision.saturating_add(1);
+        state.quick_uncertain = true;
+        state.revision
+    }
 
     // 既保留首次外部锁存，又对每次后续事件计数；目标窗口也只有武装归还的一次转换能豁免。
     pub fn observe(&self, window: usize, time: u32, current: usize) -> Option<u64> {
@@ -210,10 +217,11 @@ pub struct Permit {
     monitor: Arc<Monitor>,
 }
 impl Permit {
+    pub fn current_revision(&self) -> u64 {
+        self.monitor.revision()
+    }
     pub fn revoke(&self) {
-        let mut state = self.monitor.state.lock().unwrap();
-        state.revision = state.revision.saturating_add(1);
-        state.quick_uncertain = true;
+        self.monitor.uncertain();
     }
     fn valid_state(&self, state: &State) -> bool {
         state.alive
@@ -423,6 +431,47 @@ mod tests {
         monitor.observe(10, 102, 10);
         monitor.observe(20, 103, 20);
         assert!(!permit.check(7, 9, Mode::Paste, &target(), 20));
+    }
+
+    #[test]
+    fn a_noncurrent_candidate_after_return_still_revokes_the_new_selection() {
+        let (monitor, mut session) = state();
+        // 历史候选事件由新主动选择覆盖，归还后的未知事件不能借此豁免。
+        monitor.observe(30, 100, 10);
+        let permit = select(&mut session, monitor.revision(), 1).unwrap();
+        assert!(permit.arm_return(10, 200));
+        monitor.observe(20, 201, 20);
+        assert!(permit.can_send(7, 9, Mode::Paste, &target(), 20));
+        monitor.observe(30, 202, 20);
+        assert!(!permit.can_send(7, 9, Mode::Paste, &target(), 20));
+    }
+
+    #[test]
+    fn a_real_switch_away_and_back_after_return_cannot_regain_permission() {
+        let (monitor, mut session) = state();
+        let permit = select(&mut session, 0, 1).unwrap();
+        assert!(permit.arm_return(10, 100));
+        monitor.observe(20, 101, 20);
+        monitor.observe(40, 102, 40);
+        monitor.observe(20, 103, 20);
+        assert!(!permit.can_send(7, 9, Mode::Paste, &target(), 20));
+    }
+
+    #[test]
+    fn an_unrelated_callback_cannot_confirm_an_armed_return_or_poison_event_time() {
+        let (monitor, mut session) = state();
+        let permit = select(&mut session, 0, 1).unwrap();
+        assert!(permit.arm_return(10, 100));
+        assert_eq!(monitor.uncertain(), 1);
+        assert!(!permit.can_send(7, 9, Mode::Paste, &target(), 20));
+        monitor.observe(20, 101, 20);
+        assert!(!permit.can_send(7, 9, Mode::Paste, &target(), 20));
+        assert_eq!(monitor.state.lock().unwrap().last_event, Some(101));
+        assert!(
+            !session
+                .quick(9, Mode::Paste)
+                .can_send(7, 9, Mode::Paste, &target(), 20)
+        );
     }
 
     #[test]

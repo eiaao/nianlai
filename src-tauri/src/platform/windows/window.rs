@@ -363,21 +363,76 @@ fn original_control_valid(target: &Target) -> bool {
         && class_name(target.focus) == target.focus_class
 }
 
-pub fn restore(target: &Target) -> FocusResult {
-    if !valid(target) {
-        return confirm(target);
-    }
-    let foreground_result = activate(target.window);
-    if foreground_result.success && original_control_valid(target) {
-        unsafe {
-            let focus = hwnd(target.focus);
-            let _attached = Attached::new(target.thread);
-            let _ = SetFocus(Some(focus));
+struct RestoreBackend<'a, G> {
+    target: &'a Target,
+    permitted: G,
+}
+impl<G: Fn() -> bool> crate::platform::focus_restore::Backend for RestoreBackend<'_, G> {
+    type Attachment = Attached;
+    fn snapshot(&mut self) -> crate::platform::focus_restore::Snapshot {
+        crate::platform::focus_restore::Snapshot {
+            focus: confirm(self.target),
+            target_valid: valid(self.target),
+            original_valid: original_control_valid(self.target),
+            permitted: (self.permitted)(),
         }
     }
-    let mut result = confirm(target);
-    result.foreground.path = foreground_result.path;
-    result
+    fn activate(&mut self) -> ForegroundResult {
+        activate(self.target.window)
+    }
+    fn attach(&mut self) -> Attached {
+        Attached::new(self.target.thread)
+    }
+    fn set_focus(&mut self) {
+        unsafe {
+            let _ = SetFocus(Some(hwnd(self.target.focus)));
+        }
+    }
+}
+
+pub fn restore(target: &Target) -> FocusResult {
+    crate::platform::focus_restore::run(
+        &mut RestoreBackend {
+            target,
+            permitted: || true,
+        },
+        |_, _| {},
+    )
+}
+
+pub fn restore_for_paste(
+    target: &Target,
+    permit: &crate::paste::permit::Permit,
+    logger: &crate::log::Logger,
+    session: u64,
+) -> FocusResult {
+    // 同一 opt-in 开关控制所有归还取证；默认路径不生成阶段 JSON。
+    let started =
+        super::foreground::enabled(std::env::var_os("NIANLAI_G0_FOREGROUND_TRACE").as_deref())
+            .then(std::time::Instant::now);
+    crate::platform::focus_restore::run(
+        &mut RestoreBackend {
+            target,
+            permitted: || {
+                let current = foreground();
+                permit.current(target, current) || permit.return_pending(target, current)
+            },
+        },
+        |stage, snapshot| {
+            if let Some(started) = started {
+                logger.event("paste_restore_phase", serde_json::json!({
+                    "session":session,"stage":stage,
+                    "elapsed_ms":started.elapsed().as_secs_f64()*1000.0,
+                    "revision":permit.current_revision(),
+                    "target_valid":snapshot.target_valid,
+                    "target_foreground":snapshot.focus.foreground.success,
+                    "original_control_valid":snapshot.original_valid,
+                    "original_focus_restored":snapshot.original_valid && snapshot.focus.focus_restored,
+                    "focus_unknown":snapshot.focus.focus_unknown,"permitted":snapshot.permitted,
+                }));
+            }
+        },
+    )
 }
 
 pub fn rect(window: usize) -> Result<RECT> {

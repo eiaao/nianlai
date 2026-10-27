@@ -612,26 +612,41 @@ pub struct Hooks {
 
 unsafe extern "system" fn foreground_changed(
     _: HWINEVENTHOOK,
-    _: u32,
+    kind: u32,
     hwnd: windows::Win32::Foundation::HWND,
-    _: i32,
-    _: i32,
+    object: i32,
+    child: i32,
     event_thread: u32,
     event_time: u32,
 ) {
     CONTEXT.with(|context| {
         if let Some(context) = context.borrow().as_ref() {
-            let latched = !hwnd.is_invalid()
+            let event = foreground::Event {
+                kind,
+                window: hwnd.0 as usize,
+                object,
+                child,
+                thread: event_thread,
+                time: event_time,
+            };
+            let expected = event.is_foreground();
+            let latched = expected
+                && !hwnd.is_invalid()
                 && foreground::record_first_external(
                     &context.switched,
                     hwnd.0 as usize,
                     context.window,
                     context.target,
                 );
-            if let Some(revision) =
+            // 精确注册的 hook 理论上只收到前台窗口事件；意外种类不能冒充归还。
+            let revision = if expected {
                 context
                     .monitor
-                    .observe(hwnd.0 as usize, event_time, super::window::foreground())
+                    .observe(event.window, event.time, super::window::foreground())
+            } else {
+                Some(context.monitor.uncertain())
+            };
+            if let Some(revision) = revision
                 && context
                     .sender
                     .try_send(HookEvent::ForegroundRevision(revision))
@@ -641,7 +656,7 @@ unsafe extern "system" fn foreground_changed(
                 context.monitor.stopped();
             }
             if let Some(trace) = &context.foreground_trace {
-                trace.record(hwnd.0 as usize, event_thread, event_time, latched);
+                trace.record(event, latched);
             }
         }
     });
@@ -1473,6 +1488,120 @@ impl Drop for Hooks {
 mod tests {
     use super::*;
 
+    fn test_context(sender: mpsc::SyncSender<HookEvent>, monitor: Arc<Monitor>) -> Context {
+        let (replay, _) = mpsc::sync_channel(1);
+        Context {
+            sender,
+            window: 0,
+            target: 0,
+            target_focus: 0,
+            switched: Arc::new(AtomicUsize::new(0)),
+            monitor,
+            restricted: None,
+            draining: false,
+            drain_passed: [false; 256],
+            drain_snapshot_counts: key_state::Counts::default(),
+            drain_ignored_callbacks: key_state::Counts::default(),
+            drain_requires_recheck: false,
+            drain_recheck_available: false,
+            drain_recheck_samples: 0,
+            drain_rechecked_releases: 0,
+            drain_rechecked_presses: 0,
+            foreground_trace: None,
+            bounds: RECT::default(),
+            hotkey: (V, Modifiers::CONTROL),
+            replay,
+            dropped: Arc::new(AtomicUsize::new(0)),
+            pending: None,
+            swallowed: [false; 256],
+            release_action: [None; 256],
+            hint: None,
+            hint_state: HintState::new(),
+        }
+    }
+
+    #[test]
+    fn unexpected_callback_revokes_instead_of_confirming_the_armed_return() {
+        use crate::paste::{
+            permit::{Selection, Session},
+            request::Mode,
+        };
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                CONTEXT.with(|context| *context.borrow_mut() = None);
+            }
+        }
+        for (kind, object, child) in [
+            (EVENT_OBJECT_FOCUS, 0, 0),
+            (EVENT_SYSTEM_FOREGROUND, -4, 0),
+            (EVENT_SYSTEM_FOREGROUND, 0, 1),
+        ] {
+            let monitor = Arc::new(Monitor::new(10, 20));
+            monitor.started();
+            let target = crate::platform::Target {
+                window: 20,
+                focus: 21,
+                thread: 2,
+                process: 3,
+                focus_class: "Edit".into(),
+                ..Default::default()
+            };
+            let mut session = Session::new(7, target.clone(), monitor.clone());
+            let permit = session
+                .select(
+                    7,
+                    9,
+                    Mode::Paste,
+                    Selection {
+                        revision: 0,
+                        nonce: 1,
+                    },
+                    10,
+                )
+                .unwrap();
+            assert!(permit.arm_return(10, 100));
+            let (sender, events) = mpsc::sync_channel(1);
+            let mut context = test_context(sender, monitor.clone());
+            context.window = 10;
+            context.target = 20;
+            CONTEXT.with(|slot| {
+                assert!(slot.borrow().is_none());
+                *slot.borrow_mut() = Some(context);
+            });
+            let _reset = Reset;
+            // 非预期分支不查询桌面；大时间戳也不能污染前台事件的排序。
+            unsafe {
+                foreground_changed(
+                    HWINEVENTHOOK::default(),
+                    kind,
+                    super::super::window::hwnd(20),
+                    object,
+                    child,
+                    2,
+                    u32::MAX,
+                );
+            }
+            assert!(matches!(
+                events.try_recv(),
+                Ok(HookEvent::ForegroundRevision(1))
+            ));
+            assert_eq!(monitor.revision(), 1);
+            monitor.observe(20, 101, 20);
+            assert!(!permit.can_send(7, 9, Mode::Paste, &target, 20));
+            CONTEXT.with(|slot| {
+                assert_eq!(
+                    slot.borrow()
+                        .as_ref()
+                        .unwrap()
+                        .switched
+                        .load(Ordering::Acquire),
+                    0
+                )
+            });
+        }
+    }
+
     #[test]
     fn current_thread_input_desktop_query_is_available_readonly() {
         let receiving_input = thread_input_desktop_receiving_input()
@@ -2021,35 +2150,9 @@ mod tests {
     fn original_keys_and_full_event_queue_keep_close_pending() {
         for mode in [HintMode::Quick, HintMode::Search] {
             let (sender, events) = mpsc::sync_channel(1);
-            let (replay, _) = mpsc::sync_channel(1);
-            let mut context = Context {
-                sender,
-                window: 0,
-                target: 0,
-                target_focus: 0,
-                switched: Arc::new(AtomicUsize::new(0)),
-                monitor: Arc::new(Monitor::new(0, 0)),
-                restricted: None,
-                draining: false,
-                drain_passed: [false; 256],
-                drain_snapshot_counts: key_state::Counts::default(),
-                drain_ignored_callbacks: key_state::Counts::default(),
-                drain_requires_recheck: false,
-                drain_recheck_available: false,
-                drain_recheck_samples: 0,
-                drain_rechecked_releases: 0,
-                drain_rechecked_presses: 0,
-                foreground_trace: None,
-                bounds: RECT::default(),
-                hotkey: (V, Modifiers::CONTROL),
-                replay,
-                dropped: Arc::new(AtomicUsize::new(0)),
-                pending: Some(Instant::now()),
-                swallowed: [false; 256],
-                release_action: [None; 256],
-                hint: Some(mode),
-                hint_state: HintState::new(),
-            };
+            let mut context = test_context(sender, Arc::new(Monitor::new(0, 0)));
+            context.pending = Some(Instant::now());
+            context.hint = Some(mode);
             context.swallowed[V as usize] = true;
             // 真正调用停留入口：原键的重复直接吞掉，不再读取当前修饰键重新分类。
             assert_eq!(context.hint_key(V, true, mode), Some(true));

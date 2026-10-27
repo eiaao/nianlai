@@ -11,6 +11,21 @@ use windows::Win32::{System::SystemInformation::GetTickCount, UI::WindowsAndMess
 
 const TRACE_LIMIT: usize = 32;
 
+#[derive(Clone, Copy)]
+pub(super) struct Event {
+    pub kind: u32,
+    pub window: usize,
+    pub object: i32,
+    pub child: i32,
+    pub thread: u32,
+    pub time: u32,
+}
+impl Event {
+    pub(super) fn is_foreground(self) -> bool {
+        self.kind == EVENT_SYSTEM_FOREGROUND && self.object == 0 && self.child == 0
+    }
+}
+
 // 保留原策略：第一次外部切换一直保留到本次钩子结束，返回面板不清除。
 pub(super) fn record_first_external(
     switched: &AtomicUsize,
@@ -26,7 +41,7 @@ pub(super) fn record_first_external(
             .is_ok()
 }
 
-fn enabled(value: Option<&OsStr>) -> bool {
+pub(super) fn enabled(value: Option<&OsStr>) -> bool {
     value == Some(OsStr::new("1"))
 }
 
@@ -87,29 +102,27 @@ impl Trace {
         })
     }
 
-    pub(super) fn record(
-        &self,
-        event_window: usize,
-        event_thread: u32,
-        event_time: u32,
-        latched: bool,
-    ) {
+    pub(super) fn record(&self, event: Event, latched: bool) {
         match self.budget.next() {
             Slot::Event(sequence) => {
                 // 只投递元数据任务；UIA/IMM 查询由单一后台线程执行，不进入钩子回调。
-                self.association
-                    .record(sequence, event_window, event_thread, event_time);
+                if event.is_foreground() {
+                    self.association
+                        .record(sequence, event.window, event.thread, event.time);
+                }
                 // WinEvent 时间使用开机毫秒计数，不能当成 UTC；wrapping_sub 处理 32 位回绕。
-                let delay = unsafe { GetTickCount() }.wrapping_sub(event_time);
+                let delay = unsafe { GetTickCount() }.wrapping_sub(event.time);
                 let current = window::foreground();
                 self.logger.event(
                     "foreground_trace",
                     json!({"session":self.session,"sequence":sequence,
-                        "win_event_time_ms":event_time,"delivery_delay_ms":delay,
-                        "event_thread":event_thread,"first_external_latched":latched,
-                        "event_window":self.snapshot(event_window),
+                        "win_event":event.kind,"object_id":event.object,"child_id":event.child,
+                        "expected_foreground_event":event.is_foreground(),
+                        "win_event_time_ms":event.time,"delivery_delay_ms":delay,
+                        "event_thread":event.thread,"first_external_latched":latched,
+                        "event_window":self.snapshot(event.window),
                         "current_window":self.snapshot(current),
-                        "event_is_current":event_window == current}),
+                        "event_is_current":event.window == current}),
                 );
             }
             Slot::Truncated => self.logger.event(
@@ -166,6 +179,34 @@ impl Trace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_exact_foreground_window_event_is_expected() {
+        let event = Event {
+            kind: EVENT_SYSTEM_FOREGROUND,
+            window: 20,
+            object: 0,
+            child: 0,
+            thread: 2,
+            time: 100,
+        };
+        assert!(event.is_foreground());
+        assert!(
+            !Event {
+                kind: EVENT_OBJECT_FOCUS,
+                ..event
+            }
+            .is_foreground()
+        );
+        assert!(
+            !Event {
+                object: -4,
+                ..event
+            }
+            .is_foreground()
+        );
+        assert!(!Event { child: 1, ..event }.is_foreground());
+    }
 
     #[test]
     fn panel_target_and_empty_events_do_not_mark_a_switch() {

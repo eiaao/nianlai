@@ -1,6 +1,7 @@
 use serde::Serialize;
 use std::time::{Duration, Instant};
 
+pub(crate) mod focus_restore;
 pub mod key_state;
 
 // 切到搜索模式时补发首键的总等待上限。前端聚焦后还要等两帧让输入法接管，

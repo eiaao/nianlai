@@ -1181,11 +1181,15 @@ impl Panel {
                             if window::tick_count() != armed_at
                                 && requested.elapsed() < REPLAY_WAIT
                                 && !app.state::<Controller>().stopping.load(Ordering::Acquire)
-                                && permit.as_ref().is_some_and(|permit| {
-                                    permit.return_pending(&self.target, window::foreground())
-                                })
+                                && let Some(permit) = permit.as_ref()
+                                && permit.return_pending(&self.target, window::foreground())
                             {
-                                focus = window::restore(&self.target);
+                                focus = window::restore_for_paste(
+                                    &self.target,
+                                    permit,
+                                    logger,
+                                    session,
+                                );
                             } else if let Some(permit) = permit.as_ref() {
                                 // 等待期间切走、到期或退出后只复制，不能让提前观察到的目标事件保留发送资格。
                                 permit.revoke();
