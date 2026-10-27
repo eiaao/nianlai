@@ -3,18 +3,23 @@ use std::{mem::size_of, path::Path};
 use tauri::WebviewWindow;
 use windows::{
     Win32::{
-        Foundation::{CloseHandle, GetLastError, HWND, POINT, RECT, SetLastError, WIN32_ERROR},
+        Foundation::{
+            CloseHandle, GetLastError, HANDLE, HWND, POINT, RECT, SetLastError, WIN32_ERROR,
+        },
         Graphics::Gdi::{
             ClientToScreen, GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY,
             MONITORINFO, MonitorFromPoint,
         },
-        System::Threading::{
-            AttachThreadInput, GetCurrentThreadId, OpenProcess, PROCESS_NAME_WIN32,
-            PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+        System::{
+            StationsAndDesktops::{GetThreadDesktop, GetUserObjectInformationW, UOI_IO},
+            Threading::{
+                AttachThreadInput, GetCurrentThreadId, OpenProcess, PROCESS_NAME_WIN32,
+                PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+            },
         },
         UI::{
             HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI},
-            Input::KeyboardAndMouse::SetFocus,
+            Input::KeyboardAndMouse::{IsWindowEnabled, SetFocus},
             WindowsAndMessaging::*,
         },
     },
@@ -35,6 +40,22 @@ pub fn foreground() -> usize {
 }
 pub fn tick_count() -> u32 {
     unsafe { windows::Win32::System::SystemInformation::GetTickCount() }
+}
+
+pub(super) fn thread_input_desktop_receiving_input() -> windows::core::Result<bool> {
+    unsafe {
+        // GetThreadDesktop 返回借用句柄，API 明确禁止调用 CloseDesktop；UOI_IO 直接证明它正接收输入。
+        let desktop = GetThreadDesktop(GetCurrentThreadId())?;
+        let mut receiving_input = 0i32;
+        GetUserObjectInformationW(
+            HANDLE(desktop.0),
+            UOI_IO,
+            Some(std::ptr::addr_of_mut!(receiving_input).cast()),
+            size_of::<i32>() as u32,
+            None,
+        )?;
+        Ok(receiving_input != 0)
+    }
 }
 
 pub fn capture() -> Target {
@@ -363,9 +384,40 @@ fn original_control_valid(target: &Target) -> bool {
         && class_name(target.focus) == target.focus_class
 }
 
+pub fn native_control_valid(target: &Target) -> bool {
+    if !valid(target)
+        || !original_control_valid(target)
+        || !crate::paste::native::standard_edit(&target.focus_class)
+        || target.thread == unsafe { GetCurrentThreadId() }
+    {
+        return false;
+    }
+    unsafe {
+        let mut control = hwnd(target.focus);
+        if !IsWindowUnicode(control).as_bool()
+            || !IsWindowVisible(control).as_bool()
+            || GetWindowLongPtrW(control, GWL_STYLE) & ES_READONLY as isize != 0
+        {
+            return false;
+        }
+        // 子窗口自己的 enabled 位不足以证明父容器可交互；逐级检查到捕获的原窗口。
+        for _ in 0..64 {
+            if control.is_invalid() || !IsWindowEnabled(control).as_bool() {
+                return false;
+            }
+            if control == hwnd(target.window) {
+                return true;
+            }
+            control = GetAncestor(control, GA_PARENT);
+        }
+    }
+    false
+}
+
 struct RestoreBackend<'a, G> {
     target: &'a Target,
     permitted: G,
+    direct_only: bool,
 }
 impl<G: Fn() -> bool> crate::platform::focus_restore::Backend for RestoreBackend<'_, G> {
     type Attachment = Attached;
@@ -378,7 +430,23 @@ impl<G: Fn() -> bool> crate::platform::focus_restore::Backend for RestoreBackend
         }
     }
     fn activate(&mut self) -> ForegroundResult {
-        activate(self.target.window)
+        if !(self.permitted)() || !valid(self.target) {
+            return ForegroundResult {
+                path: "permission_changed",
+                success: false,
+            };
+        }
+        if self.direct_only {
+            unsafe {
+                let _ = SetForegroundWindow(hwnd(self.target.window));
+            }
+            ForegroundResult {
+                path: "direct_only",
+                success: foreground() == self.target.window,
+            }
+        } else {
+            activate(self.target.window)
+        }
     }
     fn attach(&mut self) -> Attached {
         Attached::new(self.target.thread)
@@ -395,6 +463,7 @@ pub fn restore(target: &Target) -> FocusResult {
         &mut RestoreBackend {
             target,
             permitted: || true,
+            direct_only: false,
         },
         |_, _| {},
     )
@@ -405,22 +474,34 @@ pub fn restore_for_paste(
     permit: &crate::paste::permit::Permit,
     logger: &crate::log::Logger,
     session: u64,
+    direct_only: bool,
 ) -> FocusResult {
     // 同一 opt-in 开关控制所有归还取证；默认路径不生成阶段 JSON。
     let started =
         super::foreground::enabled(std::env::var_os("NIANLAI_G0_FOREGROUND_TRACE").as_deref())
             .then(std::time::Instant::now);
-    crate::platform::focus_restore::run(
-        &mut RestoreBackend {
-            target,
-            permitted: || {
-                let current = foreground();
-                permit.current(target, current) || permit.return_pending(target, current)
-            },
+    let mut backend = RestoreBackend {
+        target,
+        direct_only,
+        permitted: || {
+            if direct_only
+                && !crate::paste::native::input_desktop_ready(
+                    thread_input_desktop_receiving_input().ok(),
+                    || permit.revoke(),
+                )
+            {
+                return false;
+            }
+            if direct_only && !native_control_valid(target) {
+                return false;
+            }
+            let current = foreground();
+            permit.current(target, current) || permit.return_pending(target, current)
         },
-        |stage, snapshot| {
-            if let Some(started) = started {
-                logger.event("paste_restore_phase", serde_json::json!({
+    };
+    let observe = |stage, snapshot: crate::platform::focus_restore::Snapshot| {
+        if let Some(started) = started {
+            logger.event("paste_restore_phase", serde_json::json!({
                     "session":session,"stage":stage,
                     "elapsed_ms":started.elapsed().as_secs_f64()*1000.0,
                     "revision":permit.current_revision(),
@@ -430,9 +511,13 @@ pub fn restore_for_paste(
                     "original_focus_restored":snapshot.original_valid && snapshot.focus.focus_restored,
                     "focus_unknown":snapshot.focus.focus_unknown,"permitted":snapshot.permitted,
                 }));
-            }
-        },
-    )
+        }
+    };
+    if direct_only {
+        crate::platform::focus_restore::run_direct(&mut backend, observe)
+    } else {
+        crate::platform::focus_restore::run(&mut backend, observe)
+    }
 }
 
 pub fn rect(window: usize) -> Result<RECT> {

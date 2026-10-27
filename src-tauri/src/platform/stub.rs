@@ -123,11 +123,15 @@ pub mod window {
         _: &crate::paste::permit::Permit,
         _: &crate::log::Logger,
         _: u64,
+        _: bool,
     ) -> FocusResult {
         confirm(target)
     }
     pub fn confirm_strict(target: &Target) -> FocusResult {
         confirm(target)
+    }
+    pub fn native_control_valid(_: &Target) -> bool {
+        false
     }
 }
 pub mod paste {
@@ -154,7 +158,7 @@ pub mod paste {
         _: &crate::paste::keys::Table,
         _: &super::clipboard::Service,
         _: &std::sync::atomic::AtomicBool,
-        _: &dyn Fn(),
+        _: crate::paste::request::Callbacks<'_>,
         _: Option<&std::path::Path>,
     ) -> serde_json::Value {
         serde_json::json!({"paste_result":null,"clipboard_written":false,"reason":"unsupported"})

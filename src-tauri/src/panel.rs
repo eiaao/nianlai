@@ -5,7 +5,7 @@ use crate::{
     paste::{
         keys::Table,
         permit::{Monitor, Permit, Selection, Session as PermitSession, reliable_control},
-        request::{Mode as PasteMode, Request},
+        request::{Callbacks, Mode as PasteMode, Request, RestorePolicy},
     },
     platform::{self, HintEnd, HookEvent, Hooks, REPLAY_WAIT, Target, ime, paste, webview, window},
     resuspend,
@@ -96,6 +96,7 @@ struct Hint {
     dwell: Option<Duration>,
     // 停留是怎么结束的（M0-6b）：收起前由各收起路径记下，写进 elevated_hint_hidden 的 ended_by。
     ended_by: Option<&'static str>,
+    reason: &'static str,
 }
 
 // 粘贴前的预判：面板要不要先别收起。判断顺序和 paste::perform 一致——复制模式、目标失效、用户切走
@@ -252,6 +253,7 @@ pub enum Action {
         session: u64,
         permit: Option<Permit>,
         passive: bool,
+        policy: RestorePolicy,
         requested: Instant,
         reply: mpsc::SyncSender<platform::FocusResult>,
     },
@@ -427,6 +429,7 @@ fn return_for_paste(
     session: u64,
     permit: Option<Permit>,
     passive: bool,
+    policy: RestorePolicy,
 ) -> Option<platform::FocusResult> {
     let (reply, receiver) = mpsc::sync_channel(1);
     dispatch(
@@ -435,6 +438,7 @@ fn return_for_paste(
             session,
             permit,
             passive,
+            policy,
             requested: Instant::now(),
             reply,
         },
@@ -721,11 +725,11 @@ impl Panel {
         if let Some(hint) = self.hint.take()
             && let Some(dwell) = hint.dwell
         {
-            self.log(
-                logger,
-                "elevated_hint_hidden",
-                hint_ended_fields(dwell, hint.since.elapsed(), hint.ended_by),
-            );
+            self.log(logger, "elevated_hint_hidden", {
+                let mut fields = hint_ended_fields(dwell, hint.since.elapsed(), hint.ended_by);
+                fields["reason"] = json!(hint.reason);
+                fields
+            });
         }
         let foreground = window::foreground();
         let panel = window::handle(&self.window)?;
@@ -966,27 +970,29 @@ impl Panel {
         app: &AppHandle,
         logger: &Logger,
         dwell: Duration,
+        reason: &'static str,
     ) -> platform::Result<()> {
         let session = self.session;
         let app = app.clone();
         std::thread::Builder::new()
-            .name("elevated-hint".into())
+            .name("passive-hint".into())
             .spawn(move || {
                 std::thread::sleep(dwell);
                 let _ = dispatch(&app, Action::HintElapsed { session });
             })
-            .map_err(|error| format!("管理员提示计时线程启动失败：{error}"))?;
+            .map_err(|error| format!("被动提示计时线程启动失败：{error}"))?;
         self.hint = Some(Hint {
             since: Instant::now(),
             dwell: Some(dwell),
             ended_by: None,
+            reason,
         });
         // 已批准 A：归还后只保留被动反馈，不再承诺管理员目标下能截键或按键立即关闭。
         self.set_interaction(Interaction::Passive);
         window::no_activate(&self.window, true)?;
         // target_foreground 只记录此刻目标是否在前台，不把归还尝试当成已成功。
         self.log(logger, "elevated_hint_shown", json!({
-            "reason":"target_may_be_elevated","dwell_ms":dwell.as_millis() as u64,
+            "reason":reason,"dwell_ms":dwell.as_millis() as u64,
             "panel_mode":self.mode_name(),"target_foreground":window::foreground()==self.target.window,
             "hint_keys":false,"hint_keys_error":null,
         }));
@@ -1145,11 +1151,33 @@ impl Panel {
                 session,
                 permit,
                 passive,
+                policy,
                 requested,
                 reply,
             } => {
+                if session != self.session || !self.pasting || self.mode == Mode::Hidden {
+                    let _ = reply.send(platform::FocusResult {
+                        foreground: platform::ForegroundResult {
+                            path: "stale_request",
+                            success: false,
+                        },
+                        focus_restored: false,
+                        focus_unknown: true,
+                    });
+                    return Ok(());
+                }
                 let mut focus = window::confirm(&self.target);
                 if session == self.session && self.pasting && self.mode != Mode::Hidden {
+                    let native_unknown =
+                        matches!(policy, RestorePolicy::NativeAfterSubmit { unknown: true });
+                    if native_unknown && self.hint.is_none() {
+                        self.hint = Some(Hint {
+                            since: Instant::now(),
+                            dwell: None,
+                            ended_by: None,
+                            reason: "native_submission_unknown",
+                        });
+                    }
                     let foreground = window::foreground();
                     let can_restore = requested.elapsed() < REPLAY_WAIT
                         && !app.state::<Controller>().stopping.load(Ordering::Acquire)
@@ -1189,6 +1217,7 @@ impl Panel {
                                     permit,
                                     logger,
                                     session,
+                                    matches!(policy, RestorePolicy::NativeAfterSubmit { .. }),
                                 );
                             } else if let Some(permit) = permit.as_ref() {
                                 // 等待期间切走、到期或退出后只复制，不能让提前观察到的目标事件保留发送资格。
@@ -1359,6 +1388,7 @@ impl Panel {
                         since: Instant::now(),
                         dwell: None,
                         ended_by: None,
+                        reason: "target_may_be_elevated",
                     });
                 }
                 let hooks = self.hooks.take();
@@ -1412,18 +1442,32 @@ impl Panel {
                     let exports = history.exports();
                     let store_read_ms = read_started.elapsed().as_secs_f64()*1000.0;
                     let mut restored = None;
-                    if !restricted && !stopping.load(Ordering::Acquire) {
-                        if let Some(hooks) = hooks.as_ref() { hooks.synchronize(); }
-                        restored = return_for_paste(&app, session, permit.clone(), false);
-                    }
                     let sent = || { let _ = dispatch(&app, Action::PasteSent { session }); };
-                    let mut result = match loaded {
-                        Ok(Some(content)) => paste::execute(Request {
-                            session, target:target.clone(), panel:owner, record_id:id, content, mode, started,
-                            external_switch:external_switch || !drained, permit:permit.clone(), copy_only_reason, cancelled:cancelled.clone(),
-                        }, &keys, &clipboard, &stopping, &sent, exports.as_deref()),
-                        Ok(None) => json!({"clipboard_written":false,"reason":"record_missing"}),
-                        Err(code) => json!({"clipboard_written":false,"reason":"store_read_failed","error_code":code}),
+                    let synchronize = || hooks.as_ref().is_some_and(|hooks| hooks.synchronize());
+                    let mut result = {
+                        let restore = |policy| {
+                            if restricted || stopping.load(Ordering::Acquire) { return None; }
+                            if let Some(hooks) = hooks.as_ref() { hooks.synchronize(); }
+                            let passive = matches!(policy, RestorePolicy::NativeAfterSubmit { unknown: true });
+                            return_for_paste(&app, session, permit.clone(), passive, policy)
+                        };
+                        match loaded {
+                            Ok(Some(content)) => paste::execute(Request {
+                                session, target:target.clone(), panel:owner, record_id:id, content, mode, started,
+                                external_switch:external_switch || !drained, permit:permit.clone(), copy_only_reason, cancelled:cancelled.clone(),
+                            }, &keys, &clipboard, &stopping, Callbacks { on_sent: &sent, restore: &restore, synchronize: &synchronize }, exports.as_deref()),
+                            missing => {
+                                // 读库失败也要结束旧请求；主线程会再次检查会话，不能收起新的面板。
+                                let focus = restore(RestorePolicy::LegacyBeforeSubmit);
+                                let mut result = match missing {
+                                    Ok(None) => json!({"clipboard_written":false,"reason":"record_missing"}),
+                                    Err(code) => json!({"clipboard_written":false,"reason":"store_read_failed","error_code":code}),
+                                    Ok(Some(_)) => unreachable!(),
+                                };
+                                if let Some(focus) = focus { result["restore"] = json!(focus); }
+                                result
+                            }
+                        }
                     };
                     if !restricted {
                         result["input_cleanup"] = json!(if drained {
@@ -1437,7 +1481,7 @@ impl Panel {
                             hooks.as_ref().map_or("unavailable", Hooks::input_release_evidence)
                         } else { "cancelled_physical_release" });
                         if !stopping.load(Ordering::Acquire) {
-                            restored = return_for_paste(&app, session, if paired { permit } else { None }, copied);
+                            restored = return_for_paste(&app, session, if paired { permit } else { None }, copied, RestorePolicy::LegacyBeforeSubmit);
                         }
                         if copied {
                         let focus = window::confirm_strict(&target);
@@ -1485,6 +1529,20 @@ impl Panel {
                 if session == self.session {
                     self.pasting = false;
                     self.paste_cancel = None;
+                    // cleanup 回执超时也必须显示未知结果；不再尝试归还，也不允许用户误重试。
+                    let native_unknown = result["paste_result"] == "native_submission_unknown";
+                    if native_unknown
+                        && self.current(session)
+                        && result["request_cancelled"] != true
+                    {
+                        self.hint.get_or_insert(Hint {
+                            since: Instant::now(),
+                            dwell: None,
+                            ended_by: None,
+                            reason: "native_submission_unknown",
+                        });
+                        self.set_interaction(Interaction::Passive);
+                    }
                     // 预判时没收起的面板：按实际结论决定是停留提示还是现在收起。
                     let deferred = self.hint.take().is_some() && self.current(session);
                     let dwell = if deferred {
@@ -1512,7 +1570,16 @@ impl Panel {
                     }
                     if deferred {
                         match dwell {
-                            Some(dwell) => self.begin_hint(app, logger, dwell)?,
+                            Some(dwell) => self.begin_hint(
+                                app,
+                                logger,
+                                dwell,
+                                if native_unknown {
+                                    "native_submission_unknown"
+                                } else {
+                                    "target_may_be_elevated"
+                                },
+                            )?,
                             None => {
                                 // 预判要停留但结论不是"管理员、只复制"（期间目标关了、用户切走、记录没了）：
                                 // 不扩大停留范围，现在收起。

@@ -1,4 +1,4 @@
-use super::{foreground, paste::INPUT_MARKER};
+use super::{foreground, paste::INPUT_MARKER, window::thread_input_desktop_receiving_input};
 use crate::{
     log::Logger,
     paste::permit::Monitor,
@@ -21,10 +21,9 @@ use std::{
 };
 use tauri_plugin_global_shortcut::{Modifiers, Shortcut};
 use windows::Win32::{
-    Foundation::{HANDLE, HINSTANCE, LPARAM, LRESULT, RECT, WPARAM},
+    Foundation::{HINSTANCE, LPARAM, LRESULT, RECT, WPARAM},
     System::{
         LibraryLoader::GetModuleHandleW,
-        StationsAndDesktops::{GetThreadDesktop, GetUserObjectInformationW, UOI_IO},
         Threading::{GetCurrentProcessId, GetCurrentThreadId},
     },
     UI::{
@@ -1011,22 +1010,6 @@ fn drain_snapshot(swallowed: &[bool; 256], physical: impl Fn(u16) -> bool) -> [b
 }
 fn inputs_released(swallowed: &[bool; 256], passed: &[bool; 256]) -> bool {
     !swallowed.contains(&true) && !passed.contains(&true)
-}
-
-fn thread_input_desktop_receiving_input() -> windows::core::Result<bool> {
-    unsafe {
-        // GetThreadDesktop 返回借用句柄，API 明确禁止调用 CloseDesktop；UOI_IO 直接证明它正接收输入。
-        let desktop = GetThreadDesktop(GetCurrentThreadId())?;
-        let mut receiving_input = 0i32;
-        GetUserObjectInformationW(
-            HANDLE(desktop.0),
-            UOI_IO,
-            Some(std::ptr::addr_of_mut!(receiving_input).cast()),
-            size_of::<i32>() as u32,
-            None,
-        )?;
-        Ok(receiving_input != 0)
-    }
 }
 
 fn native_panel_input_readable(panel: usize) -> bool {

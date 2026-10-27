@@ -685,6 +685,11 @@ export class PanelState {
       });
       await subscribe(ipc.onPasteResult, (payload) => {
         if (!this.visible || payload.session !== this.session) return;
+        if (payload.paste_result === "native_submission_unknown") {
+          this.setInteraction("passive");
+          this.message = "粘贴结果未确认，请先检查目标，避免重复粘贴";
+          return;
+        }
         // 被动提示已归还前台，不承诺按键送达；只展示后端确认的提示，留明确鼠标关闭入口。
         if (payload.hint_dwell_ms) {
           this.setInteraction("passive");
@@ -698,6 +703,7 @@ export class PanelState {
           sent: payload.layer2?.timed_out ? "已发送粘贴指令，可能没粘进去" : "已发送粘贴指令",
           confirmed: "确认已粘贴",
           copied_only: payload.hint_message || COPIED_HINT,
+          native_submission_unknown: "粘贴结果未确认，请先检查目标，避免重复粘贴",
         };
         const evidence: string[] = [labels[payload.paste_result]];
         const conversion = payload.as_text?.conversion;

@@ -28,6 +28,21 @@ pub(crate) trait Backend {
 
 pub(crate) fn run(
     backend: &mut impl Backend,
+    observe: impl FnMut(&'static str, Snapshot),
+) -> FocusResult {
+    run_with_policy(backend, false, observe)
+}
+
+pub(crate) fn run_direct(
+    backend: &mut impl Backend,
+    observe: impl FnMut(&'static str, Snapshot),
+) -> FocusResult {
+    run_with_policy(backend, true, observe)
+}
+
+fn run_with_policy(
+    backend: &mut impl Backend,
+    direct_only: bool,
     mut observe: impl FnMut(&'static str, Snapshot),
 ) -> FocusResult {
     let before = backend.snapshot();
@@ -38,7 +53,8 @@ pub(crate) fn run(
     let activation = backend.activate();
     let mut snapshot = backend.snapshot();
     observe("after_activate", snapshot);
-    if activation.success && snapshot.may_focus() && !snapshot.focus.focus_restored {
+    if !direct_only && activation.success && snapshot.may_focus() && !snapshot.focus.focus_restored
+    {
         let attached = backend.attach();
         // 连接输入队列也可能促成目标自己的焦点恢复，或与用户切走同时发生。
         // 第二次快照仍安全且焦点确实缺失，才执行原有单次 SetFocus fallback。
@@ -149,6 +165,20 @@ mod tests {
         assert!(result.foreground.success && result.focus_restored);
         assert_eq!(result.foreground.path, "scripted_activation");
         script.assert_operations(&[Operation::Activate]);
+    }
+
+    #[test]
+    fn direct_cleanup_never_attaches_or_sets_focus_even_when_focus_is_missing() {
+        let mut script = Script::new([panel(), pending()]);
+        let result = run_direct(&mut script, |_, _| {});
+        assert!(result.foreground.success);
+        assert!(!result.focus_restored);
+        script.assert_operations(&[Operation::Activate]);
+        let mut before = panel();
+        before.permitted = false;
+        let mut script = Script::new([before]);
+        run_direct(&mut script, |_, _| {});
+        script.assert_operations(&[]);
     }
 
     #[test]

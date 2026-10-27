@@ -903,6 +903,22 @@ test("搜索选择快照与受限激活交互的反例", async (suite) => {
     assert.deepEqual(ipc.calls, [{ command: "hidePanel", session: 37 }]);
   });
 
+  await suite.test("原生命令结果未知始终被动锁定，提示先检查目标而非再次粘贴", async (context) => {
+    const { panel } = await createPanel(context, PanelState, ipc);
+    ipc.emit("paste-result", pasteResult({ paste_result: "native_submission_unknown", reason: "native_submission_unknown" }));
+    assert.equal(panel.interaction, "passive");
+    assert.equal(panel.busy, true);
+    assert.equal(panel.locked, true);
+    assert.equal(panel.message, "粘贴结果未确认，请先检查目标，避免重复粘贴");
+    assert.doesNotMatch(panel.message, /已复制|Ctrl\+V|已粘贴/);
+    keydown(panel, { key: "Enter" });
+    keyup(panel, { key: "Enter" });
+    await flush();
+    assert.deepEqual(ipc.calls, []);
+    ipc.emit("interaction", { session: 37, interaction: "activated" });
+    assert.equal(panel.interaction, "passive");
+  });
+
   await suite.test("没有 hint_message 时不把权限未知目标说成管理员", async (context) => {
     const { panel } = await createPanel(context, PanelState, ipc);
     ipc.emit("paste-result", pasteResult({ hint_dwell_ms: 3000 }));

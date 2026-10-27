@@ -22,7 +22,7 @@ export type PanelError = SessionEvent & { message: string };
 export type PasteMode = "paste" | "copy" | "text";
 export type SearchSelection = Readonly<{ revision: number; nonce: number }>;
 export type PasteResult = SessionEvent & {
-  paste_result: "copied" | "sent" | "confirmed" | "copied_only";
+  paste_result: "copied" | "sent" | "confirmed" | "copied_only" | "native_submission_unknown";
   reason: string | null;
   actual_key: string | null;
   layer2: { status: string; timed_out: boolean } | null;

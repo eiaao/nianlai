@@ -126,11 +126,32 @@ impl Table {
         }
         unreachable!("内置表总有末尾默认规则")
     }
+    pub fn is_builtin_default_ctrl_v(&self, selected: Match) -> bool {
+        self.builtin.last().is_some_and(|rule| {
+            rule.process.is_none()
+                && rule.class.is_none()
+                && rule.key == Key::CtrlV
+                && selected.source == "builtin"
+                && selected.index == self.builtin.len()
+                && selected.key == rule.key
+                && selected.as_text == rule.as_text
+        })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_strategy_requires_the_actual_builtin_default_not_a_matching_override() {
+        let (table, _) = Table::from_text(None);
+        assert!(table.is_builtin_default_ctrl_v(table.select("sample.exe", "Sample")));
+        assert!(!table.is_builtin_default_ctrl_v(table.select("Notepad.exe", "Edit")));
+        assert!(!table.is_builtin_default_ctrl_v(table.select("WindowsTerminal.exe", "Other")));
+        let (table, _) = Table::from_text(Some(r#"[{"key":"Ctrl+V"}]"#));
+        assert!(!table.is_builtin_default_ctrl_v(table.select("sample.exe", "Sample")));
+    }
 
     #[test]
     fn builtin_process_class_and_default_rules() {

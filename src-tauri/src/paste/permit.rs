@@ -58,6 +58,7 @@ struct State {
     returning: Option<Return>,
     quick_uncertain: bool,
     target_lost: bool,
+    selection_nonce: u64,
 }
 
 pub struct Monitor {
@@ -173,7 +174,7 @@ impl Session {
             return Err("selection_nonce_invalid");
         }
         self.last_nonce = selection.nonce;
-        let state = self.monitor.state.lock().unwrap();
+        let mut state = self.monitor.state.lock().unwrap();
         if !state.alive
             || state.target_lost
             || selection.revision != state.revision
@@ -181,12 +182,14 @@ impl Session {
         {
             return Err("selection_boundary_changed");
         }
+        state.selection_nonce = selection.nonce;
         Ok(Permit {
             session,
             record,
             mode,
             target: Identity::from(&self.target),
             source: Source::Selection(selection.revision),
+            nonce: selection.nonce,
             monitor: self.monitor.clone(),
         })
     }
@@ -197,6 +200,7 @@ impl Session {
             mode,
             target: Identity::from(&self.target),
             source: Source::Quick,
+            nonce: 0,
             monitor: self.monitor.clone(),
         }
     }
@@ -214,6 +218,7 @@ pub struct Permit {
     mode: Mode,
     target: Identity,
     source: Source,
+    nonce: u64,
     monitor: Arc<Monitor>,
 }
 impl Permit {
@@ -297,6 +302,30 @@ impl Permit {
             && (matches!(self.source, Source::Quick)
                 || state.returning.as_ref().is_some_and(|ret| ret.observed))
     }
+    // 原生提交在面板仍为前台时完成，不能借用要求目标前台的发键许可。
+    pub fn can_submit_native(
+        &self,
+        session: u64,
+        record: usize,
+        mode: Mode,
+        target: &Target,
+        foreground: usize,
+    ) -> bool {
+        if session != self.session
+            || record != self.record
+            || mode != self.mode
+            || mode == Mode::Copy
+            || Identity::from(target) != self.target
+            || !super::native::standard_edit(&target.focus_class)
+            || !reliable_control(target)
+            || foreground != self.monitor.panel
+            || !self.search()
+        {
+            return false;
+        }
+        let state = self.monitor.state.lock().unwrap();
+        self.valid_state(&state) && state.returning.is_none() && self.nonce == state.selection_nonce
+    }
     pub fn search(&self) -> bool {
         matches!(self.source, Source::Selection(_))
     }
@@ -335,6 +364,319 @@ mod tests {
     }
     fn select(session: &mut Session, revision: u64, nonce: u64) -> Result<Permit, &'static str> {
         session.select(7, 9, Mode::Paste, Selection { revision, nonce }, 10)
+    }
+
+    #[test]
+    fn native_permission_binds_selection_nonce_identity_and_the_unarmed_panel() {
+        let (monitor, mut session) = state();
+        let permit = select(&mut session, 0, 1).unwrap();
+        assert!(permit.can_submit_native(7, 9, Mode::Paste, &target(), 10));
+        assert!(!permit.can_submit_native(8, 9, Mode::Paste, &target(), 10));
+        assert!(!permit.can_submit_native(7, 8, Mode::Paste, &target(), 10));
+        assert!(!permit.can_submit_native(7, 9, Mode::Text, &target(), 10));
+        assert!(!permit.can_submit_native(7, 9, Mode::Paste, &target(), 20));
+        let mut replaced = target();
+        replaced.focus = 22;
+        assert!(!permit.can_submit_native(7, 9, Mode::Paste, &replaced, 10));
+        assert!(
+            !session
+                .quick(9, Mode::Paste)
+                .can_submit_native(7, 9, Mode::Paste, &target(), 10)
+        );
+        let newer = select(&mut session, monitor.revision(), 2).unwrap();
+        assert!(
+            !permit.can_submit_native(7, 9, Mode::Paste, &target(), 10),
+            "旧选择 nonce 不能复用"
+        );
+        assert!(newer.can_submit_native(7, 9, Mode::Paste, &target(), 10));
+        assert!(newer.arm_return(10, 100));
+        assert!(!newer.can_submit_native(7, 9, Mode::Paste, &target(), 10));
+    }
+
+    // 真实 Monitor/Permit、原生提交 runner 和 direct-only 归还组合重放；只替换平台副作用。
+    struct NativeReplay {
+        monitor: Arc<Monitor>,
+        permit: Permit,
+        target: Target,
+        current: usize,
+        operations: Vec<&'static str>,
+        change_during_write: Option<&'static str>,
+        change_after_submit: Option<&'static str>,
+        input_desktop: Option<bool>,
+        identity_valid: bool,
+        cancelled: bool,
+        after_submit_switch: bool,
+        submission: crate::paste::native::Submission,
+        attempted: usize,
+        queued_switch: bool,
+    }
+    impl NativeReplay {
+        fn new() -> Self {
+            let (monitor, mut session) = state();
+            monitor.observe(30, 100, 10); // 现场选择前的非当前候选事件。
+            let permit = select(&mut session, monitor.revision(), 1).unwrap();
+            Self {
+                monitor,
+                permit,
+                target: target(),
+                current: 10,
+                operations: Vec::new(),
+                change_during_write: None,
+                change_after_submit: None,
+                input_desktop: Some(true),
+                identity_valid: true,
+                cancelled: false,
+                after_submit_switch: false,
+                submission: crate::paste::native::Submission::Sent,
+                attempted: 0,
+                queued_switch: false,
+            }
+        }
+        fn change(&mut self, kind: &str) {
+            match kind {
+                "switch" => {
+                    self.queued_switch = true;
+                }
+                "destroy" => {
+                    self.monitor.target_destroyed();
+                }
+                "identity" => {
+                    self.identity_valid = false;
+                    self.target.focus = 22;
+                }
+                "stop" => {
+                    self.monitor.stopped();
+                    self.cancelled = true;
+                }
+                "cancel" => {
+                    self.cancelled = true;
+                    self.permit.revoke();
+                }
+                "desktop_inactive" => self.input_desktop = Some(false),
+                "desktop_unknown" => self.input_desktop = None,
+                _ => panic!("未知回放变化"),
+            }
+        }
+        fn cleanup(&mut self) {
+            if self.permit.arm_return(self.current, 200) {
+                crate::platform::focus_restore::run_direct(&mut ReplayFocus(self), |_, _| {});
+            }
+            self.operations.extend(["hide", "blur"]);
+            // 恢复/隐藏后再次产生现场 seq4；不豁免，也不能重写既有提交结果。
+            self.monitor.observe(30, 202, self.current);
+        }
+    }
+    struct ReplayFocus<'a>(&'a mut NativeReplay);
+    impl crate::platform::focus_restore::Backend for ReplayFocus<'_> {
+        type Attachment = ();
+        fn snapshot(&mut self) -> crate::platform::focus_restore::Snapshot {
+            let replay = &self.0;
+            crate::platform::focus_restore::Snapshot {
+                focus: crate::platform::FocusResult {
+                    foreground: crate::platform::ForegroundResult {
+                        path: "unchanged",
+                        success: replay.current == 20,
+                    },
+                    focus_restored: replay.current == 20,
+                    focus_unknown: false,
+                },
+                target_valid: replay.identity_valid,
+                original_valid: replay.identity_valid,
+                permitted: crate::paste::native::input_desktop_ready(replay.input_desktop, || {
+                    replay.permit.revoke();
+                }) && (replay.permit.current(&replay.target, replay.current)
+                    || replay.permit.return_pending(&replay.target, replay.current)),
+            }
+        }
+        fn activate(&mut self) -> crate::platform::ForegroundResult {
+            self.0.operations.push("activate");
+            self.0.current = 20;
+            self.0.monitor.observe(20, 201, 20);
+            crate::platform::ForegroundResult {
+                path: "direct_only",
+                success: true,
+            }
+        }
+        fn attach(&mut self) {
+            panic!("原生提交后的归还不得连接输入队列");
+        }
+        fn set_focus(&mut self) {
+            panic!("原生提交后的归还不得 SetFocus");
+        }
+    }
+    impl crate::paste::native::Backend for NativeReplay {
+        fn synchronize(&mut self) -> bool {
+            self.operations.push("fence");
+            if self.queued_switch {
+                self.monitor.observe(40, 150, 40);
+                self.monitor.observe(10, 151, 10);
+                self.queued_switch = false;
+            }
+            true
+        }
+        fn check(&mut self) -> Result<(), &'static str> {
+            self.operations.push("check");
+            let input_desktop =
+                crate::paste::native::input_desktop_ready(self.input_desktop, || {
+                    self.permit.revoke()
+                });
+            crate::paste::native::Conditions {
+                cancelled: self.cancelled,
+                input_desktop,
+                target_valid: self.identity_valid,
+                permitted: self.permit.can_submit_native(
+                    7,
+                    9,
+                    Mode::Paste,
+                    &self.target,
+                    self.current,
+                ),
+                modifiers_released: true,
+                ordinary: true,
+            }
+            .check()
+        }
+        fn write(&mut self) -> Result<(), String> {
+            self.operations.push("write");
+            if let Some(change) = self.change_during_write {
+                self.change(change);
+            }
+            Ok(())
+        }
+        fn submit(&mut self) -> crate::paste::native::Submission {
+            self.operations.push("submit");
+            self.attempted += 1;
+            if let Some(change) = self.change_after_submit {
+                self.change(change);
+            }
+            if self.after_submit_switch {
+                self.monitor.observe(40, 160, 40);
+                self.current = 40;
+                self.cancelled = true;
+            }
+            self.submission
+        }
+        fn finish(&mut self, _: Option<crate::paste::native::Completion>) {
+            self.cleanup();
+        }
+    }
+
+    #[test]
+    fn production_native_flow_replays_c1_and_preserves_submission_before_cleanup_events() {
+        use crate::paste::native::{Completion, Submission, run};
+        let mut legacy = NativeReplay::new();
+        legacy.cleanup();
+        assert!(
+            !legacy.permit.current(&legacy.target, legacy.current),
+            "既有先归还/隐藏顺序的首个 perform 检查失败"
+        );
+        assert_eq!(legacy.attempted, 0);
+        let mut replay = NativeReplay::new();
+        assert_eq!(
+            run(&mut replay).unwrap(),
+            Completion::Submitted(Submission::Sent)
+        );
+        assert_eq!(
+            replay.operations,
+            [
+                "fence", "check", "write", "fence", "check", "submit", "activate", "hide", "blur"
+            ]
+        );
+        assert_eq!(replay.attempted, 1);
+        assert!(
+            !replay.permit.current(&replay.target, replay.current),
+            "seq4 仍撤销许可，已提交事实保持"
+        );
+    }
+
+    #[test]
+    fn production_native_flow_refuses_read_and_write_phase_revocation() {
+        for change in ["switch", "destroy", "identity", "stop", "cancel"] {
+            for during_write in [false, true] {
+                let mut replay = NativeReplay::new();
+                if during_write {
+                    replay.change_during_write = Some(change);
+                } else {
+                    replay.change(change);
+                }
+                let _ = crate::paste::native::run(&mut replay);
+                assert_eq!(replay.attempted, 0, "{change}, write={during_write}");
+                assert!(
+                    !replay.operations.contains(&"activate"),
+                    "撤销后不抢回原窗口"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn production_native_flow_refuses_inactive_or_unknown_desktop_at_either_guard() {
+        for change in ["desktop_inactive", "desktop_unknown"] {
+            for during_write in [false, true] {
+                let mut replay = NativeReplay::new();
+                if during_write {
+                    replay.change_during_write = Some(change);
+                } else {
+                    replay.change(change);
+                }
+                assert_eq!(
+                    crate::paste::native::run(&mut replay).unwrap(),
+                    crate::paste::native::Completion::CopiedOnly(
+                        "native_input_desktop_unavailable"
+                    )
+                );
+                assert_eq!(replay.attempted, 0, "{change}, write={during_write}");
+                assert!(!replay.operations.contains(&"activate"));
+            }
+        }
+    }
+
+    #[test]
+    fn input_desktop_recovery_cannot_reuse_a_revoked_selection() {
+        use crate::paste::native::Backend;
+        for status in [Some(false), None] {
+            let mut replay = NativeReplay::new();
+            replay.input_desktop = status;
+            assert_eq!(replay.check(), Err("native_input_desktop_unavailable"));
+            replay.input_desktop = Some(true);
+            assert_eq!(replay.check(), Err("selection_boundary_changed"));
+            assert_eq!(
+                crate::paste::native::run(&mut replay).unwrap(),
+                crate::paste::native::Completion::CopiedOnly("selection_boundary_changed")
+            );
+            assert_eq!(replay.attempted, 0);
+            assert!(!replay.operations.contains(&"activate"));
+        }
+    }
+
+    #[test]
+    fn submitted_result_survives_desktop_loss_without_cleanup_stealing_foreground() {
+        use crate::paste::native::{Completion, Submission, run};
+        for change in ["desktop_inactive", "desktop_unknown"] {
+            for submission in [Submission::Sent, Submission::Unknown] {
+                let mut replay = NativeReplay::new();
+                replay.submission = submission;
+                replay.change_after_submit = Some(change);
+                assert_eq!(run(&mut replay).unwrap(), Completion::Submitted(submission));
+                assert_eq!(replay.attempted, 1);
+                assert_eq!(replay.current, 10);
+                assert!(!replay.operations.contains(&"activate"));
+            }
+        }
+    }
+
+    #[test]
+    fn submitted_ack_and_unknown_survive_later_cancel_without_stealing_foreground() {
+        use crate::paste::native::{Completion, Submission, run};
+        for submission in [Submission::Sent, Submission::Unknown] {
+            let mut replay = NativeReplay::new();
+            replay.submission = submission;
+            replay.after_submit_switch = true;
+            assert_eq!(run(&mut replay).unwrap(), Completion::Submitted(submission));
+            assert_eq!(replay.attempted, 1);
+            assert_eq!(replay.current, 40);
+            assert!(!replay.operations.contains(&"activate"));
+        }
     }
 
     #[test]

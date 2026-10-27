@@ -18,6 +18,19 @@ pub enum Outcome {
     Sent,
     Confirmed,
     CopiedOnly,
+    NativeSubmissionUnknown,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RestorePolicy {
+    LegacyBeforeSubmit,
+    NativeAfterSubmit { unknown: bool },
+}
+
+pub struct Callbacks<'a> {
+    pub on_sent: &'a dyn Fn(),
+    pub restore: &'a dyn Fn(RestorePolicy) -> Option<crate::platform::FocusResult>,
+    pub synchronize: &'a dyn Fn() -> bool,
 }
 
 pub fn conclude(mode: Mode, sent: bool, confirmed: bool, degraded: bool) -> Outcome {
