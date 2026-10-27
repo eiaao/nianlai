@@ -427,6 +427,14 @@ const NATIVE_TIMEOUT_MS: u32 = 200;
 #[path = "native_message_tests.rs"]
 mod native_message_tests;
 
+#[cfg(test)]
+#[path = "native_edit_isolation_tests.rs"]
+mod native_edit_isolation_tests;
+
+#[cfg(test)]
+#[path = "current_station_native_clipboard_tests.rs"]
+mod current_station_native_clipboard_tests;
+
 pub(crate) fn submit_native_message(
     control: usize,
     expected_thread: u32,
