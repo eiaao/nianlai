@@ -38,6 +38,33 @@ enum Interaction {
     ActivationFailed,
     Activated,
     Passive,
+    CloseOnly,
+}
+
+impl Interaction {
+    fn may_restore(self) -> bool {
+        !matches!(self, Self::Passive | Self::CloseOnly)
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum UnwrittenFinish {
+    CloseRequested,
+    CloseOnly,
+}
+
+fn unwritten_finish(
+    result: &Value,
+    current: bool,
+    interaction: Interaction,
+) -> Option<UnwrittenFinish> {
+    if !current || result["clipboard_written"] != false {
+        return None;
+    }
+    if result["request_cancelled"] == true {
+        return (interaction == Interaction::Passive).then_some(UnwrittenFinish::CloseRequested);
+    }
+    (result["reason"] == "clipboard_capture_busy").then_some(UnwrittenFinish::CloseOnly)
 }
 
 enum ShowSource {
@@ -733,7 +760,7 @@ impl Panel {
         }
         let foreground = window::foreground();
         let panel = window::handle(&self.window)?;
-        let may_restore = self.interaction != Interaction::Passive
+        let may_restore = self.interaction.may_restore()
             && (foreground == panel || foreground == self.target.window);
         if let Err(error) = self.replay_search(logger, false, "hidden", false) {
             self.log(logger, "replay_cleanup_failed", json!({"error":error}));
@@ -1529,6 +1556,18 @@ impl Panel {
                 if session == self.session {
                     self.pasting = false;
                     self.paste_cancel = None;
+                    let unwritten =
+                        unwritten_finish(&result, self.current(session), self.interaction);
+                    if unwritten == Some(UnwrittenFinish::CloseRequested) {
+                        // worker已排完按键且未写入，兑现等待期间的关闭；Passive禁止抢回前台。
+                        self.hide(logger)?;
+                        return Ok(());
+                    }
+                    let close_only = unwritten == Some(UnwrittenFinish::CloseOnly);
+                    if close_only {
+                        // worker已卸监听；旧会话不能再取用，只留明确关闭入口。
+                        self.set_interaction(Interaction::CloseOnly);
+                    }
                     // cleanup 回执超时也必须显示未知结果；不再尝试归还，也不允许用户误重试。
                     let native_unknown = result["paste_result"] == "native_submission_unknown";
                     if native_unknown
@@ -1552,15 +1591,21 @@ impl Panel {
                     };
                     if result["clipboard_written"] == false
                         && result["reason"] != "request_cancelled"
+                        && result["request_cancelled"] != true
                     {
                         let message = if result["reason"] == "record_missing" {
                             "这条记录已不在历史里"
                         } else if result["reason"] == "store_read_failed" {
                             "读取历史失败，未改写剪贴板。"
+                        } else if result["reason"] == "clipboard_capture_busy" {
+                            "剪贴板忙，本次未提交，请关闭面板后重新呼出"
                         } else {
                             "写入剪贴板失败，请重试。"
                         };
-                        self.emit("panel:error", json!({"message":message}));
+                        self.emit(
+                            "panel:error",
+                            json!({"message":message,"close_only":close_only}),
+                        );
                     } else if result["clipboard_written"] == true {
                         if let Some(dwell) = dwell {
                             // 告诉前端面板还开着、要停留：页脚当场显示提示，停留期间不再发起粘贴。
@@ -1668,6 +1713,31 @@ impl Panel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unwritten_busy_is_close_only_but_requested_close_and_new_session_win() {
+        let mut result = json!({"clipboard_written":false,"reason":"clipboard_capture_busy","request_cancelled":false});
+        assert_eq!(
+            unwritten_finish(&result, true, Interaction::Activated),
+            Some(UnwrittenFinish::CloseOnly)
+        );
+        // 即使busy已产出，UI接收前的Esc也以当前取消标记为准。
+        result["request_cancelled"] = json!(true);
+        assert_eq!(
+            unwritten_finish(&result, true, Interaction::Passive),
+            Some(UnwrittenFinish::CloseRequested)
+        );
+        assert_eq!(unwritten_finish(&result, false, Interaction::Passive), None);
+        result["reason"] = json!("request_cancelled");
+        assert_eq!(
+            unwritten_finish(&result, true, Interaction::Passive),
+            Some(UnwrittenFinish::CloseRequested)
+        );
+        result["clipboard_written"] = json!(true);
+        assert_eq!(unwritten_finish(&result, true, Interaction::Passive), None);
+        assert!(!Interaction::Passive.may_restore());
+        assert!(!Interaction::CloseOnly.may_restore());
+    }
 
     #[test]
     fn experiment_flag_only_accepts_one() {

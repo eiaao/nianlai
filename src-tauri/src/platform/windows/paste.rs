@@ -3,6 +3,7 @@ use crate::{
     history::content::{Content, TEXT},
     paste::{
         as_text,
+        capture_access::AccessGuard,
         keys::{Key, Match, Table},
         native,
         request::{Callbacks, Mode, Outcome, Request, RestorePolicy, conclude},
@@ -26,9 +27,12 @@ use windows::Win32::{
         GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TOKEN_ELEVATION,
         TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TokenElevation, TokenIntegrityLevel,
     },
-    System::Threading::{
-        GetCurrentProcess, GetCurrentThreadId, OpenProcess, OpenProcessToken,
-        PROCESS_QUERY_LIMITED_INFORMATION,
+    System::{
+        DataExchange::GetOpenClipboardWindow,
+        Threading::{
+            GetCurrentProcess, GetCurrentProcessId, GetCurrentThreadId, OpenProcess,
+            OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+        },
     },
     UI::Input::KeyboardAndMouse::*,
     UI::WindowsAndMessaging::{
@@ -435,11 +439,28 @@ mod native_edit_isolation_tests;
 #[path = "current_station_native_clipboard_tests.rs"]
 mod current_station_native_clipboard_tests;
 
+#[cfg(test)]
 pub(crate) fn submit_native_message(
     control: usize,
     expected_thread: u32,
     expected_process: u32,
     timeout_ms: u32,
+) -> native::Delivery {
+    submit_native_message_observed(
+        control,
+        expected_thread,
+        expected_process,
+        timeout_ms,
+        |_| {},
+    )
+}
+
+fn submit_native_message_observed(
+    control: usize,
+    expected_thread: u32,
+    expected_process: u32,
+    timeout_ms: u32,
+    mut observe: impl FnMut(bool),
 ) -> native::Delivery {
     let mut process = 0;
     let thread = unsafe { GetWindowThreadProcessId(window::hwnd(control), Some(&mut process)) };
@@ -455,6 +476,7 @@ pub(crate) fn submit_native_message(
             error_code: None,
         };
     }
+    observe(true);
     let acknowledged = unsafe {
         SetLastError(WIN32_ERROR(0));
         SendMessageTimeoutW(
@@ -468,11 +490,24 @@ pub(crate) fn submit_native_message(
         )
         .0 != 0
     };
+    // 必须先取 SMTO 的错误，再查询 holder，防止元数据 API 覆盖证据。
+    let error_code = (!acknowledged).then(|| unsafe { GetLastError().0 });
+    observe(false);
     native::Delivery {
         attempted: true,
         acknowledged,
-        error_code: (!acknowledged).then(|| unsafe { GetLastError().0 }),
+        error_code,
     }
+}
+
+fn open_holder(target: u32) -> Value {
+    let window = unsafe { GetOpenClipboardWindow() }.unwrap_or_default();
+    let mut process = 0;
+    if !window.is_invalid() {
+        unsafe { GetWindowThreadProcessId(window, Some(&mut process)) };
+    }
+    json!({"window_observed":!window.is_invalid(),
+        "classification":native::open_holder(!window.is_invalid(), process, unsafe { GetCurrentProcessId() }, target)})
 }
 
 fn pure_unicode(content: &Content) -> bool {
@@ -491,6 +526,7 @@ fn pure_unicode(content: &Content) -> bool {
 }
 
 struct Native<'a> {
+    access: Option<AccessGuard>,
     request: &'a Request,
     written: &'a Arc<Content>,
     clipboard: &'a clipboard::Service,
@@ -564,21 +600,26 @@ impl native::Backend for Native<'_> {
     }
     fn submit(&mut self) -> native::Submission {
         let sent_at = Instant::now();
+        let mut holders = [Value::Null, Value::Null];
         // 返回值只证明消息调用完成，绝不读取 WM_PASTE 的结果值推断内容成功。
-        let delivery = submit_native_message(
+        let delivery = submit_native_message_observed(
             self.request.target.focus,
             self.request.target.thread,
             self.request.target.process,
             NATIVE_TIMEOUT_MS,
+            |before| holders[usize::from(!before)] = open_holder(self.request.target.process),
         );
         self.report["native_submission"] = json!({"attempted":delivery.attempted,"acknowledged":delivery.acknowledged,
             "status":if !delivery.attempted {"not_submitted"} else if delivery.acknowledged {"sent"} else {"unknown"},
-            "timeout_ms":NATIVE_TIMEOUT_MS,"error_code":delivery.error_code});
+            "timeout_ms":NATIVE_TIMEOUT_MS,"error_code":delivery.error_code,
+            "open_holder_before":holders[0],"open_holder_after":holders[1]});
         self.report["selected_to_send_ms"] =
             json!(sent_at.duration_since(self.request.started).as_secs_f64() * 1000.0);
         delivery.submission()
     }
     fn finish(&mut self, result: Option<native::Completion>) {
+        // UI 归还可跨线程等待；先关闭本次 reader 排斥区间。
+        drop(self.access.take());
         let unknown = result == Some(native::Completion::Submitted(native::Submission::Unknown));
         if unknown {
             self.report["reason"] = json!("native_submission_unknown");
@@ -776,19 +817,32 @@ pub fn execute(
         report["submission_method"] = json!("wm_paste");
         report["native_submission"] =
             json!({"attempted":false,"acknowledged":false,"status":"not_submitted"});
-        let result = {
-            let mut backend = Native {
-                request: &request,
-                written: &written,
-                clipboard,
-                stopping,
-                restore: callbacks.restore,
-                on_sent: callbacks.on_sent,
-                synchronize: callbacks.synchronize,
-                report: &mut report,
-            };
-            native::run(&mut backend)
-        };
+        let access_started = Instant::now();
+        let access = clipboard
+            .capture_access()
+            .native(Duration::from_millis(u64::from(NATIVE_TIMEOUT_MS)), || {
+                cancelled(&request, stopping)
+            });
+        report["native_coordination"] = json!({
+            "outcome":access.as_ref().map_or_else(|error| error.outcome(), |_| "acquired"),
+            "wait_ms":access_started.elapsed().as_secs_f64()*1000.0,"budget_ms":NATIVE_TIMEOUT_MS,
+        });
+        let result = access
+            .map_err(|error| error.reason().to_owned())
+            .and_then(|access| {
+                let mut backend = Native {
+                    access: Some(access),
+                    request: &request,
+                    written: &written,
+                    clipboard,
+                    stopping,
+                    restore: callbacks.restore,
+                    on_sent: callbacks.on_sent,
+                    synchronize: callbacks.synchronize,
+                    report: &mut report,
+                };
+                native::run(&mut backend)
+            });
         result.map(|completion| match completion {
             native::Completion::CopiedOnly(reason) => {
                 report["reason"] = json!(reason);

@@ -29,6 +29,7 @@ M0-7 把原来一个文件的 `src/App.svelte` 拆成下面这些文件，外观
 - 普通 `quick` 不激活，数字由键盘钩子经 `panel:key` 转给 `navigate()`；其原有搜索首键缓冲、两帧就绪和补发路径保留。权限较高或无法确认的目标先进入 `activation_pending`，取得面板前台后进入 `activated`，初始 `mode` 仍是 `quick`。
 - `activated` 只用真实 DOM `keydown` / `keyup`，忽略 `panel:key` 防双发。后端放行新键，只保留历史吞键配对。确认键按下时固定会话、条目和模式；匹配可信抬起且已观察按键/修饰键全部松开后，才取用或关闭。方向、翻页键允许重复导航。搜索选择也在按下时固定原 `selection`，松键期间 revision 变化就取消，不刷新后重发。
 - `interaction` 和本地 DOM 焦点共同控制能否操作。`activated` 先挂载同一个可编辑搜索框，确认 `document.hasFocus()` 且 `activeElement` 为该框后才展示列表和快捷键；准备超过 500 ms 或焦点失败时提供本地鼠标重试，不调用仅适用于 `activation_failed` 的后端重试。原生 `activation_pending` / `activation_failed` 无列表和搜索入口，失败重试仍走后端。`passive` 只显示复制提示和鼠标关闭入口。
+- 原生提交等待采集访问失败且未写入时进入 `close_only`，显示未提交及重新呼出的说明，只保留关闭按钮和可信 Esc 配对关闭。旧会话的监听已结束，迟到的激活、模式、结果与错误不能重新开放取用；下一次 `panel:shown` 才初始化新会话。等待期间已请求关闭的取消，在 worker 完成后静默收起，不抢回目标焦点。
 - Activated 的普通首字和输入法由浏览器在原框自然编辑；`beforeinput` / `compositionstart` 请求进入搜索，`searchStarting` 期间不处理 Quick 数字取用，后续字符继续留在原框。`/`、Ctrl+F 以空查询进入搜索。后端切换不重新激活、MoveFocus 或补发首字，前端也不二次聚焦；切换失败或 1 秒没有模式回执时显示重新呼出提示，不能永久停在准备态。
 - 根内容只在本会话 `visible` 时渲染，`interactive` 同样依赖可见性；隐藏后不保留搜索、编号列表和快捷键提示，避免窗口先于下一次 `panel:shown` 显示时露出旧会话的就绪承诺。
 - 搜索取用必须传实际 DOM 选择事件。`PanelState` 在第一处 `await` 前固定会话、条目、粘贴模式及 `selection {revision, nonce}`；`panel:key` 不能建立搜索许可。每个前台 revision 回调记录 `performance.now()`，只允许同一时钟下接收后生成的新可信事件，迟到事件提示重新选择。旧/重复 revision 不降低高水位，但把接收时刻推进到现在；非法 revision 暂停选择，需新合法通知或重新呼出。

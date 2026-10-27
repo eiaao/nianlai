@@ -6,6 +6,7 @@ use crate::{
         CopyEvent,
         content::{Content, DIB, DIBV5, Data, FILES, TEXT},
     },
+    paste::capture_access::{AccessError, CaptureAttempt, OwnerSnapshot, capture_attempt},
     platform::Result,
 };
 use serde_json::{Value, json};
@@ -152,6 +153,12 @@ impl Attempt {
             enumerate_error: None,
         }
     }
+
+    fn can_mark_skipped(&self) -> bool {
+        self.reason.is_some()
+            && self.reason != Some("clipboard_coordination_failed")
+            && !self.retry_latest
+    }
 }
 
 fn read(shared: &Shared, owner: Option<HWND>, mut attempt: Attempt) -> Attempt {
@@ -185,13 +192,39 @@ fn holder() -> Value {
 fn read_once(shared: &Shared, owner: Option<HWND>, mut attempt: Attempt) -> Attempt {
     let waits = [10, 20, 40, 80, 160, 320];
     let started = Instant::now();
-    loop {
+    let open = loop {
         if shared.stopping.load(Ordering::Acquire) {
             attempt.reason = Some("stopping");
             return attempt;
         }
-        if unsafe { OpenClipboard(owner) }.is_ok() {
-            break;
+        match capture_attempt(
+            &shared.capture_access,
+            &shared.stopping,
+            shared.own_owner,
+            || OwnerSnapshot {
+                sequence_before: unsafe { GetClipboardSequenceNumber() },
+                owner: unsafe { GetClipboardOwner() }.unwrap_or_default().0 as usize,
+                sequence_after: unsafe { GetClipboardSequenceNumber() },
+            },
+            || unsafe { OpenClipboard(owner) }.map(|()| Open),
+        ) {
+            Ok(CaptureAttempt::Opened(open)) => break open,
+            Ok(CaptureAttempt::OwnWrite(sequence)) => {
+                align_notice(shared, &mut attempt, sequence);
+                attempt.wait_ms = started.elapsed().as_secs_f64() * 1000.0;
+                attempt.reason = Some("own_write");
+                check_sequence(shared, &mut attempt, sequence);
+                return attempt;
+            }
+            Ok(CaptureAttempt::OpenFailed(_)) => {}
+            Err(error) => {
+                attempt.reason = Some(if error == AccessError::Cancelled {
+                    "stopping"
+                } else {
+                    "clipboard_coordination_failed"
+                });
+                return attempt;
+            }
         }
         if attempt.retries == waits.len() {
             attempt.wait_ms = started.elapsed().as_secs_f64() * 1000.0;
@@ -206,20 +239,13 @@ fn read_once(shared: &Shared, owner: Option<HWND>, mut attempt: Attempt) -> Atte
                 Duration::from_millis(10).min(until.saturating_duration_since(Instant::now())),
             );
         }
-    }
+    };
     attempt.wait_ms = started.elapsed().as_secs_f64() * 1000.0;
-    let open = Open;
     let sequence = unsafe { GetClipboardSequenceNumber() };
-    if attempt.notice.sequence != sequence {
-        attempt.notice = shared
-            .inbox
-            .matching(sequence)
-            .unwrap_or_else(|| notice("self_check"));
-        attempt.notice.sequence = sequence;
-    }
+    align_notice(shared, &mut attempt, sequence);
     let owner = unsafe { GetClipboardOwner() }.unwrap_or_default();
     // 必须在枚举和 GetClipboardData 之前判断，不能让采集成为延迟渲染的首个读取方。
-    if owner.0 as usize == shared.own_owner {
+    if shared.own_owner != 0 && owner.0 as usize == shared.own_owner {
         attempt.reason = Some("own_write");
     } else {
         attempt.notice.owner = super::process(owner);
@@ -261,6 +287,21 @@ fn read_once(shared: &Shared, owner: Option<HWND>, mut attempt: Attempt) -> Atte
         }
     }
     drop(open);
+    check_sequence(shared, &mut attempt, sequence);
+    attempt
+}
+
+fn align_notice(shared: &Shared, attempt: &mut Attempt, sequence: u32) {
+    if attempt.notice.sequence != sequence {
+        attempt.notice = shared
+            .inbox
+            .matching(sequence)
+            .unwrap_or_else(|| notice("self_check"));
+        attempt.notice.sequence = sequence;
+    }
+}
+
+fn check_sequence(shared: &Shared, attempt: &mut Attempt, sequence: u32) {
     if unsafe { GetClipboardSequenceNumber() } != sequence
         && !shared.stopping.load(Ordering::Acquire)
     {
@@ -268,7 +309,6 @@ fn read_once(shared: &Shared, owner: Option<HWND>, mut attempt: Attempt) -> Atte
         attempt.reason = Some("sequence_changed");
         attempt.retry_latest = true;
     }
-    attempt
 }
 
 fn read_formats(shared: &Shared, attempt: &mut Attempt) {
@@ -361,6 +401,13 @@ pub(super) fn run(shared: &Shared) {
         drain();
         let started = Instant::now();
         let mut attempt = read(shared, owner, Attempt::new(notification));
+        let coordination_failed = attempt.reason == Some("clipboard_coordination_failed");
+        if coordination_failed {
+            // poison 不能恢复：停采且保留未读 sequence，不能反复自检重试或冒充已处理。
+            shared.stop();
+            shared.history.set_recording(false);
+            (shared.changed)();
+        }
         let read_ms = started.elapsed().as_secs_f64() * 1000.0;
         let source = window::process_name(attempt.notice.source);
         let owner = window::process_name(attempt.notice.owner);
@@ -370,7 +417,7 @@ pub(super) fn run(shared: &Shared) {
         let mut write_ms = None;
         let mut transaction_ok = None;
         let mut store_error: Option<String> = None;
-        if shared.stopping.load(Ordering::Acquire) {
+        if shared.stopping.load(Ordering::Acquire) && !coordination_failed {
             attempt.reason = Some("stopping");
         }
         if attempt.reason.is_none() {
@@ -415,7 +462,7 @@ pub(super) fn run(shared: &Shared) {
                 Err(_) => attempt.reason = Some("hash_failed"),
             }
         }
-        if attempt.reason.is_some() && !attempt.retry_latest && store_error.is_none() {
+        if attempt.can_mark_skipped() && store_error.is_none() {
             shared.history.skipped_sequence(attempt.notice.sequence);
         }
         let latency = attempt.notice.at.elapsed().as_secs_f64() * 1000.0;
@@ -464,5 +511,22 @@ mod tests {
         );
         assert_eq!(formats::limit(DIBV5), Some(64 * formats::MIB));
         assert_eq!(formats::limit(TEXT), Some(2 * formats::MIB));
+    }
+
+    #[test]
+    fn coordination_failure_does_not_acknowledge_unread_sequence_or_retry_forever() {
+        let mut attempt = Attempt::new(Notice {
+            sequence: 42,
+            at: Instant::now(),
+            time_ms: 0,
+            source: 1,
+            owner: 2,
+            trigger: "notification",
+        });
+        attempt.reason = Some("clipboard_coordination_failed");
+        assert!(!attempt.can_mark_skipped());
+        assert!(!attempt.retry_latest);
+        attempt.reason = Some("own_write");
+        assert!(attempt.can_mark_skipped());
     }
 }

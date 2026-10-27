@@ -59,6 +59,7 @@ export class PanelState {
   private foregroundRevision = -1;
   private foregroundSnapshot: { session: number; revision: number; receivedAt: number } | null = null;
   private selectionNonce = 0;
+  private closeOnlyEscape: number | null = null;
   private selectionEvents = new WeakSet<KeyboardEvent | MouseEvent>();
   private domEvents = new WeakSet<KeyboardEvent>();
   private heldDomKeys = new Map<string, number>();
@@ -137,7 +138,7 @@ export class PanelState {
   private async command(call: () => Promise<unknown>, session = this.session) {
     try { await call(); }
     catch {
-      if (this.session !== session || !this.visible || this.interaction === "passive") return;
+      if (this.session !== session || !this.visible || this.interaction === "passive" || this.interaction === "close_only") return;
       this.message = "操作未完成，请查看 G0 日志。";
       this.busy = false;
     }
@@ -148,6 +149,7 @@ export class PanelState {
   }
 
   private clearDomChoice(clearHeld = false) {
+    this.closeOnlyEscape = null;
     this.pendingDom = null;
     this.awaitingRelease = false;
     if (clearHeld) this.heldDomKeys.clear();
@@ -278,6 +280,16 @@ export class PanelState {
   }
 
   keyup = (event: KeyboardEvent) => {
+    if (this.interaction === "close_only") {
+      const downAt = this.closeOnlyEscape;
+      this.closeOnlyEscape = null;
+      if (this.visible && downAt !== null && event.isTrusted === true && event.type === "keyup" && event.key === "Escape"
+        && Number.isFinite(event.timeStamp) && event.timeStamp >= downAt && event.timeStamp <= performance.now()
+        && !event.isComposing && !this.composing && document.hasFocus()) {
+        event.preventDefault(); this.close();
+      }
+      return;
+    }
     if (this.interaction !== "activated" || !this.ensureDomInput(event) || event.isTrusted !== true || this.domEvents.has(event)
       || !Number.isFinite(event.timeStamp) || event.timeStamp > performance.now()) return;
     this.domEvents.add(event);
@@ -334,13 +346,14 @@ export class PanelState {
   }
 
   private setInteraction(interaction: PanelInteraction) {
-    // passive 是本会话的终态；迟到的激活/模式通知不能重新开放列表。
+    // 两种结束态都不能被迟到的激活/模式通知重新开放。
     const transitions: Record<PanelInteraction, readonly PanelInteraction[]> = {
-      quick: ["quick", "passive"],
-      activation_pending: ["activation_pending", "activation_failed", "activated", "passive"],
-      activation_failed: ["activation_pending", "activation_failed", "activated", "passive"],
-      activated: ["activated", "passive"],
+      quick: ["quick", "passive", "close_only"],
+      activation_pending: ["activation_pending", "activation_failed", "activated", "passive", "close_only"],
+      activation_failed: ["activation_pending", "activation_failed", "activated", "passive", "close_only"],
+      activated: ["activated", "passive", "close_only"],
       passive: ["passive"],
+      close_only: ["close_only"],
     };
     if (!transitions[this.interaction]?.includes(interaction)) return;
     if (this.interaction === interaction) return;
@@ -427,6 +440,15 @@ export class PanelState {
 
   // 普通 Quick 走钩子；Activated 在同一真实输入框中处理快速键和自然搜索输入。
   keydown = (event: KeyboardEvent) => {
+    if (this.interaction === "close_only") {
+      if (this.visible && event.isTrusted === true && event.type === "keydown" && event.key === "Escape"
+        && !event.repeat && !event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey
+        && !event.isComposing && !this.composing && Number.isFinite(event.timeStamp) && event.timeStamp <= performance.now()
+        && event.timeStamp >= 0 && event.timeStamp - this.compositionEnded >= 50 && document.hasFocus()) {
+        event.preventDefault(); this.closeOnlyEscape = event.timeStamp;
+      }
+      return;
+    }
     if (this.interaction === "activated") {
       if (!this.ensureDomInput(event) || event.type !== "keydown" || this.domEvents.has(event)
         || !Number.isFinite(event.timeStamp) || event.timeStamp < 0 || event.timeStamp > performance.now()) return;
@@ -573,7 +595,7 @@ export class PanelState {
             this.selected = index >= 0 ? index : 0;
           }
         }
-      } catch { if (!disposed) this.message = "读取历史失败，请查看 G0 日志。"; }
+      } catch { if (!disposed && this.interaction !== "close_only") this.message = "读取历史失败，请查看 G0 日志。"; }
       finally { fetching = false; }
     };
     const frame = (callback: () => void) => {
@@ -681,10 +703,14 @@ export class PanelState {
       });
       await subscribe(ipc.onPanelTiming, (payload) => { if (payload.session === this.session) this.timing = payload; });
       await subscribe(ipc.onPanelError, (payload) => {
-        if (this.visible && payload.session === this.session && this.interaction !== "passive") { this.message = payload.message; this.busy = false; }
+        if (this.visible && payload.session === this.session && this.interaction !== "passive"
+          && (this.interaction !== "close_only" || payload.close_only === true)) {
+          if (payload.close_only) this.setInteraction("close_only");
+          this.message = payload.message; this.busy = false;
+        }
       });
       await subscribe(ipc.onPasteResult, (payload) => {
-        if (!this.visible || payload.session !== this.session) return;
+        if (!this.visible || payload.session !== this.session || this.interaction === "close_only") return;
         if (payload.paste_result === "native_submission_unknown") {
           this.setInteraction("passive");
           this.message = "粘贴结果未确认，请先检查目标，避免重复粘贴";

@@ -5,6 +5,7 @@ use crate::{
         content::{Content, Data, FILES, Fingerprint, HTML, RTF, TEXT},
     },
     log::Logger,
+    paste::capture_access::CaptureAccess,
     platform::Result,
 };
 use serde_json::{Value, json};
@@ -400,6 +401,7 @@ enum Command {
 }
 struct Inner {
     owner: usize,
+    capture_access: Arc<CaptureAccess>,
     sender: mpsc::Sender<Command>,
     thread: Mutex<Option<JoinHandle<()>>>,
 }
@@ -516,6 +518,7 @@ impl Service {
         let owner = receiver.recv().map_err(|_| "clipboard_start_failed")??;
         Ok(Self(Arc::new(Inner {
             owner,
+            capture_access: Arc::new(CaptureAccess::default()),
             sender,
             thread: Mutex::new(Some(thread)),
         })))
@@ -542,6 +545,10 @@ impl Service {
 
     pub fn owner(&self) -> usize {
         self.0.owner
+    }
+
+    pub fn capture_access(&self) -> Arc<CaptureAccess> {
+        self.0.capture_access.clone()
     }
 
     pub fn write(

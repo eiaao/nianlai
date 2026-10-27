@@ -29,9 +29,54 @@ static class Evidence {
     public static string Utc() { return DateTime.UtcNow.ToString("o"); }
 }
 
+// 只保存本用例最后一次 WM_PASTE 的内存摘要，不保存正文，也不在窗口过程写文件。
+sealed class NativePasteRecord {
+    public readonly int CallIndex;
+    public int? BeforeLength, AfterLength;
+    public string BeforeHash, AfterHash;
+    public long? BeforeTimestampTicks, AfterTimestampTicks;
+    public bool Completed;
+    public NativePasteRecord(int callIndex) { CallIndex = callIndex; }
+    public void CaptureBefore(string text) { BeforeLength = text.Length; BeforeHash = Evidence.Hash(text); }
+    public void CaptureAfter(string text, long returnedAt) {
+        AfterTimestampTicks = returnedAt; AfterLength = text.Length; AfterHash = Evidence.Hash(text);
+        Completed = true;
+    }
+}
+
+sealed class NativePasteLedger {
+    public int Count { get; private set; }
+    public NativePasteRecord Last { get; private set; }
+    public NativePasteRecord Begin() { Last = new NativePasteRecord(++Count); return Last; }
+    public void Clear() { Count = 0; Last = null; }
+    public object Snapshot() {
+        NativePasteRecord record = Last;
+        object last = record == null ? null : new { call_index = record.CallIndex, completed = record.Completed,
+            before_timestamp_ticks = record.BeforeTimestampTicks, after_timestamp_ticks = record.AfterTimestampTicks,
+            before_text_utf16_length = record.BeforeLength, before_text_sha256_utf8 = record.BeforeHash,
+            after_text_utf16_length = record.AfterLength, after_text_sha256_utf8 = record.AfterHash };
+        return new { count = Count, timestamp_frequency_hz = Stopwatch.Frequency, last = last };
+    }
+}
+
 sealed class TargetBox : TextBox {
     public Action<int, bool, bool> OnKeyMessage;
+    readonly NativePasteLedger nativePaste = new NativePasteLedger();
+    public object NativePaste { get { return nativePaste.Snapshot(); } }
+    public void ClearNativePaste() { nativePaste.Clear(); }
     protected override void WndProc(ref Message message) {
+        if (message.Msg == 0x302) { // WM_PASTE：只观察自己的 Text，不读取剪贴板。
+            NativePasteRecord record = null;
+            try { record = nativePaste.Begin(); record.CaptureBefore(Text); }
+            finally {
+                // 即使前置观测异常，消息仍交给原生控件；这一分支只有这一处 base 调用。
+                if (record != null) record.BeforeTimestampTicks = Stopwatch.GetTimestamp();
+                base.WndProc(ref message);
+            }
+            long returnedAt = Stopwatch.GetTimestamp();
+            if (record != null) record.CaptureAfter(Text, returnedAt);
+            return;
+        }
         bool down = message.Msg == 0x100 || message.Msg == 0x104;
         bool up = message.Msg == 0x101 || message.Msg == 0x105;
         if ((down || up) && OnKeyMessage != null)
@@ -98,7 +143,7 @@ sealed class TargetForm : Form {
 
     bool BeginCase() {
         if (Failed) return false;
-        caseNumber++; ledger.Clear(); box.Clear();
+        caseNumber++; ledger.Clear(); box.ClearNativePaste(); box.Clear();
         if (!Append(new { kind = "case_started", run_id = run, case_id = caseNumber, utc = Evidence.Utc(), elapsed_ms = elapsed.ElapsedMilliseconds })) return false;
         status.Text = "用例 " + caseNumber + " · " + (elevated ? "管理员" : "普通权限") + " · 仅记录本窗口";
         return Write("state.json", Snapshot("running"));
@@ -121,11 +166,14 @@ sealed class TargetForm : Form {
     object Snapshot(string phase) {
         uint pid; IntPtr foreground = GetForegroundWindow();
         GetWindowThreadProcessId(foreground, out pid);
+        string text = box.Text;
+        long textObservedAt = Stopwatch.GetTimestamp();
         return new { schema = 1, run_id = run, case_id = caseNumber, phase = phase,
             utc = Evidence.Utc(), elapsed_ms = elapsed.ElapsedMilliseconds,
             pid = Process.GetCurrentProcess().Id, hwnd = formHandle, edit = editHandle,
             elevated = elevated, foreground_is_target = foreground.ToInt64() == formHandle, foreground_pid = pid,
-            text_utf16_length = box.Text.Length, text_sha256_utf8 = Evidence.Hash(box.Text),
+            text_utf16_length = text.Length, text_sha256_utf8 = Evidence.Hash(text),
+            text_observed_timestamp_ticks = textObservedAt, native_paste = box.NativePaste,
             observed_held = ledger.Held, event_count = events, truncated = events > EventLimit, closed = closing };
     }
 
@@ -166,8 +214,24 @@ static class Program {
         ledger.Record(17, true); ledger.Clear();
         Check(ledger.Held.Length == 0 && !ledger.Record(17, false), "用例边界清空记录");
         Check(Evidence.Hash("abc") == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", "UTF-8 校验值");
+        var paste = new NativePasteLedger();
+        Check(paste.Count == 0 && paste.Last == null && Stopwatch.Frequency > 0, "尚无原生粘贴观测");
+        var observed = paste.Begin();
+        const string before = "虚构的调用前文本", after = "虚构的调用后文本 · 9471";
+        observed.CaptureBefore(before); observed.BeforeTimestampTicks = Stopwatch.GetTimestamp();
+        observed.CaptureAfter(after, Stopwatch.GetTimestamp());
+        string serialized = new System.Web.Script.Serialization.JavaScriptSerializer().Serialize(paste.Snapshot());
+        Check(observed.Completed && observed.BeforeLength == before.Length && observed.AfterLength == after.Length &&
+            observed.BeforeHash == Evidence.Hash(before) && observed.AfterHash == Evidence.Hash(after) &&
+            observed.AfterTimestampTicks >= observed.BeforeTimestampTicks &&
+            !serialized.Contains(before) && !serialized.Contains(after), "原生前后摘要/时序/不保存正文");
+        Check(observed.AfterLength > 0 && observed.AfterHash != Evidence.Hash(String.Empty) &&
+            paste.Begin().CallIndex == 2 && paste.Count == 2 && !paste.Last.Completed && paste.Last.AfterLength == null,
+            "后续当前空文本不改历史 after；新调用不复用旧 after");
+        paste.Clear(); observed.CaptureAfter(after, Stopwatch.GetTimestamp());
+        Check(paste.Count == 0 && paste.Last == null, "用例重置后旧观测不能复活");
         int fileChecks = FileIoTests.Run();
-        Console.WriteLine("7 项记账/校验自测及 " + fileChecks + " 项文件自测通过；没有创建窗口、注入输入或访问剪贴板。");
+        Console.WriteLine("7 项记账/校验、4 项原生观测内存自测及 " + fileChecks + " 项文件自测通过；没有创建窗口、注入输入或访问剪贴板。");
         return 0;
     }
 

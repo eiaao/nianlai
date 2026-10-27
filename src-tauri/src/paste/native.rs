@@ -99,6 +99,21 @@ impl Delivery {
     }
 }
 
+pub fn open_holder(window_observed: bool, process: u32, own: u32, target: u32) -> &'static str {
+    if !window_observed {
+        // NULL 也可能来自 OpenClipboard(NULL)；不能把它记录成剪贴板空闲。
+        "unknown_null_or_unavailable"
+    } else if process == 0 {
+        "unknown_process"
+    } else if process == own {
+        "self_process"
+    } else if process == target {
+        "target_process"
+    } else {
+        "other_process"
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Completion {
     CopiedOnly(&'static str),

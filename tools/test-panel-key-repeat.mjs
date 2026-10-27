@@ -550,6 +550,78 @@ function beforeInput(panel, options = {}) {
   return event;
 }
 
+test("原生协调失败结束旧取用会话并保留关闭入口", async (suite) => {
+  const { PanelState, ipc, cleanup } = await compilePanel();
+  suite.after(cleanup);
+  const message = "剪贴板忙，本次未提交，请关闭面板后重新呼出";
+
+  await suite.test("busy不隐藏，终态拒绝全部迟到重开和取用，只留鼠标关闭", async (context) => {
+    const { panel } = await activatedSearch(context, PanelState, ipc);
+    keydown(panel, { key: "Enter" }); keyup(panel, { key: "Enter" });
+    assert.equal(panel.busy, true);
+    assert.equal(ipc.calls.filter((call) => call.command === "pasteItem").length, 1);
+    ipc.emit("interaction", { session: 37, interaction: "close_only" });
+    ipc.emit("error", { session: 37, message, close_only: true });
+    assert.equal(panel.visible, true);
+    assert.equal(panel.interaction, "close_only");
+    assert.equal(panel.inputSurface, false);
+    assert.equal(panel.interactive, false);
+    assert.equal(panel.filtered.length, 0);
+    assert.equal(panel.locked, true);
+    assert.equal(panel.message, message);
+    assert.equal(ipc.calls.some((call) => call.command === "hidePanel"), false);
+    ipc.calls.length = 0;
+    ipc.emit("interaction", { session: 37, interaction: "activated" });
+    await ipc.emit("mode", { session: 37, mode: "search" });
+    ipc.emit("error", { session: 37, message: "迟到错误" });
+    ipc.emit("history-changed", { session: 37 }); await flush();
+    ipc.emit("paste-result", pasteResult());
+    keydown(panel, { key: "Enter" }); keyup(panel, { key: "Enter" });
+    await panel.choose(0, "paste", click());
+    panel.searchPointer({ preventDefault() {} });
+    assert.equal(panel.interaction, "close_only");
+    assert.equal(panel.message, message);
+    assert.deepEqual(ipc.calls, []);
+    panel.close(click());
+    assert.deepEqual(ipc.calls, [{ command: "hidePanel", session: 37 }]);
+  });
+
+  await suite.test("只接受可信新Esc配对关闭，失焦与重复事件不能关闭", async (context) => {
+    const { panel } = await activatedSearch(context, PanelState, ipc);
+    ipc.emit("error", { session: 37, message, close_only: true });
+    keyup(panel, { key: "Escape" });
+    keydown(panel, { key: "Escape", isTrusted: false }); keyup(panel, { key: "Escape" });
+    keydown(panel, { key: "Escape", repeat: true }); keyup(panel, { key: "Escape" });
+    keydown(panel, { key: "Escape", isComposing: true }); keyup(panel, { key: "Escape" });
+    keydown(panel, { key: "Escape" }); panel.windowBlur(); keyup(panel, { key: "Escape" });
+    assert.deepEqual(ipc.calls, []);
+    keydown(panel, { key: "Escape" });
+    assert.deepEqual(ipc.calls, []);
+    keyup(panel, { key: "Escape" });
+    assert.deepEqual(ipc.calls, [{ command: "hidePanel", session: 37 }]);
+  });
+
+  await suite.test("等待中Esc仍请求关闭，取消不显示busy且旧结果不影响新呼出", async (context) => {
+    const { panel } = await activatedSearch(context, PanelState, ipc);
+    const pending = ipc.deferNextPaste();
+    keydown(panel, { key: "Enter" }); keyup(panel, { key: "Enter" });
+    keydown(panel, { key: "Escape" }); keyup(panel, { key: "Escape" });
+    assert.equal(ipc.calls.filter((call) => call.command === "hidePanel").length, 1);
+    ipc.emit("interaction", { session: 37, interaction: "passive" });
+    ipc.emit("hidden", { session: 37 });
+    pending.resolve(); await flush();
+    assert.equal(panel.visible, false);
+    assert.doesNotMatch(panel.message, /剪贴板忙/);
+    ipc.emit("shown", shown({ session: 38 }));
+    ipc.emit("error", { session: 37, message, close_only: true });
+    ipc.emit("hidden", { session: 37 });
+    assert.equal(panel.visible, true);
+    assert.equal(panel.interaction, "quick");
+    assert.equal(panel.busy, false);
+    assert.equal(panel.message, "");
+  });
+});
+
 test("搜索提交键的首次按下、自动重复和组合输入保护", async (suite) => {
   const { PanelState, ipc, cleanup } = await compilePanel();
   suite.after(cleanup);

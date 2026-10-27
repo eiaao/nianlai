@@ -16,10 +16,10 @@
 <main aria-label="拈来剪贴板样机">
   {#if !panel.visible}
     <!-- 隐藏期只保留空壳，避免下次窗口先显示时露出旧会话的就绪列表。 -->
-  {:else if panel.interaction === "passive"}
+  {:else if panel.interaction === "passive" || panel.interaction === "close_only"}
     <div class="passive-feedback">
-      <p role="status">{panel.message || "正在确认复制结果…"}</p>
-      <button type="button" onclick={panel.close}>关闭提示</button>
+      <p role="status">{panel.message || (panel.interaction === "close_only" ? "本次未提交，请关闭面板后重新呼出" : "正在确认复制结果…")}</p>
+      <button type="button" onclick={panel.close}>{panel.interaction === "close_only" ? "关闭面板" : "关闭提示"}</button>
     </div>
   {:else}
     <header>

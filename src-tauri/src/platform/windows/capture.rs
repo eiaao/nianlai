@@ -5,6 +5,7 @@ use crate::{
     capture::SelfCheck,
     history::{History, older},
     log::{Logger, now_ms},
+    paste::capture_access::CaptureAccess,
     platform::Result,
 };
 use serde::Serialize;
@@ -143,6 +144,7 @@ struct Shared {
     stopping: AtomicBool,
     history: Arc<History>,
     own_owner: usize,
+    capture_access: Arc<CaptureAccess>,
     logger: Logger,
     counters: Mutex<Counters>,
     changed: Arc<dyn Fn() + Send + Sync>,
@@ -470,6 +472,7 @@ impl Service {
             stopping: AtomicBool::new(false),
             history,
             own_owner: clipboard.owner(),
+            capture_access: clipboard.capture_access(),
             logger,
             counters: Mutex::new(Counters::default()),
             changed,
@@ -577,5 +580,58 @@ mod tests {
         let latest = inbox.next(&stopping).unwrap();
         assert_eq!(latest.sequence, 7);
         assert_eq!(latest.at, at);
+    }
+
+    #[test]
+    fn notifications_during_native_access_keep_latest_for_the_waiting_reader() {
+        use crate::paste::capture_access::{CaptureAttempt, OwnerSnapshot, capture_attempt};
+        use std::sync::atomic::AtomicU32;
+        let access = Arc::new(CaptureAccess::default());
+        let native = access.native(Duration::from_secs(2), || false).unwrap();
+        let inbox = Arc::new(Inbox::default());
+        let sequence = Arc::new(AtomicU32::new(5));
+        let sample = |sequence| Notice {
+            sequence,
+            at: Instant::now(),
+            time_ms: 0,
+            source: 1,
+            owner: 2,
+            trigger: "notification",
+        };
+        inbox.push(sample(5));
+        let reader_inbox = inbox.clone();
+        let reader_sequence = sequence.clone();
+        let (waiting, ready) = mpsc::channel();
+        let reader = thread::spawn(move || {
+            let stop = AtomicBool::new(false);
+            assert_eq!(reader_inbox.next(&stop).unwrap().sequence, 5);
+            waiting.send(()).unwrap();
+            let read = capture_attempt(
+                &access,
+                &stop,
+                3,
+                || {
+                    let sequence = reader_sequence.load(Ordering::Acquire);
+                    OwnerSnapshot {
+                        sequence_before: sequence,
+                        owner: 2,
+                        sequence_after: sequence,
+                    }
+                },
+                || Ok::<_, ()>(()),
+            )
+            .unwrap();
+            assert!(matches!(read, CaptureAttempt::Opened(_)));
+            assert_eq!(reader_inbox.matching(7).unwrap().sequence, 7);
+            drop(read);
+        });
+        ready.recv_timeout(Duration::from_secs(2)).unwrap();
+        inbox.push(sample(6));
+        inbox.push(sample(7));
+        inbox.push(sample(6));
+        sequence.store(7, Ordering::Release);
+        drop(native);
+        reader.join().unwrap();
+        assert!(inbox.latest.lock().unwrap().is_none());
     }
 }
