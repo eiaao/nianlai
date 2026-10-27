@@ -5,7 +5,7 @@ if (-not (Test-Path -LiteralPath $compiler)) { throw '未找到 .NET Framework 4
 $output = [IO.Path]::GetFullPath($OutputDirectory)
 New-Item -ItemType Directory -Path $output -Force | Out-Null
 $exe = Join-Path $output 'HintTarget.exe'
-& $compiler /nologo /warnaserror /platform:x64 /target:winexe "/out:$exe" /reference:System.Windows.Forms.dll /reference:System.Drawing.dll /reference:System.Web.Extensions.dll (Join-Path $PSScriptRoot 'Program.cs')
+& $compiler /nologo /warnaserror /platform:x64 /target:winexe "/out:$exe" /reference:System.Windows.Forms.dll /reference:System.Drawing.dll /reference:System.Web.Extensions.dll (Join-Path $PSScriptRoot 'Program.cs') (Join-Path $PSScriptRoot 'EvidenceOutput.cs') (Join-Path $PSScriptRoot 'FileIoTests.cs')
 if ($LASTEXITCODE -ne 0) { throw "验收目标编译失败：$LASTEXITCODE" }
 # 使用启动进程并等待的方式获取 WinExe 自测退出码，不创建 GUI。
 $check = [Diagnostics.ProcessStartInfo]::new($exe, '--self-test')

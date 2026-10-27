@@ -9,7 +9,6 @@ using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Security.Principal;
 using System.Text;
-using System.Web.Script.Serialization;
 using System.Windows.Forms;
 
 sealed class KeyLedger {
@@ -47,7 +46,7 @@ sealed class TargetForm : Form {
 
     readonly string folder;
     readonly string run = Guid.NewGuid().ToString("N");
-    readonly JavaScriptSerializer json = new JavaScriptSerializer();
+    readonly EvidenceOutput output;
     readonly KeyLedger ledger = new KeyLedger();
     readonly TargetBox box = new TargetBox();
     readonly Label status = new Label();
@@ -60,15 +59,17 @@ sealed class TargetForm : Form {
     long editHandle;
     bool closing;
     const int EventLimit = 4096;
+    public bool Failed { get { return output.Failed; } }
 
     public TargetForm(string output) {
         folder = output;
+        this.output = new EvidenceOutput(folder, run, () => caseNumber, () => elapsed.ElapsedMilliseconds);
         Text = "拈来验收目标 · " + (elevated ? "管理员" : "普通权限");
         Width = 780; Height = 480;
         StartPosition = FormStartPosition.CenterScreen;
         var header = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 48, Padding = new Padding(6) };
         var begin = new Button { Text = "开始新用例", AutoSize = true };
-        begin.Click += delegate { BeginCase(); box.Focus(); };
+        begin.Click += delegate { if (BeginCase()) box.Focus(); };
         status.AutoSize = true;
         header.Controls.Add(begin); header.Controls.Add(status);
         box.Multiline = true; box.AcceptsReturn = true; box.AcceptsTab = true;
@@ -78,36 +79,41 @@ sealed class TargetForm : Form {
         Controls.Add(box); Controls.Add(header);
         Shown += delegate {
             formHandle = Handle.ToInt64(); editHandle = box.Handle.ToInt64();
-            BeginCase(); box.Focus(); Write("ready.json", Snapshot("ready"));
+            if (!BeginCase()) return;
+            box.Focus();
+            if (!Write("ready.json", Snapshot("ready"))) return;
             timer.Start();
         };
         FormClosed += delegate {
             timer.Stop(); closing = true;
-            Write("state.json", Snapshot("closed"));
+            if (!Failed) Write("state.json", Snapshot("closed"));
         };
         timer.Interval = 200;
         timer.Tick += delegate {
+            if (Failed) return;
             if (elapsed.Elapsed.TotalMinutes >= 30 || File.Exists(Path.Combine(folder, "STOP"))) { Close(); return; }
             Write("state.json", Snapshot("running"));
         };
     }
 
-    void BeginCase() {
+    bool BeginCase() {
+        if (Failed) return false;
         caseNumber++; ledger.Clear(); box.Clear();
-        Append(new { kind = "case_started", run_id = run, case_id = caseNumber, utc = Evidence.Utc(), elapsed_ms = elapsed.ElapsedMilliseconds });
+        if (!Append(new { kind = "case_started", run_id = run, case_id = caseNumber, utc = Evidence.Utc(), elapsed_ms = elapsed.ElapsedMilliseconds })) return false;
         status.Text = "用例 " + caseNumber + " · " + (elevated ? "管理员" : "普通权限") + " · 仅记录本窗口";
-        Write("state.json", Snapshot("running"));
+        return Write("state.json", Snapshot("running"));
     }
 
     void Key(int vk, bool down, bool previousDown) {
+        if (Failed) return;
         bool changed = ledger.Record(vk, down);
         if (events < EventLimit) {
-            Append(new { kind = down ? "down" : "up", run_id = run, case_id = caseNumber,
+            if (!Append(new { kind = down ? "down" : "up", run_id = run, case_id = caseNumber,
                 utc = Evidence.Utc(), elapsed_ms = elapsed.ElapsedMilliseconds, vk = vk,
                 previous_down = previousDown, repeat = down && previousDown,
-                matching_down = down ? (bool?)null : changed });
+                matching_down = down ? (bool?)null : changed })) return;
         } else if (events == EventLimit) {
-            Append(new { kind = "truncated", run_id = run, utc = Evidence.Utc(), limit = EventLimit });
+            if (!Append(new { kind = "truncated", run_id = run, utc = Evidence.Utc(), limit = EventLimit })) return;
         }
         events++;
     }
@@ -123,15 +129,25 @@ sealed class TargetForm : Form {
             observed_held = ledger.Held, event_count = events, truncated = events > EventLimit, closed = closing };
     }
 
-    void Append(object value) {
-        File.AppendAllText(Path.Combine(folder, "events.jsonl"), json.Serialize(value) + Environment.NewLine, new UTF8Encoding(false));
+    bool Append(object value) {
+        bool recorded = output.Append(value);
+        if (!recorded) StopAfterFailure();
+        return recorded;
     }
 
-    void Write(string name, object value) {
-        string path = Path.Combine(folder, name), temp = path + ".tmp";
-        File.WriteAllText(temp, json.Serialize(value), new UTF8Encoding(false));
-        if (File.Exists(path)) File.Replace(temp, path, null);
-        else File.Move(temp, path);
+    bool Write(string name, object value) {
+        bool recorded = output.Write(name, value);
+        if (!recorded) StopAfterFailure();
+        return recorded;
+    }
+
+    void StopAfterFailure() {
+        timer.Stop();
+        // 从按键消息中延后关闭，避免在 TextBox.WndProc 尚未返回时销毁窗口。
+        if (closing || IsDisposed) return;
+        closing = true;
+        try { BeginInvoke(new MethodInvoker(Close)); }
+        catch (InvalidOperationException) { Application.ExitThread(); }
     }
 }
 
@@ -150,12 +166,14 @@ static class Program {
         ledger.Record(17, true); ledger.Clear();
         Check(ledger.Held.Length == 0 && !ledger.Record(17, false), "用例边界清空记录");
         Check(Evidence.Hash("abc") == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", "UTF-8 校验值");
-        Console.WriteLine("7 项自测通过；没有创建窗口、注入输入或访问剪贴板。");
+        int fileChecks = FileIoTests.Run();
+        Console.WriteLine("7 项记账/校验自测及 " + fileChecks + " 项文件自测通过；没有创建窗口、注入输入或访问剪贴板。");
         return 0;
     }
 
     [STAThread] static int Main(string[] args) {
         try {
+            Console.SetError(new StreamWriter(Console.OpenStandardError(), new UTF8Encoding(false)) { AutoFlush = true });
             if (args.Length == 1 && args[0] == "--self-test") return SelfTest();
             if (args.Length != 2 || args[0] != "--output") throw new Exception("用法：HintTarget.exe --output 全新目录，或 --self-test");
             string folder = Path.GetFullPath(args[1]);
@@ -163,8 +181,12 @@ static class Program {
             if (Directory.Exists(folder) || File.Exists(folder)) throw new Exception("输出目录已存在；请使用全新路径");
             Directory.CreateDirectory(folder);
             Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false);
-            Application.Run(new TargetForm(folder));
-            return 0;
+            // 写入故障由记录层封闭并主动退出；其他未处理回调异常交给 Main，避免 .NET 模态框。
+            Application.SetUnhandledExceptionMode(UnhandledExceptionMode.ThrowException);
+            using (var form = new TargetForm(folder)) {
+                Application.Run(form);
+                return form.Failed ? 1 : 0;
+            }
         } catch (Exception error) {
             Console.Error.WriteLine(error.Message);
             return 1;
