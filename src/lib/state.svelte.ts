@@ -609,7 +609,12 @@ export class PanelState {
     const initialize = async () => {
       await subscribe(ipc.onPanelShown, (payload) => {
         const receivedAt = performance.now();
-        if (!Number.isSafeInteger(payload.session) || payload.session < this.session || payload.session <= this.lastShownSession) return;
+        if (!Number.isSafeInteger(payload.session) || payload.session < this.session) return;
+        if (payload.terminal_feedback === true) {
+          // 同一通用请求已隐藏后，只允许恢复关闭提示，不开启新选择或搜索许可。
+          if (payload.session !== this.session || payload.session !== this.lastShownSession
+            || this.visible || this.interaction === "close_only" || payload.interaction !== "close_only") return;
+        } else if (payload.session <= this.lastShownSession) return;
         this.lastShownSession = payload.session;
         this.searchRequest += 1;
         this.session = payload.session;

@@ -51,7 +51,37 @@ impl Interaction {
 enum NoSubmissionFinish {
     CloseRequested,
     CloseOnly,
+    ShowCloseOnly,
     Ignore,
+}
+
+fn generic_submission_finish(
+    result: &Value,
+    same_session: bool,
+    visible: bool,
+    interaction: Interaction,
+) -> Option<NoSubmissionFinish> {
+    if result["paste_result"] != "generic_not_submitted"
+        && result["paste_result"] != "generic_submission_unknown"
+    {
+        return None;
+    }
+    Some(
+        if !same_session || (result["request_cancelled"] == true && !visible) {
+            NoSubmissionFinish::Ignore
+        } else if result["request_cancelled"] == true {
+            if interaction == Interaction::Passive {
+                NoSubmissionFinish::CloseRequested
+            } else {
+                NoSubmissionFinish::Ignore
+            }
+        } else if visible {
+            NoSubmissionFinish::CloseOnly
+        } else {
+            // 通用路径先隐藏后发送；对同一请求的未提交/部分发送必须真正显示终止反馈。
+            NoSubmissionFinish::ShowCloseOnly
+        },
+    )
 }
 
 fn no_submission_finish(
@@ -79,22 +109,32 @@ fn no_submission_finish(
 
 fn no_submission_message(result: &Value) -> &'static str {
     match result["reason"].as_str() {
-        Some("native_clipboard_changed") => "剪贴板已变化，本次未粘贴，请关闭面板后重新呼出",
+        Some("generic_submission_unknown") => "粘贴结果未确认，请先检查目标，避免重复粘贴",
+        Some("native_clipboard_changed" | "generic_clipboard_changed") => {
+            "剪贴板已变化，本次未粘贴，请关闭面板后重新呼出"
+        }
         Some(
             "clipboard_capture_busy"
             | "clipboard_busy"
             | "native_clipboard_busy"
-            | "native_clipboard_close_failed",
+            | "native_clipboard_close_failed"
+            | "generic_clipboard_busy"
+            | "generic_clipboard_close_failed",
         ) => "剪贴板忙，本次未粘贴，请关闭面板后重新呼出",
         Some("record_missing") => "这条记录已不在历史里，本次未粘贴，请关闭面板后重新呼出",
         Some(
             "request_cancelled"
             | "native_input_desktop_unavailable"
+            | "generic_input_desktop_unavailable"
             | "invalid_target"
             | "selection_boundary_changed"
             | "native_modifiers_held"
+            | "generic_modifiers_held"
             | "target_may_be_elevated"
-            | "native_target_unavailable",
+            | "native_target_unavailable"
+            | "generic_restore_unavailable"
+            | "conditions_changed"
+            | "preflight_timeout",
         ) => "窗口状态已变化，本次未粘贴，请关闭面板后重新呼出",
         _ => "本次未粘贴，请关闭面板后重新呼出",
     }
@@ -526,6 +566,7 @@ impl Panel {
                 "panel:shown",
                 json!({"hotkeyToShowMs":shown.duration_since(started).as_secs_f64()*1000.0,"history":history,
                     "experiments":self.experiments.payload(),"interaction":self.interaction,
+                    "terminal_feedback":self.interaction == Interaction::CloseOnly,
                     "foregroundRevision":self.monitor.as_ref().map_or(0, |monitor| monitor.revision())}),
             );
         }
@@ -687,6 +728,36 @@ impl Panel {
     fn set_interaction(&mut self, interaction: Interaction) {
         self.interaction = interaction;
         self.emit("panel:interaction", json!({"interaction":interaction}));
+    }
+    fn show_submission_feedback(
+        &mut self,
+        app: &AppHandle,
+        logger: &Logger,
+    ) -> platform::Result<()> {
+        // 不建立新会话、许可或监听，也不激活窗口；仅恢复同一请求的关闭入口。
+        self.interaction = Interaction::CloseOnly;
+        self.mode = Mode::Quick;
+        self.awaiting_search = false;
+        self.foreground_taken = false;
+        self.permits = None;
+        self.monitor = None;
+        self.shown = Some(Instant::now());
+        self.painted = false;
+        webview::set_visible(
+            &self.window,
+            true,
+            logger.clone(),
+            self.session,
+            self.memory.clone(),
+        )?;
+        window::show(&self.window, &self.target)?;
+        self.shown_event(app);
+        self.log(
+            logger,
+            "submission_feedback",
+            json!({"interaction":"close_only","reactivated":false}),
+        );
+        Ok(())
     }
     fn activate_restricted(&mut self, logger: &Logger) -> platform::Result<()> {
         self.set_interaction(Interaction::ActivationPending);
@@ -1592,16 +1663,31 @@ impl Panel {
                 if session == self.session {
                     self.pasting = false;
                     self.paste_cancel = None;
-                    match no_submission_finish(&result, self.current(session), self.interaction) {
+                    match generic_submission_finish(
+                        &result,
+                        true,
+                        self.mode != Mode::Hidden,
+                        self.interaction,
+                    )
+                    .or_else(|| {
+                        no_submission_finish(&result, self.current(session), self.interaction)
+                    }) {
                         Some(NoSubmissionFinish::CloseRequested) => {
                             // 写前/写后均兑现等待中的关闭；Passive 禁止归还或抢回前台。
                             self.hide(logger)?;
                             return Ok(());
                         }
-                        Some(NoSubmissionFinish::CloseOnly) => {
+                        Some(
+                            finish @ (NoSubmissionFinish::CloseOnly
+                            | NoSubmissionFinish::ShowCloseOnly),
+                        ) => {
                             // 未提交保留真实写入事实，但不承诺剪贴板仍有此内容，不提供重试。
                             self.hint.take();
-                            self.set_interaction(Interaction::CloseOnly);
+                            if finish == NoSubmissionFinish::ShowCloseOnly {
+                                self.show_submission_feedback(app, logger)?;
+                            } else {
+                                self.set_interaction(Interaction::CloseOnly);
+                            }
                             self.emit(
                                 "panel:error",
                                 json!({"message":no_submission_message(&result),"close_only":true}),
@@ -1754,6 +1840,66 @@ impl Panel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generic_terminal_results_are_consumed_for_visible_hidden_cancelled_and_new_sessions() {
+        use crate::paste::{
+            generic::{Completion, Submission},
+            request::generic_outcome,
+        };
+        for written in [false, true] {
+            for completion in [
+                Err("clipboard_allocate_failed".to_owned()),
+                Err("clipboard_capture_busy".to_owned()),
+                Ok(Completion::NotSubmitted("generic_clipboard_changed")),
+                Ok(Completion::NotSubmitted("generic_clipboard_busy")),
+                Ok(Completion::NotSubmitted("generic_clipboard_close_failed")),
+                Ok(Completion::Submitted(Submission::Unknown)),
+            ] {
+                let mut result = json!({"clipboard_written":written,"request_cancelled":false});
+                result["paste_result"] = json!(generic_outcome(completion, &mut result));
+                for visible in [false, true] {
+                    assert_eq!(
+                        generic_submission_finish(&result, true, visible, Interaction::Activated),
+                        Some(if visible {
+                            NoSubmissionFinish::CloseOnly
+                        } else {
+                            NoSubmissionFinish::ShowCloseOnly
+                        })
+                    );
+                    assert_eq!(
+                        generic_submission_finish(&result, false, visible, Interaction::Activated),
+                        Some(NoSubmissionFinish::Ignore)
+                    );
+                    let message = no_submission_message(&result);
+                    assert!(!message.contains("已复制"));
+                    assert!(!message.contains("Ctrl+V"));
+                }
+                result["request_cancelled"] = json!(true);
+                assert_eq!(
+                    generic_submission_finish(&result, true, false, Interaction::Passive),
+                    Some(NoSubmissionFinish::Ignore)
+                );
+                assert_eq!(
+                    generic_submission_finish(&result, true, true, Interaction::Passive),
+                    Some(NoSubmissionFinish::CloseRequested)
+                );
+            }
+        }
+        let mut result = json!({"clipboard_written":true,"request_cancelled":false});
+        result["paste_result"] = json!(generic_outcome(
+            Ok(Completion::Submitted(Submission::Sent)),
+            &mut result
+        ));
+        assert_eq!(
+            generic_submission_finish(&result, true, false, Interaction::Activated),
+            None
+        );
+        assert_eq!(
+            no_submission_message(&json!({"reason":"generic_submission_unknown"})),
+            "粘贴结果未确认，请先检查目标，避免重复粘贴"
+        );
+    }
 
     #[test]
     fn unwritten_busy_is_close_only_but_requested_close_and_new_session_win() {

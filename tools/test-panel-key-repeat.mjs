@@ -132,6 +132,82 @@ const shown = (options = {}) => ({
   history: { items: items(), total: 9, recording: true, last_recorded_ms: null, store_status: null }, ...options,
 });
 
+test("通用终止反馈只恢复当前隐藏会话的关闭提示", async (suite) => {
+  const { PanelState, ipc, cleanup } = await compilePanel();
+  suite.after(cleanup);
+
+  for (const message of ["剪贴板已变化，本次未粘贴，请关闭面板后重新呼出", "粘贴结果未确认，请先检查目标，避免重复粘贴"]) {
+    await suite.test(message, async (context) => {
+      const { panel, focusCalls } = await createPanel(context, PanelState, ipc);
+      const beforeFocus = focusCalls();
+      ipc.emit("hidden", { session: 37 });
+      ipc.emit("shown", shown({ interaction: "close_only", terminal_feedback: true }));
+      ipc.emit("error", { session: 37, close_only: true, message });
+      assert.equal(panel.visible, true);
+      assert.equal(panel.session, 37);
+      assert.equal(panel.interaction, "close_only");
+      assert.equal(panel.message, message);
+      assert.equal(panel.filtered.length, 0);
+      assert.equal(panel.locked, true);
+      assert.equal(focusCalls(), beforeFocus);
+      keydown(panel, { key: "Enter" });
+      keyup(panel, { key: "Enter" });
+      await panel.choose(1, "paste", click());
+      panel.searchPointer({ preventDefault() {} });
+      ipc.emit("interaction", { session: 37, interaction: "activated" });
+      ipc.emit("shown", shown({ interaction: "close_only", terminal_feedback: true }));
+      assert.equal(panel.interaction, "close_only");
+      assert.equal(panel.message, message);
+      assert.deepEqual(ipc.calls, []);
+      panel.close();
+      assert.deepEqual(ipc.calls, [{ command: "hidePanel", session: 37 }]);
+      ipc.emit("hidden", { session: 37 });
+      ipc.emit("shown", shown({ interaction: "close_only", terminal_feedback: true }));
+      assert.equal(panel.visible, false, "已关闭的终止提示不能被同会话重复事件重新打开");
+      ipc.emit("shown", shown({ session: 38 }));
+      assert.equal(panel.visible, true);
+      assert.equal(panel.interaction, "quick");
+      assert.equal(panel.session, 38);
+    });
+  }
+
+  await suite.test("可见会话、未标记显示和非终止交互不能使用受限恢复", async (context) => {
+    const { panel } = await createPanel(context, PanelState, ipc);
+    panel.message = "当前选择";
+    ipc.emit("shown", shown({ interaction: "close_only", terminal_feedback: true }));
+    assert.equal(panel.interaction, "quick");
+    assert.equal(panel.message, "当前选择");
+    assert.equal(panel.selected, 1);
+    ipc.emit("hidden", { session: 37 });
+    for (const options of [
+      { interaction: "close_only" },
+      { terminal_feedback: true, interaction: "quick" },
+      { terminal_feedback: true, interaction: "close_only", session: 36 },
+      { terminal_feedback: true, interaction: "close_only", session: 38 },
+    ]) ipc.emit("shown", shown(options));
+    assert.equal(panel.visible, false);
+    assert.equal(panel.session, 37);
+  });
+
+  await suite.test("新会话和取消后的隐藏状态不接受迟到旧反馈", async (context) => {
+    const { panel } = await createPanel(context, PanelState, ipc);
+    ipc.emit("hidden", { session: 37 });
+    ipc.emit("error", { session: 37, close_only: true, message: "取消后的错误" });
+    assert.equal(panel.visible, false);
+    ipc.emit("shown", shown({ session: 38 }));
+    panel.message = "新会话";
+    ipc.emit("shown", shown({ interaction: "close_only", terminal_feedback: true }));
+    ipc.emit("error", { session: 37, close_only: true, message: "旧反馈" });
+    assert.equal(panel.visible, true);
+    assert.equal(panel.session, 38);
+    assert.equal(panel.interaction, "quick");
+    assert.equal(panel.message, "新会话");
+    ipc.emit("hidden", { session: 38 });
+    ipc.emit("shown", shown({ interaction: "close_only", terminal_feedback: true }));
+    assert.equal(panel.visible, false);
+  });
+});
+
 test("Activated DOM 快速取用、焦点准备与自然搜索输入", async (suite) => {
   const { PanelState, ipc, cleanup } = await compilePanel();
   suite.after(cleanup);

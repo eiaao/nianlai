@@ -43,6 +43,7 @@ pub struct Read {
 
 #[derive(Default)]
 pub struct Observation {
+    immediate: bool,
     first: Option<Read>,
     destroyed: bool,
     render_failed: bool,
@@ -59,6 +60,13 @@ impl Observation {
     }
 
     pub fn report(&self, sent: Instant) -> Value {
+        if self.immediate {
+            return json!({"status":"not_observable","observable":false,
+                "first_reader":null,"is_target":null,"relative_to_send_ms":null,
+                "timed_out":false,"first_read_only":false,
+                "ownership_lost":self.destroyed,"render_failed":self.render_failed,
+                "delay_failed":self.delay_failed});
+        }
         let delta = self.first.as_ref().map(|read| {
             if read.at >= sent {
                 read.at.duration_since(sent).as_secs_f64() * 1000.0
@@ -80,7 +88,7 @@ impl Observation {
             Some(_) if self.render_failed => "render_failed",
             Some(_) => "target_read",
         };
-        json!({"status":status,"first_reader":self.first.as_ref().map(|read| &read.process_name),
+        json!({"status":status,"observable":true,"first_reader":self.first.as_ref().map(|read| &read.process_name),
             "is_target":self.first.as_ref().and_then(|read| read.known.then_some(read.is_target)), "relative_to_send_ms":delta,
             "timed_out":status=="timeout", "first_read_only":true,
             "ownership_lost":self.destroyed,"render_failed":self.render_failed,"delay_failed":self.delay_failed})
@@ -319,6 +327,7 @@ fn write(
     delayed: bool,
     observation: Arc<Mutex<Observation>>,
 ) -> Result<()> {
+    observation.lock().unwrap().immediate = !delayed;
     let mut pending = BTreeMap::new();
     for (name, format) in &content.formats {
         pending.insert(
@@ -483,7 +492,6 @@ enum Command {
         observation: Arc<Mutex<Observation>>,
         reply: mpsc::SyncSender<Result<()>>,
     },
-    Materialize(mpsc::SyncSender<bool>),
     Stop,
 }
 struct Inner {
@@ -576,9 +584,6 @@ impl Service {
                                         observation,
                                     ));
                                 }
-                                Command::Materialize(reply) => {
-                                    let _ = reply.send(render_all(owner));
-                                }
                                 Command::Stop => {
                                     logger.event(
                                         "clipboard_shutdown_render",
@@ -659,14 +664,6 @@ impl Service {
         Ok(observation)
     }
 
-    pub fn materialize(&self) -> bool {
-        let (reply, receiver) = mpsc::sync_channel(1);
-        if self.command(Command::Materialize(reply)).is_ok() {
-            return receiver.recv().unwrap_or(false);
-        }
-        false
-    }
-
     pub fn shutdown(&self) {
         self.0.shutdown();
     }
@@ -697,6 +694,23 @@ impl Drop for Inner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn immediate_publication_is_not_observable_even_without_a_reader() {
+        let observation = Observation {
+            immediate: true,
+            ..Default::default()
+        };
+        for elapsed in [Duration::ZERO, Duration::from_secs(2)] {
+            let report = observation.report(Instant::now() - elapsed);
+            assert_eq!(report["status"], "not_observable");
+            assert_eq!(report["observable"], false);
+            assert_eq!(report["timed_out"], false);
+            assert!(report["first_reader"].is_null());
+            assert!(report["is_target"].is_null());
+            assert!(report["relative_to_send_ms"].is_null());
+        }
+    }
 
     #[test]
     fn classifies_only_the_first_read_inside_the_evidence_window() {

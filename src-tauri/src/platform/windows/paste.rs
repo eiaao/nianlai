@@ -4,9 +4,13 @@ use crate::{
     paste::{
         as_text,
         capture_access::AccessGuard,
+        generic,
         keys::{Key, Match, Table},
         native, native_access,
-        request::{Callbacks, Mode, Outcome, Request, RestorePolicy, conclude, native_outcome},
+        request::{
+            Callbacks, Mode, Outcome, Request, RestorePolicy, conclude, generic_outcome,
+            native_outcome,
+        },
     },
     platform::{REPLAY_WAIT, ReplayKey, Target, key_state},
 };
@@ -15,7 +19,7 @@ use std::{
     mem::size_of,
     path::Path,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     thread,
@@ -411,6 +415,8 @@ fn copy(
     report: &mut Value,
     reason: &'static str,
 ) -> Result<Outcome, String> {
+    report["submission_method"] = json!("clipboard_only");
+    report["clipboard_publication"] = json!("immediate");
     if request.cancelled.load(Ordering::Acquire) {
         return Err("request_cancelled".into());
     }
@@ -523,6 +529,24 @@ fn pure_unicode(content: &Content) -> bool {
                 )
                 .is_ok()
         })
+}
+
+pub(crate) fn native_candidate(
+    request: &Request,
+    written: &Content,
+    builtin_default_ctrl_v: bool,
+) -> bool {
+    native::eligible(native::Eligibility {
+        selection: request
+            .permit
+            .as_ref()
+            .is_some_and(|permit| permit.search()),
+        copy: request.mode == Mode::Copy,
+        ordinary: !request.external_switch && request.copy_only_reason.is_none(),
+        control_class: &request.target.focus_class,
+        pure_unicode: pure_unicode(written),
+        builtin_default_ctrl_v,
+    })
 }
 
 struct Native<'a> {
@@ -717,6 +741,299 @@ impl native::Backend for Native<'_> {
     }
 }
 
+struct Generic<'a> {
+    access: Option<AccessGuard>,
+    publication: Option<native_access::Publication>,
+    publication_error: Option<&'static str>,
+    clock: Instant,
+    budget: Option<native_access::Budget>,
+    request: &'a Request,
+    written: &'a Arc<Content>,
+    clipboard: &'a clipboard::Service,
+    stopping: &'a AtomicBool,
+    on_sent: &'a dyn Fn(),
+    restore: &'a dyn Fn(RestorePolicy) -> Option<crate::platform::FocusResult>,
+    synchronize: &'a dyn Fn() -> bool,
+    report: &'a mut Value,
+    inputs: Vec<INPUT>,
+    observation: Option<Arc<Mutex<clipboard::Observation>>>,
+    probe: Option<uia::Probe>,
+    before: uia::Evidence,
+    sent_at: Option<Instant>,
+}
+
+impl Generic<'_> {
+    fn synchronize(&self) -> Result<(), &'static str> {
+        if cancelled(self.request, self.stopping) {
+            return Err("request_cancelled");
+        }
+        if !(self.synchronize)() {
+            if let Some(permit) = self.request.permit.as_ref() {
+                permit.revoke();
+            }
+            return Err("selection_boundary_changed");
+        }
+        Ok(())
+    }
+
+    fn boundary(&mut self) -> Result<(), &'static str> {
+        self.synchronize()?;
+        let integrity = compare_integrity(&self.request.target);
+        let allowed = integrity["status"] == "allowed";
+        self.report["integrity"] = integrity;
+        let input_desktop = native::input_desktop_ready(
+            window::thread_input_desktop_receiving_input().ok(),
+            || {
+                if let Some(permit) = self.request.permit.as_ref() {
+                    permit.revoke();
+                }
+            },
+        );
+        if cancelled(self.request, self.stopping) {
+            Err("request_cancelled")
+        } else if !input_desktop {
+            Err("generic_input_desktop_unavailable")
+        } else if !window::valid(&self.request.target) {
+            Err("invalid_target")
+        } else if !self.request.permit.as_ref().is_some_and(|permit| {
+            permit.check(
+                self.request.session,
+                self.request.record_id,
+                self.request.mode,
+                &self.request.target,
+                window::foreground(),
+            )
+        }) {
+            Err("selection_boundary_changed")
+        } else if !allowed {
+            Err("target_may_be_elevated")
+        } else {
+            Ok(())
+        }
+    }
+
+    fn guard_submission(&mut self) -> Result<(), &'static str> {
+        self.boundary()?;
+        self.final_input_guard()
+    }
+
+    fn final_input_guard(&self) -> Result<(), &'static str> {
+        let input_desktop = native::input_desktop_ready(
+            window::thread_input_desktop_receiving_input().ok(),
+            || {
+                if let Some(permit) = self.request.permit.as_ref() {
+                    permit.revoke();
+                }
+            },
+        );
+        let current = checks(self.request);
+        if cancelled(self.request, self.stopping) {
+            Err("request_cancelled")
+        } else if !input_desktop {
+            Err("generic_input_desktop_unavailable")
+        } else if !current.permission {
+            Err("selection_boundary_changed")
+        } else if !current.foreground || !current.focus || !current.hidden {
+            Err("conditions_changed")
+        } else if !current.modifiers {
+            Err("generic_modifiers_held")
+        } else {
+            Ok(())
+        }
+    }
+
+    fn acquire(&mut self, stage: &'static str) -> Result<(), &'static str> {
+        let started = Instant::now();
+        let access = self
+            .clipboard
+            .capture_access()
+            .native(native_access::BUDGET, || {
+                cancelled(self.request, self.stopping)
+            });
+        self.report["generic_coordination"][stage] = json!({
+            "outcome":access.as_ref().map_or_else(|error| error.outcome(), |_| "acquired"),
+            "wait_ms":started.elapsed().as_secs_f64()*1000.0,
+            "budget_ms":native_access::BUDGET.as_millis() as u64,
+        });
+        self.access = Some(access.map_err(|error| error.reason())?);
+        Ok(())
+    }
+
+    fn report_availability(&mut self, result: Result<(), &'static str>) {
+        if let Some(budget) = self.budget.as_ref() {
+            self.report["generic_availability"] = json!({
+                "status":result.err().unwrap_or("ready"),
+                "probes":budget.probes(),"waits":budget.waits(),
+                "elapsed_ms":budget.observed_elapsed().as_secs_f64()*1000.0,
+                "budget_ms":native_access::BUDGET.as_millis() as u64,
+            });
+        }
+    }
+}
+
+impl native_access::Environment for Generic<'_> {
+    fn now(&self) -> Duration {
+        self.clock.elapsed()
+    }
+    fn pause(&mut self, duration: Duration) {
+        thread::sleep(duration);
+    }
+    fn guard(&mut self) -> Result<(), &'static str> {
+        self.guard_submission()
+    }
+    fn probe(&mut self, publication: native_access::Publication) -> native_access::Probe {
+        clipboard::probe_native(publication)
+    }
+}
+
+impl generic::Backend for Generic<'_> {
+    fn coordinate(&mut self) -> Result<(), String> {
+        self.acquire("publish").map_err(str::to_owned)
+    }
+    fn check_before_publish(&mut self) -> Result<(), &'static str> {
+        self.boundary()
+    }
+    fn publish(&mut self) -> Result<(), String> {
+        let observation = self.clipboard.write(
+            record(self.request),
+            self.written.clone(),
+            self.request.target.process,
+            false,
+        )?;
+        self.report["clipboard_written"] = json!(true);
+        {
+            let observed = observation
+                .lock()
+                .map_err(|_| "clipboard_observation_failed")?;
+            self.publication = observed.publication;
+            self.publication_error = observed.publication_error;
+        }
+        self.observation = Some(observation);
+        Ok(())
+    }
+    fn restore(&mut self) -> Result<(), &'static str> {
+        // 跨主线程等待回执前先释放本进程 reader 协调；归还后重获，再核对原 stamp。
+        drop(self.access.take());
+        let focus = (self.restore)(RestorePolicy::GenericBeforeInput);
+        if let Some(focus) = focus {
+            self.report["restore"] = json!(focus);
+            Ok(())
+        } else {
+            Err("generic_restore_unavailable")
+        }
+    }
+    fn prepare_submit(&mut self) -> Result<(), &'static str> {
+        self.boundary()?;
+        let (ready, confirmation) = preflight(self.request, self.stopping);
+        self.report["preflight"] = confirmation;
+        if cancelled(self.request, self.stopping) {
+            return Err("request_cancelled");
+        }
+        if !ready {
+            return Err("preflight_timeout");
+        }
+        // UIA 的基线读取依赖当前目标焦点，只能在归还后开始。
+        self.probe = self
+            .written
+            .text_value()
+            .map(|text| uia::Probe::start(self.request.target.process, text));
+        self.before = self
+            .probe
+            .as_ref()
+            .map(|probe| probe.baseline())
+            .unwrap_or_default();
+        self.report["layer3"] = json!(self.before);
+        Ok(())
+    }
+    fn available(&mut self) -> Result<(), &'static str> {
+        self.acquire("submit")?;
+        // 协调获取、UI 归还、既有松键等待各自计时，不消耗此 200ms 探针预算。
+        let mut budget = native_access::Budget::new(self.clock.elapsed());
+        let publication = self.publication;
+        let result = budget.wait(self, publication).map_err(|reason| {
+            generic::availability_reason(if reason == native_access::CHANGED {
+                self.publication_error.unwrap_or(reason)
+            } else {
+                reason
+            })
+        });
+        self.budget = Some(budget);
+        // 成功时日志延至唯一一次 SendInput 后，缩短最终探针与发键间隔。
+        if result.is_err() {
+            self.report_availability(result);
+        }
+        result
+    }
+    fn send(&mut self) -> Result<generic::Submission, &'static str> {
+        // 探针返回后仅做轻量输入复核；不在此再等待 UI、查 token 或构造日志。
+        self.final_input_guard()?;
+        let sent_at = Instant::now();
+        self.sent_at = Some(sent_at);
+        if cancelled(self.request, self.stopping) {
+            return Err("request_cancelled");
+        }
+        let sent = send(&self.inputs);
+        drop(self.access.take());
+        self.report_availability(Ok(()));
+        self.report["send_input"] = json!(sent);
+        self.report["expected_events"] = json!(self.inputs.len());
+        self.report["selected_to_send_ms"] =
+            json!(sent_at.duration_since(self.request.started).as_secs_f64() * 1000.0);
+        if sent != self.inputs.len() as u32 {
+            // 只补齐实际成功按下且尚未抬起的键，不能再发整套快捷键。
+            let cleanup = cleanup_events(&self.inputs, sent);
+            if !cleanup.is_empty() {
+                self.report["cleanup_send_input"] = json!(send(&cleanup));
+            }
+            return Ok(generic::Submission::from_input_count(
+                sent,
+                self.inputs.len(),
+            ));
+        }
+        (self.on_sent)();
+        Ok(generic::Submission::Sent)
+    }
+    fn observe(&mut self) -> bool {
+        let sent_at = self.sent_at.expect("发送后收集证据");
+        let before = std::mem::take(&mut self.before);
+        let layer3 = if let Some(probe) = self.probe.take() {
+            probe.sent(sent_at);
+            probe.finish(before, sent_at)
+        } else {
+            before
+        };
+        let confirmed = layer3.conclusion == "confirmed";
+        self.report["layer3"] = json!(layer3);
+        confirmed
+    }
+    fn finish(&mut self, _: Option<generic::Completion>) {
+        drop(self.access.take());
+        if let Some(observation) = self.observation.as_ref()
+            && let Ok(observation) = observation.lock()
+        {
+            // 即时发布不能观测首读者，不等待一秒，也不把零观测记为 timeout。
+            self.report["layer2"] = observation.report(self.sent_at.unwrap_or_else(Instant::now));
+        }
+    }
+}
+
+fn cleanup_events(inputs: &[INPUT], sent: u32) -> Vec<INPUT> {
+    let mut held_keys = Vec::new();
+    for event in inputs.iter().take(sent as usize) {
+        let key = unsafe { event.Anonymous.ki };
+        if key.dwFlags.contains(KEYEVENTF_KEYUP) {
+            held_keys.retain(|&(vk, _)| vk != key.wVk.0);
+        } else {
+            held_keys.push((key.wVk.0, key.dwFlags));
+        }
+    }
+    held_keys
+        .into_iter()
+        .rev()
+        .map(|(vk, flags)| input(vk, 0, flags | KEYEVENTF_KEYUP))
+        .collect()
+}
+
 // written 是实际写进剪贴板的内容：降级成文字时和 request.content（历史里的记录）不同。
 fn perform(
     request: &Request,
@@ -724,133 +1041,75 @@ fn perform(
     selected: Match,
     clipboard: &clipboard::Service,
     stopping: &AtomicBool,
-    on_sent: &dyn Fn(),
+    callbacks: Callbacks<'_>,
     report: &mut Value,
 ) -> Result<Outcome, String> {
     if cancelled(request, stopping) {
         return Err("request_cancelled".into());
     }
+    let copy_only = |report: &mut Value, reason| {
+        if let Some(focus) = (callbacks.restore)(RestorePolicy::LegacyBeforeSubmit) {
+            report["restore"] = json!(focus);
+        }
+        copy(request, written, clipboard, report, reason)
+    };
     let external_switch = request.external_switch;
     if request.mode == Mode::Copy {
-        return copy(request, written, clipboard, report, "user_copy");
+        return copy_only(report, "user_copy");
     }
     if !window::valid(&request.target) {
-        return copy(request, written, clipboard, report, "invalid_target");
+        return copy_only(report, "invalid_target");
     }
     if external_switch {
-        return copy(request, written, clipboard, report, "external_switch");
+        return copy_only(report, "external_switch");
     }
     if let Some(reason) = request.copy_only_reason {
-        return copy(request, written, clipboard, report, reason);
+        return copy_only(report, reason);
     }
-    if !request
-        .permit
-        .as_ref()
-        .is_some_and(|permit| permit.current(&request.target, window::foreground()))
-    {
-        return copy(
-            request,
-            written,
-            clipboard,
-            report,
-            "selection_boundary_changed",
-        );
+    if !request.permit.as_ref().is_some_and(|permit| {
+        permit.check(
+            request.session,
+            request.record_id,
+            request.mode,
+            &request.target,
+            window::foreground(),
+        )
+    }) {
+        return copy_only(report, "selection_boundary_changed");
     }
     let integrity = compare_integrity(&request.target);
     let allowed = integrity["status"] == "allowed";
     report["integrity"] = integrity;
     if !allowed {
-        return copy(
+        return copy_only(report, "target_may_be_elevated");
+    }
+    let result = {
+        let mut backend = Generic {
+            access: None,
+            publication: None,
+            publication_error: None,
+            clock: Instant::now(),
+            budget: None,
             request,
             written,
             clipboard,
+            stopping,
+            on_sent: callbacks.on_sent,
+            restore: callbacks.restore,
+            synchronize: callbacks.synchronize,
             report,
-            "target_may_be_elevated",
-        );
-    }
-    let (ready, confirmation) = preflight(request, stopping);
-    report["preflight"] = confirmation;
-    if cancelled(request, stopping) {
-        return Err("request_cancelled".into());
-    }
-    if !ready {
-        return copy(request, written, clipboard, report, "preflight_timeout");
-    }
-    let probe = written
-        .text_value()
-        .map(|text| uia::Probe::start(request.target.process, text));
-    let before = probe
-        .as_ref()
-        .map(|probe| probe.baseline())
-        .unwrap_or_default();
-    report["layer3"] = json!(before);
-    if cancelled(request, stopping) {
-        return Err("request_cancelled".into());
-    }
-    // UIA 和打开剪贴板期间用户可能改变焦点，所以在写入与发键前分别复核。
-    if !checks(request).all() {
-        return copy(request, written, clipboard, report, "conditions_changed");
-    }
-    let observation = clipboard.write(
-        record(request),
-        written.clone(),
-        request.target.process,
-        true,
-    )?;
-    report["clipboard_written"] = json!(true);
-    if cancelled(request, stopping) || !checks(request).all() {
-        report["clipboard_materialized"] = json!(clipboard.materialize());
-        report["reason"] = json!("conditions_changed");
-        return Ok(Outcome::CopiedOnly);
-    }
-    let inputs = sequence(selected.key);
-    let sent_at = Instant::now();
-    let sent = send(&inputs);
-    report["send_input"] = json!(sent);
-    report["expected_events"] = json!(inputs.len());
-    report["actual_key"] = json!(selected.key);
-    report["selected_to_send_ms"] =
-        json!(sent_at.duration_since(request.started).as_secs_f64() * 1000.0);
-    if sent != inputs.len() as u32 {
-        // 只补齐实际成功按下且尚未抬起的键，不能再发整套快捷键。
-        let mut held_keys = Vec::new();
-        for event in inputs.iter().take(sent as usize) {
-            let key = unsafe { event.Anonymous.ki };
-            if key.dwFlags.contains(KEYEVENTF_KEYUP) {
-                held_keys.retain(|&(vk, _)| vk != key.wVk.0);
-            } else {
-                held_keys.push((key.wVk.0, key.dwFlags));
-            }
-        }
-        let cleanup: Vec<_> = held_keys
-            .into_iter()
-            .rev()
-            .map(|(vk, flags)| input(vk, 0, flags | KEYEVENTF_KEYUP))
-            .collect();
-        if !cleanup.is_empty() {
-            report["cleanup_send_input"] = json!(send(&cleanup));
-        }
-        report["clipboard_materialized"] = json!(clipboard.materialize());
-        report["reason"] = json!("send_failed");
-        return Ok(Outcome::CopiedOnly);
-    }
-    on_sent();
-    let layer3 = if let Some(probe) = probe {
-        probe.sent(sent_at);
-        probe.finish(before, sent_at)
-    } else {
-        before
+            inputs: sequence(selected.key),
+            observation: None,
+            probe: None,
+            before: uia::Evidence::default(),
+            sent_at: None,
+        };
+        generic::run(&mut backend)
     };
-    let confirmed = layer3.conclusion == "confirmed";
-    report["layer3"] = json!(layer3);
-    while sent_at.elapsed() < Duration::from_secs(1)
-        && !observation.lock().unwrap().observed()
-        && !cancelled(request, stopping)
-    {
-        thread::sleep(Duration::from_millis(5));
+    if report["send_input"].as_u64().is_some_and(|sent| sent > 0) {
+        report["actual_key"] = json!(selected.key);
     }
-    report["layer2"] = observation.lock().unwrap().report(sent_at);
-    Ok(conclude(request.mode, true, confirmed, false))
+    Ok(generic_outcome(result, report))
 }
 
 pub fn execute(
@@ -862,6 +1121,7 @@ pub fn execute(
     exports: Option<&Path>,
 ) -> Value {
     let mut report = json!({"paste_result":null,"reason":null,"clipboard_written":false,
+        "submission_method":"send_input","clipboard_publication":"immediate",
         "record_id":request.record_id,"written_formats":[],
         "process_name":request.target.process_name,"window_class":request.target.window_class,
         "focus_class":request.target.focus_class,"focus_unknown":request.target.focus==0,
@@ -880,17 +1140,11 @@ pub fn execute(
     );
     report["as_text"] = conversion;
     // 转换后的 Arc 固定后才选择策略；不可按历史 kind 猜测，也不重复转换。
-    let candidate = native::eligible(native::Eligibility {
-        selection: request
-            .permit
-            .as_ref()
-            .is_some_and(|permit| permit.search()),
-        copy: request.mode == Mode::Copy,
-        ordinary: !request.external_switch && request.copy_only_reason.is_none(),
-        control_class: &request.target.focus_class,
-        pure_unicode: pure_unicode(&written),
-        builtin_default_ctrl_v: table.is_builtin_default_ctrl_v(selected),
-    });
+    let candidate = native_candidate(
+        &request,
+        &written,
+        table.is_builtin_default_ctrl_v(selected),
+    );
     let ordinary = candidate && compare_integrity(&request.target)["native_ordinary"] == true;
     let outcome = if ordinary {
         report["submission_method"] = json!("wm_paste");
@@ -928,16 +1182,13 @@ pub fn execute(
             });
         Ok(native_outcome(result, &mut report))
     } else {
-        if let Some(focus) = (callbacks.restore)(RestorePolicy::LegacyBeforeSubmit) {
-            report["restore"] = json!(focus);
-        }
         perform(
             &request,
             &written,
             selected,
             clipboard,
             stopping,
-            callbacks.on_sent,
+            callbacks,
             &mut report,
         )
     };
@@ -964,6 +1215,50 @@ pub fn execute(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn generic_partial_input_cleanup_only_releases_successful_held_keys() {
+        for (key, prefixes) in [
+            (
+                Key::CtrlV,
+                vec![vec![], vec![0x11], vec![0x56, 0x11], vec![0x11], vec![]],
+            ),
+            (
+                Key::CtrlShiftV,
+                vec![
+                    vec![],
+                    vec![0x11],
+                    vec![0x10, 0x11],
+                    vec![0x56, 0x10, 0x11],
+                    vec![0x10, 0x11],
+                    vec![0x11],
+                    vec![],
+                ],
+            ),
+            (
+                Key::ShiftInsert,
+                vec![vec![], vec![0x10], vec![0x2D, 0x10], vec![0x10], vec![]],
+            ),
+        ] {
+            let inputs = sequence(key);
+            for (sent, expected) in prefixes.into_iter().enumerate() {
+                let cleanup = cleanup_events(&inputs, sent as u32);
+                let actual: Vec<_> = cleanup
+                    .iter()
+                    .map(|event| unsafe { event.Anonymous.ki.wVk.0 })
+                    .collect();
+                assert_eq!(actual, expected);
+                for event in cleanup {
+                    let key = unsafe { event.Anonymous.ki };
+                    assert!(key.dwFlags.contains(KEYEVENTF_KEYUP));
+                    assert_eq!(key.dwExtraInfo, INPUT_MARKER);
+                    assert_eq!(
+                        key.dwFlags.contains(KEYEVENTF_EXTENDEDKEY),
+                        key.wVk.0 == 0x2D
+                    );
+                }
+            }
+        }
+    }
     #[test]
     fn native_text_qualification_uses_the_actual_fixed_conversion_and_rejects_extra_formats() {
         use crate::history::content::{Data, HTML};

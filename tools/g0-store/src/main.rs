@@ -1,4 +1,5 @@
 mod data;
+mod paste_fixture;
 use nianlai_store::{
     self as store, CopyEvent, Reader, Store,
     content::{Content, Data, PNG},
@@ -206,6 +207,11 @@ fn blob_bench(directory: &Path) -> Result<Value> {
 }
 fn run() -> Result<()> {
     let args = Args::parse()?;
+    // Fixture creation must never inherit a user's data directory from the environment.
+    if args.command == "paste-fixture" {
+        println!("{}", paste_fixture::create(&args.options)?);
+        return Ok(());
+    }
     let directory = args.directory()?;
     let result=match args.command.as_str() {
         "fill"=>fill(&directory,args.number("--count",10000)?,args.number("--seed",0x4e49414e4c4149)?)?,
@@ -230,7 +236,7 @@ fn run() -> Result<()> {
             std::thread::sleep(std::time::Duration::from_millis(args.number("--hold-ms",0)?));return Ok(());
         }
         "blob-bench"=>blob_bench(&directory)?,
-        _=>return Err("commands: fill search-bench writer check snapshot restore open-bench blob-bench; --dir PATH is required".into()),
+        _=>return Err("commands: fill search-bench writer check snapshot restore open-bench blob-bench paste-fixture; --dir PATH is required".into()),
     };
     println!("{result}");
     Ok(())

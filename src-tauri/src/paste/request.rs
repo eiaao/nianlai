@@ -20,6 +20,33 @@ pub enum Outcome {
     CopiedOnly,
     NativeSubmissionUnknown,
     NativeNotSubmitted,
+    GenericSubmissionUnknown,
+    GenericNotSubmitted,
+}
+
+// 通用提交已开始后，任何未发送/写入错误都终止旧请求，不能承诺仍可手动 Ctrl+V。
+pub(crate) fn generic_outcome(
+    result: Result<super::generic::Completion, String>,
+    report: &mut serde_json::Value,
+) -> Outcome {
+    use super::generic::{Completion, Submission};
+    match result {
+        Ok(Completion::NotSubmitted(reason)) => {
+            report["reason"] = serde_json::json!(reason);
+            Outcome::GenericNotSubmitted
+        }
+        Err(reason) => {
+            report["reason"] = serde_json::json!(reason);
+            Outcome::GenericNotSubmitted
+        }
+        Ok(Completion::Submitted(Submission::Sent)) => Outcome::Sent,
+        Ok(Completion::Submitted(Submission::Confirmed)) => Outcome::Confirmed,
+        Ok(Completion::Submitted(Submission::Unknown)) => {
+            report["reason"] = serde_json::json!("generic_submission_unknown");
+            Outcome::GenericSubmissionUnknown
+        }
+        Ok(Completion::Submitted(Submission::Refused)) => unreachable!("拒绝发送已转为未提交"),
+    }
 }
 
 // 只用于已选择原生策略的结果；锁前/写入错误也结束旧选择，不能重新开放已卸监听的面板。
@@ -48,6 +75,7 @@ pub(crate) fn native_outcome(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RestorePolicy {
     LegacyBeforeSubmit,
+    GenericBeforeInput,
     NativeAfterSubmit { unknown: bool },
 }
 
