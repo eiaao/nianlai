@@ -19,6 +19,30 @@ pub enum Outcome {
     Confirmed,
     CopiedOnly,
     NativeSubmissionUnknown,
+    NativeNotSubmitted,
+}
+
+// 只用于已选择原生策略的结果；锁前/写入错误也结束旧选择，不能重新开放已卸监听的面板。
+pub(crate) fn native_outcome(
+    result: Result<super::native::Completion, String>,
+    report: &mut serde_json::Value,
+) -> Outcome {
+    use super::native::{Completion, Submission};
+    match result {
+        Ok(Completion::NotSubmitted(reason)) => {
+            report["reason"] = serde_json::json!(reason);
+            Outcome::NativeNotSubmitted
+        }
+        Err(reason) => {
+            report["reason"] = serde_json::json!(reason);
+            Outcome::NativeNotSubmitted
+        }
+        Ok(Completion::Submitted(Submission::Sent)) => Outcome::Sent,
+        Ok(Completion::Submitted(Submission::Unknown)) => Outcome::NativeSubmissionUnknown,
+        Ok(Completion::Submitted(Submission::Refused)) => {
+            unreachable!("拒绝提交已转为未提交")
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

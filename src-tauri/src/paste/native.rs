@@ -116,7 +116,7 @@ pub fn open_holder(window_observed: bool, process: u32, own: u32, target: u32) -
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Completion {
-    CopiedOnly(&'static str),
+    NotSubmitted(&'static str),
     Submitted(Submission),
 }
 
@@ -124,7 +124,8 @@ pub trait Backend {
     fn synchronize(&mut self) -> bool;
     fn check(&mut self) -> Result<(), &'static str>;
     fn write(&mut self) -> Result<(), String>;
-    fn submit(&mut self) -> Submission;
+    fn prepare_submit(&mut self) -> Result<(), &'static str>;
+    fn submit(&mut self) -> Result<Submission, &'static str>;
     // 无论是否成功都只清理一次；提交后的清理不得改变已提交/未知的事实。
     fn finish(&mut self, result: Option<Completion>);
 }
@@ -137,22 +138,25 @@ pub fn run(backend: &mut impl Backend) -> Result<Completion, String> {
         }
         backend.write()?;
         if let Err(reason) = before {
-            return Ok(Completion::CopiedOnly(reason));
+            return Ok(Completion::NotSubmitted(reason));
         }
-        match guarded(backend) {
-            Err("request_cancelled") => Err("request_cancelled".into()),
-            Err(reason) => Ok(Completion::CopiedOnly(reason)),
-            Ok(()) => match backend.submit() {
-                Submission::Refused => Ok(Completion::CopiedOnly("native_target_unavailable")),
-                submission => Ok(Completion::Submitted(submission)),
-            },
+        if let Err(reason) = guarded(backend)
+            .and_then(|()| backend.prepare_submit())
+            .and_then(|()| guarded(backend))
+        {
+            return Ok(Completion::NotSubmitted(reason));
+        }
+        match backend.submit() {
+            Err(reason) => Ok(Completion::NotSubmitted(reason)),
+            Ok(Submission::Refused) => Ok(Completion::NotSubmitted("native_target_unavailable")),
+            Ok(submission) => Ok(Completion::Submitted(submission)),
         }
     })();
     backend.finish(result.as_ref().ok().copied());
     result
 }
 
-fn guarded(backend: &mut impl Backend) -> Result<(), &'static str> {
+pub(crate) fn guarded(backend: &mut impl Backend) -> Result<(), &'static str> {
     let synchronized = backend.synchronize();
     let check = backend.check();
     if check == Err("request_cancelled") || synchronized {
@@ -348,19 +352,26 @@ mod tests {
                 Ok(())
             }
         }
-        fn submit(&mut self) -> Submission {
+        fn prepare_submit(&mut self) -> Result<(), &'static str> {
+            self.operations.push("prepare");
+            Ok(())
+        }
+        fn submit(&mut self) -> Result<Submission, &'static str> {
             self.operations.push("submit");
             self.committed += 1;
-            self.submission
+            Ok(self.submission)
         }
         fn finish(&mut self, result: Option<Completion>) {
-            self.operations.extend(["activate", "hide", "blur"]);
+            self.operations.push("release");
+            if matches!(result, Some(Completion::Submitted(_))) {
+                self.operations.extend(["activate", "hide", "blur"]);
+            }
             self.finished = result;
         }
     }
     #[test]
     fn submission_finishes_before_activation_hiding_or_blurring() {
-        let mut script = Script::new([Ok(()), Ok(())]);
+        let mut script = Script::new([Ok(()), Ok(()), Ok(())]);
         assert_eq!(
             run(&mut script).unwrap(),
             Completion::Submitted(Submission::Sent)
@@ -368,7 +379,8 @@ mod tests {
         assert_eq!(
             script.operations,
             [
-                "fence", "check", "write", "fence", "check", "submit", "activate", "hide", "blur"
+                "fence", "check", "write", "fence", "check", "prepare", "fence", "check", "submit",
+                "release", "activate", "hide", "blur"
             ]
         );
         assert_eq!(script.committed, 1);
@@ -382,7 +394,7 @@ mod tests {
             let mut script = Script::new(checks);
             assert_eq!(
                 run(&mut script).unwrap(),
-                Completion::CopiedOnly("selection_boundary_changed")
+                Completion::NotSubmitted("selection_boundary_changed")
             );
             assert_eq!(script.committed, 0);
         }
@@ -394,12 +406,26 @@ mod tests {
             vec![Ok(()), Err("request_cancelled")],
         ] {
             let mut script = Script::new(checks);
-            assert_eq!(run(&mut script).unwrap_err(), "request_cancelled");
+            let before_write = script.checks.len() == 1;
+            if before_write {
+                assert_eq!(run(&mut script).unwrap_err(), "request_cancelled");
+            } else {
+                assert_eq!(
+                    run(&mut script).unwrap(),
+                    Completion::NotSubmitted("request_cancelled")
+                );
+            }
             assert_eq!(script.committed, 0);
             assert_eq!(
-                script.operations.iter().filter(|&&op| op == "hide").count(),
+                script
+                    .operations
+                    .iter()
+                    .filter(|&&op| op == "release")
+                    .count(),
                 1
             );
+            assert!(!script.operations.contains(&"activate"));
+            assert_eq!(script.operations.contains(&"write"), !before_write);
         }
         let mut script = Script::new([Ok(())]);
         script.writes_fail = true;
@@ -408,7 +434,7 @@ mod tests {
     }
     #[test]
     fn timeout_can_have_committed_and_must_never_retry_or_change_to_copied_only() {
-        let mut script = Script::new([Ok(()), Ok(())]);
+        let mut script = Script::new([Ok(()), Ok(()), Ok(())]);
         script.submission = Submission::Unknown;
         let expected = Completion::Submitted(Submission::Unknown);
         assert_eq!(run(&mut script).unwrap(), expected);
@@ -433,7 +459,7 @@ mod tests {
         script.synchronized = false;
         assert_eq!(
             run(&mut script).unwrap(),
-            Completion::CopiedOnly("selection_boundary_changed")
+            Completion::NotSubmitted("selection_boundary_changed")
         );
         assert_eq!(script.committed, 0);
         let refused = Delivery {
@@ -454,5 +480,52 @@ mod tests {
             error_code: None,
         };
         assert_eq!(acknowledged.submission(), Submission::Sent);
+    }
+
+    #[test]
+    fn post_write_guard_failure_is_not_a_manual_paste_promise() {
+        let mut script = Script::new([Ok(()), Err("selection_boundary_changed")]);
+        let result = run(&mut script).unwrap();
+        assert_eq!(
+            result,
+            Completion::NotSubmitted("selection_boundary_changed")
+        );
+        assert_eq!(
+            script
+                .operations
+                .iter()
+                .filter(|&&op| op == "write")
+                .count(),
+            1
+        );
+        assert_eq!(script.committed, 0);
+    }
+
+    #[test]
+    fn cancellation_after_write_keeps_the_written_but_unsubmitted_fact() {
+        let mut script = Script::new([Ok(()), Err("request_cancelled")]);
+        assert_eq!(
+            run(&mut script).unwrap(),
+            Completion::NotSubmitted("request_cancelled")
+        );
+        assert_eq!(
+            script
+                .operations
+                .iter()
+                .filter(|&&op| op == "write")
+                .count(),
+            1
+        );
+        assert_eq!(script.committed, 0);
+    }
+
+    #[test]
+    fn final_identity_refusal_is_not_a_manual_paste_promise() {
+        let mut script = Script::new([Ok(()), Ok(()), Ok(())]);
+        script.submission = Submission::Refused;
+        assert_eq!(
+            run(&mut script).unwrap(),
+            Completion::NotSubmitted("native_target_unavailable")
+        );
     }
 }

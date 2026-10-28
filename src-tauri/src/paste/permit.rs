@@ -543,7 +543,11 @@ mod tests {
             }
             Ok(())
         }
-        fn submit(&mut self) -> crate::paste::native::Submission {
+        fn prepare_submit(&mut self) -> Result<(), &'static str> {
+            self.operations.push("prepare");
+            Ok(())
+        }
+        fn submit(&mut self) -> Result<crate::paste::native::Submission, &'static str> {
             self.operations.push("submit");
             self.attempted += 1;
             if let Some(change) = self.change_after_submit {
@@ -554,10 +558,12 @@ mod tests {
                 self.current = 40;
                 self.cancelled = true;
             }
-            self.submission
+            Ok(self.submission)
         }
-        fn finish(&mut self, _: Option<crate::paste::native::Completion>) {
-            self.cleanup();
+        fn finish(&mut self, result: Option<crate::paste::native::Completion>) {
+            if matches!(result, Some(crate::paste::native::Completion::Submitted(_))) {
+                self.cleanup();
+            }
         }
     }
 
@@ -579,7 +585,8 @@ mod tests {
         assert_eq!(
             replay.operations,
             [
-                "fence", "check", "write", "fence", "check", "submit", "activate", "hide", "blur"
+                "fence", "check", "write", "fence", "check", "prepare", "fence", "check", "submit",
+                "activate", "hide", "blur"
             ]
         );
         assert_eq!(replay.attempted, 1);
@@ -621,7 +628,7 @@ mod tests {
                 }
                 assert_eq!(
                     crate::paste::native::run(&mut replay).unwrap(),
-                    crate::paste::native::Completion::CopiedOnly(
+                    crate::paste::native::Completion::NotSubmitted(
                         "native_input_desktop_unavailable"
                     )
                 );
@@ -642,7 +649,7 @@ mod tests {
             assert_eq!(replay.check(), Err("selection_boundary_changed"));
             assert_eq!(
                 crate::paste::native::run(&mut replay).unwrap(),
-                crate::paste::native::Completion::CopiedOnly("selection_boundary_changed")
+                crate::paste::native::Completion::NotSubmitted("selection_boundary_changed")
             );
             assert_eq!(replay.attempted, 0);
             assert!(!replay.operations.contains(&"activate"));

@@ -71,15 +71,20 @@ impl Backend for Script {
             Ok(())
         }
     }
-    fn submit(&mut self) -> Submission {
-        self.trace.lock().unwrap().push("submit");
-        self.submission
+    fn prepare_submit(&mut self) -> Result<(), &'static str> {
+        Ok(())
     }
-    fn finish(&mut self, _: Option<Completion>) {
+    fn submit(&mut self) -> Result<Submission, &'static str> {
+        self.trace.lock().unwrap().push("submit");
+        Ok(self.submission)
+    }
+    fn finish(&mut self, result: Option<Completion>) {
         drop(self.access.take());
         // 清理/UI阶段已能由reader重新获得访问权。
         let _reader = self.gate.native(WAIT, || false).unwrap();
-        self.trace.lock().unwrap().push("restore");
+        if matches!(result, Some(Completion::Submitted(_))) {
+            self.trace.lock().unwrap().push("restore");
+        }
     }
 }
 
@@ -365,7 +370,7 @@ fn native_error_refusal_unknown_and_cancellation_release_before_cleanup_once() {
             "write_failed" => assert_eq!(result.unwrap_err(), "write_failed"),
             "refused" => assert_eq!(
                 result.unwrap(),
-                Completion::CopiedOnly("native_target_unavailable")
+                Completion::NotSubmitted("native_target_unavailable")
             ),
             "unknown" => assert_eq!(result.unwrap(), Completion::Submitted(Submission::Unknown)),
             "cancelled" => assert_eq!(result.unwrap_err(), "request_cancelled"),
@@ -374,7 +379,7 @@ fn native_error_refusal_unknown_and_cancellation_release_before_cleanup_once() {
         let events = trace.lock().unwrap();
         assert_eq!(
             events.iter().filter(|event| **event == "restore").count(),
-            1
+            usize::from(case == "unknown")
         );
         assert_eq!(
             events.iter().filter(|event| **event == "submit").count(),
@@ -475,8 +480,8 @@ fn after_wait_original_selection_and_input_desktop_guards_still_refuse_submissio
         } else {
             "selection_boundary_changed"
         };
-        assert_eq!(native.join().unwrap(), Completion::CopiedOnly(reason));
-        assert_eq!(*trace.lock().unwrap(), ["write", "restore"]);
+        assert_eq!(native.join().unwrap(), Completion::NotSubmitted(reason));
+        assert_eq!(*trace.lock().unwrap(), ["write"]);
     }
 }
 

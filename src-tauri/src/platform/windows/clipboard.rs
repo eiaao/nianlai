@@ -5,7 +5,7 @@ use crate::{
         content::{Content, Data, FILES, Fingerprint, HTML, RTF, TEXT},
     },
     log::Logger,
-    paste::capture_access::CaptureAccess,
+    paste::{capture_access::CaptureAccess, native_access},
     platform::Result,
 };
 use serde_json::{Value, json};
@@ -47,6 +47,8 @@ pub struct Observation {
     destroyed: bool,
     render_failed: bool,
     delay_failed: bool,
+    pub publication: Option<native_access::Publication>,
+    pub publication_error: Option<&'static str>,
 }
 
 impl Observation {
@@ -119,13 +121,54 @@ impl Drop for Memory {
         }
     }
 }
-struct Open;
-impl Drop for Open {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = CloseClipboard();
+struct Open(bool);
+impl Open {
+    fn close(mut self) -> bool {
+        if unsafe { CloseClipboard() }.is_ok() {
+            self.0 = false;
+            true
+        } else {
+            // 首次失败即不能提交；Drop 仅尽力释放，不能把第二次关闭当成许可。
+            false
         }
     }
+}
+impl Drop for Open {
+    fn drop(&mut self) {
+        if self.0 {
+            unsafe {
+                let _ = CloseClipboard();
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct NativeProbe {
+    open: Option<Open>,
+}
+impl native_access::Clipboard for NativeProbe {
+    fn open(&mut self) -> bool {
+        if unsafe { OpenClipboard(None) }.is_err() {
+            return false;
+        }
+        self.open = Some(Open(true));
+        true
+    }
+    fn sequence(&mut self) -> u32 {
+        unsafe { GetClipboardSequenceNumber() }
+    }
+    fn owner(&mut self) -> usize {
+        unsafe { GetClipboardOwner() }.unwrap_or_default().0 as usize
+    }
+    fn close(&mut self) -> bool {
+        self.open.take().is_some_and(Open::close)
+    }
+}
+
+// 与生产路径共用的实际探针入口；显式桌面诊断也必须经过同一 Open/stamp/Close 顺序。
+pub(crate) fn probe_native(publication: native_access::Publication) -> native_access::Probe {
+    native_access::probe(&mut NativeProbe::default(), publication)
 }
 
 struct Pending {
@@ -224,7 +267,7 @@ fn render_all(owner: HWND) -> bool {
         }
         thread::sleep(Duration::from_millis(5));
     }
-    let _open = Open;
+    let _open = Open(true);
     if unsafe { GetClipboardOwner() }.ok() == Some(owner) {
         render(None, false);
     }
@@ -335,7 +378,7 @@ fn write(
         }
         thread::sleep(Duration::from_millis(5));
     }
-    let _open = Open;
+    let open = Open(true);
     unsafe {
         EmptyClipboard().map_err(|_| "clipboard_empty_failed")?;
     }
@@ -351,7 +394,7 @@ fn write(
             *state.borrow_mut() = Some(Pending {
                 formats: pending,
                 target,
-                observation,
+                observation: observation.clone(),
             })
         });
         for id in ids {
@@ -382,7 +425,22 @@ fn write(
             memory.transfer(id).map_err(|_| "clipboard_format_failed")?;
         }
     }
-    drop(_open);
+    // 成功写入的事实和“可以安全提交”分开：关闭或快照失败仍然返回写入成功。
+    // 先在持锁时取本次 sequence 基线；Close 成功后、可能等待存储线程的 reuse 前采样，
+    // 且必须仍与基线一致，避免把同 owner 的后来改写误认成本次发布。
+    let publication = native_access::publish(
+        owner.0 as usize,
+        || open.close(),
+        || unsafe { GetClipboardSequenceNumber() },
+        || unsafe { GetClipboardOwner() }.unwrap_or_default().0 as usize,
+    );
+    {
+        let mut observed = observation.lock().unwrap();
+        match publication {
+            Ok(publication) => observed.publication = Some(publication),
+            Err(reason) => observed.publication_error = Some(reason),
+        }
+    }
     history.reuse(record.id);
     Ok(())
 }

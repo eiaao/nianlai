@@ -5,8 +5,8 @@ use crate::{
         as_text,
         capture_access::AccessGuard,
         keys::{Key, Match, Table},
-        native,
-        request::{Callbacks, Mode, Outcome, Request, RestorePolicy, conclude},
+        native, native_access,
+        request::{Callbacks, Mode, Outcome, Request, RestorePolicy, conclude, native_outcome},
     },
     platform::{REPLAY_WAIT, ReplayKey, Target, key_state},
 };
@@ -527,6 +527,10 @@ fn pure_unicode(content: &Content) -> bool {
 
 struct Native<'a> {
     access: Option<AccessGuard>,
+    publication: Option<native_access::Publication>,
+    publication_error: Option<&'static str>,
+    clock: Instant,
+    budget: Option<native_access::Budget>,
     request: &'a Request,
     written: &'a Arc<Content>,
     clipboard: &'a clipboard::Service,
@@ -535,6 +539,52 @@ struct Native<'a> {
     on_sent: &'a dyn Fn(),
     synchronize: &'a dyn Fn() -> bool,
     report: &'a mut Value,
+}
+impl Native<'_> {
+    fn report_availability(&mut self, stage: &'static str, result: Result<(), &'static str>) {
+        if let Some(budget) = self.budget.as_ref() {
+            self.report["native_availability"] = json!({
+                "stage":stage,"status":result.err().unwrap_or("ready"),
+                "probes":budget.probes(),"waits":budget.waits(),
+                "elapsed_ms":budget.observed_elapsed().as_secs_f64()*1000.0,
+                "budget_ms":native_access::BUDGET.as_millis() as u64,
+            });
+        }
+    }
+    fn available(&mut self, stage: &'static str) -> Result<(), &'static str> {
+        let mut budget = self
+            .budget
+            .take()
+            .unwrap_or_else(|| native_access::Budget::new(self.clock.elapsed()));
+        let publication = self.publication;
+        let result = budget.wait(self, publication).map_err(|reason| {
+            if reason == native_access::CHANGED {
+                self.publication_error.unwrap_or(reason)
+            } else {
+                reason
+            }
+        });
+        self.budget = Some(budget);
+        // 末次探针成功后不在唯一发送之前构造日志；失败或准备阶段可立即记录。
+        if stage != "final" || result.is_err() {
+            self.report_availability(stage, result);
+        }
+        result
+    }
+}
+impl native_access::Environment for Native<'_> {
+    fn now(&self) -> Duration {
+        self.clock.elapsed()
+    }
+    fn pause(&mut self, duration: Duration) {
+        thread::sleep(duration);
+    }
+    fn guard(&mut self) -> Result<(), &'static str> {
+        native::guarded(self)
+    }
+    fn probe(&mut self, publication: native_access::Publication) -> native_access::Probe {
+        clipboard::probe_native(publication)
+    }
 }
 impl native::Backend for Native<'_> {
     fn synchronize(&mut self) -> bool {
@@ -589,37 +639,66 @@ impl native::Backend for Native<'_> {
             return Err("request_cancelled".into());
         }
         // 原生提交不需要延迟渲染；固定的实际格式只写一次。
-        self.clipboard.write(
+        let observation = self.clipboard.write(
             record(self.request),
             self.written.clone(),
             self.request.target.process,
             false,
         )?;
         self.report["clipboard_written"] = json!(true);
+        if let Ok(observation) = observation.lock() {
+            self.publication = observation.publication;
+            self.publication_error = observation.publication_error;
+        }
         Ok(())
     }
-    fn submit(&mut self) -> native::Submission {
-        let sent_at = Instant::now();
+    fn prepare_submit(&mut self) -> Result<(), &'static str> {
+        self.available("prepare")
+    }
+    fn submit(&mut self) -> Result<native::Submission, &'static str> {
         let mut holders = [Value::Null, Value::Null];
+        // 诊断查询在末次实际探针之前；它不以 NULL 或持有者分类代替可用性判断。
+        holders[0] = open_holder(self.request.target.process);
+        self.available("final")?;
+        if cancelled(self.request, self.stopping) {
+            return Err("request_cancelled");
+        }
+        let sent_at = Instant::now();
         // 返回值只证明消息调用完成，绝不读取 WM_PASTE 的结果值推断内容成功。
+        // 最后 Open/Close 与目标自行打开之间仍有跨进程 TOCTOU，不能宣称原子交付。
         let delivery = submit_native_message_observed(
             self.request.target.focus,
             self.request.target.thread,
             self.request.target.process,
             NATIVE_TIMEOUT_MS,
-            |before| holders[usize::from(!before)] = open_holder(self.request.target.process),
+            |before| {
+                if !before {
+                    holders[1] = open_holder(self.request.target.process);
+                }
+            },
         );
+        self.report_availability("final", Ok(()));
         self.report["native_submission"] = json!({"attempted":delivery.attempted,"acknowledged":delivery.acknowledged,
             "status":if !delivery.attempted {"not_submitted"} else if delivery.acknowledged {"sent"} else {"unknown"},
             "timeout_ms":NATIVE_TIMEOUT_MS,"error_code":delivery.error_code,
-            "open_holder_before":holders[0],"open_holder_after":holders[1]});
-        self.report["selected_to_send_ms"] =
-            json!(sent_at.duration_since(self.request.started).as_secs_f64() * 1000.0);
-        delivery.submission()
+            "open_holder_before":holders[0],"open_holder_before_stage":"before_final_probe",
+            "open_holder_after":holders[1]});
+        if delivery.attempted {
+            self.report["selected_to_send_ms"] =
+                json!(sent_at.duration_since(self.request.started).as_secs_f64() * 1000.0);
+        }
+        Ok(delivery.submission())
     }
     fn finish(&mut self, result: Option<native::Completion>) {
         // UI 归还可跨线程等待；先关闭本次 reader 排斥区间。
         drop(self.access.take());
+        if !matches!(result, Some(native::Completion::Submitted(_))) {
+            if let Some(native::Completion::NotSubmitted(reason)) = result {
+                self.report_availability("finished", Err(reason));
+            }
+            self.report["native_cleanup"] = json!({"skipped":"not_submitted"});
+            return;
+        }
         let unknown = result == Some(native::Completion::Submitted(native::Submission::Unknown));
         if unknown {
             self.report["reason"] = json!("native_submission_unknown");
@@ -832,6 +911,10 @@ pub fn execute(
             .and_then(|access| {
                 let mut backend = Native {
                     access: Some(access),
+                    publication: None,
+                    publication_error: None,
+                    clock: Instant::now(),
+                    budget: None,
                     request: &request,
                     written: &written,
                     clipboard,
@@ -843,19 +926,7 @@ pub fn execute(
                 };
                 native::run(&mut backend)
             });
-        result.map(|completion| match completion {
-            native::Completion::CopiedOnly(reason) => {
-                report["reason"] = json!(reason);
-                Outcome::CopiedOnly
-            }
-            native::Completion::Submitted(native::Submission::Sent) => Outcome::Sent,
-            native::Completion::Submitted(native::Submission::Unknown) => {
-                Outcome::NativeSubmissionUnknown
-            }
-            native::Completion::Submitted(native::Submission::Refused) => {
-                unreachable!("拒绝提交已转为只复制")
-            }
-        })
+        Ok(native_outcome(result, &mut report))
     } else {
         if let Some(focus) = (callbacks.restore)(RestorePolicy::LegacyBeforeSubmit) {
             report["restore"] = json!(focus);

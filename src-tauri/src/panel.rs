@@ -48,23 +48,56 @@ impl Interaction {
 }
 
 #[derive(Debug, PartialEq)]
-enum UnwrittenFinish {
+enum NoSubmissionFinish {
     CloseRequested,
     CloseOnly,
+    Ignore,
 }
 
-fn unwritten_finish(
+fn no_submission_finish(
     result: &Value,
     current: bool,
     interaction: Interaction,
-) -> Option<UnwrittenFinish> {
-    if !current || result["clipboard_written"] != false {
+) -> Option<NoSubmissionFinish> {
+    let native = result["paste_result"] == "native_not_submitted";
+    if !current {
+        return native.then_some(NoSubmissionFinish::Ignore);
+    }
+    if !native && result["clipboard_written"] != false {
         return None;
     }
     if result["request_cancelled"] == true {
-        return (interaction == Interaction::Passive).then_some(UnwrittenFinish::CloseRequested);
+        return if interaction == Interaction::Passive {
+            Some(NoSubmissionFinish::CloseRequested)
+        } else {
+            native.then_some(NoSubmissionFinish::Ignore)
+        };
     }
-    (result["reason"] == "clipboard_capture_busy").then_some(UnwrittenFinish::CloseOnly)
+    (native || result["reason"] == "clipboard_capture_busy")
+        .then_some(NoSubmissionFinish::CloseOnly)
+}
+
+fn no_submission_message(result: &Value) -> &'static str {
+    match result["reason"].as_str() {
+        Some("native_clipboard_changed") => "剪贴板已变化，本次未粘贴，请关闭面板后重新呼出",
+        Some(
+            "clipboard_capture_busy"
+            | "clipboard_busy"
+            | "native_clipboard_busy"
+            | "native_clipboard_close_failed",
+        ) => "剪贴板忙，本次未粘贴，请关闭面板后重新呼出",
+        Some("record_missing") => "这条记录已不在历史里，本次未粘贴，请关闭面板后重新呼出",
+        Some(
+            "request_cancelled"
+            | "native_input_desktop_unavailable"
+            | "invalid_target"
+            | "selection_boundary_changed"
+            | "native_modifiers_held"
+            | "target_may_be_elevated"
+            | "native_target_unavailable",
+        ) => "窗口状态已变化，本次未粘贴，请关闭面板后重新呼出",
+        _ => "本次未粘贴，请关闭面板后重新呼出",
+    }
 }
 
 enum ShowSource {
@@ -1550,23 +1583,34 @@ impl Panel {
                     result["request_cancelled"] = json!(true);
                 }
                 logger.event("paste", result.clone());
-                if result["clipboard_written"] == true && self.mode != Mode::Hidden {
+                if session == self.session
+                    && result["clipboard_written"] == true
+                    && self.mode != Mode::Hidden
+                {
                     self.emit("panel:history-changed", json!({}));
                 }
                 if session == self.session {
                     self.pasting = false;
                     self.paste_cancel = None;
-                    let unwritten =
-                        unwritten_finish(&result, self.current(session), self.interaction);
-                    if unwritten == Some(UnwrittenFinish::CloseRequested) {
-                        // worker已排完按键且未写入，兑现等待期间的关闭；Passive禁止抢回前台。
-                        self.hide(logger)?;
-                        return Ok(());
-                    }
-                    let close_only = unwritten == Some(UnwrittenFinish::CloseOnly);
-                    if close_only {
-                        // worker已卸监听；旧会话不能再取用，只留明确关闭入口。
-                        self.set_interaction(Interaction::CloseOnly);
+                    match no_submission_finish(&result, self.current(session), self.interaction) {
+                        Some(NoSubmissionFinish::CloseRequested) => {
+                            // 写前/写后均兑现等待中的关闭；Passive 禁止归还或抢回前台。
+                            self.hide(logger)?;
+                            return Ok(());
+                        }
+                        Some(NoSubmissionFinish::CloseOnly) => {
+                            // 未提交保留真实写入事实，但不承诺剪贴板仍有此内容，不提供重试。
+                            self.hint.take();
+                            self.set_interaction(Interaction::CloseOnly);
+                            self.emit(
+                                "panel:error",
+                                json!({"message":no_submission_message(&result),"close_only":true}),
+                            );
+                            // 必须绕过 paste-result 和 deferred hide；前端继续复用已有 CloseOnly。
+                            return Ok(());
+                        }
+                        Some(NoSubmissionFinish::Ignore) => return Ok(()),
+                        None => {}
                     }
                     // cleanup 回执超时也必须显示未知结果；不再尝试归还，也不允许用户误重试。
                     let native_unknown = result["paste_result"] == "native_submission_unknown";
@@ -1602,10 +1646,7 @@ impl Panel {
                         } else {
                             "写入剪贴板失败，请重试。"
                         };
-                        self.emit(
-                            "panel:error",
-                            json!({"message":message,"close_only":close_only}),
-                        );
+                        self.emit("panel:error", json!({"message":message,"close_only":false}));
                     } else if result["clipboard_written"] == true {
                         if let Some(dwell) = dwell {
                             // 告诉前端面板还开着、要停留：页脚当场显示提示，停留期间不再发起粘贴。
@@ -1718,23 +1759,29 @@ mod tests {
     fn unwritten_busy_is_close_only_but_requested_close_and_new_session_win() {
         let mut result = json!({"clipboard_written":false,"reason":"clipboard_capture_busy","request_cancelled":false});
         assert_eq!(
-            unwritten_finish(&result, true, Interaction::Activated),
-            Some(UnwrittenFinish::CloseOnly)
+            no_submission_finish(&result, true, Interaction::Activated),
+            Some(NoSubmissionFinish::CloseOnly)
         );
         // 即使busy已产出，UI接收前的Esc也以当前取消标记为准。
         result["request_cancelled"] = json!(true);
         assert_eq!(
-            unwritten_finish(&result, true, Interaction::Passive),
-            Some(UnwrittenFinish::CloseRequested)
+            no_submission_finish(&result, true, Interaction::Passive),
+            Some(NoSubmissionFinish::CloseRequested)
         );
-        assert_eq!(unwritten_finish(&result, false, Interaction::Passive), None);
+        assert_eq!(
+            no_submission_finish(&result, false, Interaction::Passive),
+            None
+        );
         result["reason"] = json!("request_cancelled");
         assert_eq!(
-            unwritten_finish(&result, true, Interaction::Passive),
-            Some(UnwrittenFinish::CloseRequested)
+            no_submission_finish(&result, true, Interaction::Passive),
+            Some(NoSubmissionFinish::CloseRequested)
         );
         result["clipboard_written"] = json!(true);
-        assert_eq!(unwritten_finish(&result, true, Interaction::Passive), None);
+        assert_eq!(
+            no_submission_finish(&result, true, Interaction::Passive),
+            None
+        );
         assert!(!Interaction::Passive.may_restore());
         assert!(!Interaction::CloseOnly.may_restore());
     }
@@ -1753,6 +1800,152 @@ mod tests {
         ] {
             assert!(!flag_enabled(value), "{value:?}");
         }
+    }
+
+    #[test]
+    fn written_native_not_submitted_result_keeps_only_a_close_entry() {
+        let result = json!({"paste_result":"native_not_submitted",
+            "clipboard_written":true,"reason":"native_clipboard_busy","request_cancelled":false});
+        assert_eq!(
+            no_submission_finish(&result, true, Interaction::Activated),
+            Some(NoSubmissionFinish::CloseOnly)
+        );
+    }
+
+    #[test]
+    fn native_not_submitted_always_consumes_the_result_before_frontend_paste_result() {
+        for written in [false, true] {
+            for current in [false, true] {
+                for cancelled in [false, true] {
+                    for interaction in [
+                        Interaction::Quick,
+                        Interaction::ActivationPending,
+                        Interaction::ActivationFailed,
+                        Interaction::Activated,
+                        Interaction::Passive,
+                        Interaction::CloseOnly,
+                    ] {
+                        let result = json!({"paste_result":"native_not_submitted", "clipboard_written":written,
+                            "reason":"native_clipboard_busy", "request_cancelled":cancelled});
+                        let expected =
+                            if !current || (cancelled && interaction != Interaction::Passive) {
+                                NoSubmissionFinish::Ignore
+                            } else if cancelled {
+                                NoSubmissionFinish::CloseRequested
+                            } else {
+                                NoSubmissionFinish::CloseOnly
+                            };
+                        // Some 的三个分支均在实际 PasteFinished 处理里 early return，绝不 emit 新前端类型。
+                        assert_eq!(
+                            no_submission_finish(&result, current, interaction),
+                            Some(expected)
+                        );
+                    }
+                }
+            }
+        }
+        for reason in [
+            "native_clipboard_busy",
+            "clipboard_capture_busy",
+            "clipboard_busy",
+            "native_clipboard_close_failed",
+        ] {
+            assert_eq!(
+                no_submission_message(&json!({"reason":reason})),
+                "剪贴板忙，本次未粘贴，请关闭面板后重新呼出"
+            );
+        }
+        assert_eq!(
+            no_submission_message(&json!({"reason":"native_clipboard_changed"})),
+            "剪贴板已变化，本次未粘贴，请关闭面板后重新呼出"
+        );
+    }
+
+    #[test]
+    fn written_cancelled_native_result_hides_quietly_and_late_session_is_ignored() {
+        let result = json!({"paste_result":"native_not_submitted", "clipboard_written":true,
+            "reason":"request_cancelled", "request_cancelled":true});
+        assert_eq!(
+            no_submission_finish(&result, true, Interaction::Passive),
+            Some(NoSubmissionFinish::CloseRequested)
+        );
+        assert_eq!(
+            no_submission_finish(&result, false, Interaction::Passive),
+            Some(NoSubmissionFinish::Ignore)
+        );
+        assert!(!Interaction::Passive.may_restore());
+        assert!(!Interaction::CloseOnly.may_restore());
+    }
+
+    #[test]
+    fn actual_native_error_shapes_are_terminal_without_reopening_a_legacy_retry() {
+        use crate::paste::{
+            native::{Completion, Submission},
+            request::{Outcome, native_outcome},
+        };
+        for written in [false, true] {
+            for reason in [
+                "clipboard_capture_busy",
+                "clipboard_busy",
+                "clipboard_write_failed",
+                "record_missing",
+                "request_cancelled",
+            ] {
+                let cancelled = reason == "request_cancelled";
+                let mut result = json!({"clipboard_written":written,"paste_result":null,"reason":null,"request_cancelled":cancelled});
+                // execute 使用同一个映射，覆盖锁前/Service.write Err，而不是只构造新 Outcome 字符串。
+                result["paste_result"] = json!(native_outcome(Err(reason.to_owned()), &mut result));
+                assert_eq!(result["clipboard_written"], written);
+                assert_eq!(result["reason"], reason);
+                assert_eq!(result["paste_result"], "native_not_submitted");
+                assert_eq!(
+                    no_submission_finish(
+                        &result,
+                        true,
+                        if cancelled {
+                            Interaction::Passive
+                        } else {
+                            Interaction::Quick
+                        }
+                    ),
+                    Some(if cancelled {
+                        NoSubmissionFinish::CloseRequested
+                    } else {
+                        NoSubmissionFinish::CloseOnly
+                    })
+                );
+                assert_eq!(
+                    no_submission_finish(&result, false, Interaction::Quick),
+                    Some(NoSubmissionFinish::Ignore)
+                );
+            }
+        }
+        for submission in [Submission::Sent, Submission::Unknown] {
+            let mut result = json!({"clipboard_written":true,"request_cancelled":true});
+            let outcome = native_outcome(Ok(Completion::Submitted(submission)), &mut result);
+            assert_eq!(
+                outcome,
+                if submission == Submission::Sent {
+                    Outcome::Sent
+                } else {
+                    Outcome::NativeSubmissionUnknown
+                }
+            );
+            result["paste_result"] = json!(outcome);
+            assert_eq!(
+                no_submission_finish(&result, true, Interaction::Passive),
+                None
+            );
+        }
+        // Legacy 没有调用 native_outcome，普通写失败继续走原有错误提示。
+        assert_eq!(
+            no_submission_finish(
+                &json!({"paste_result":null,"clipboard_written":false,"reason":"clipboard_write_failed"}),
+                true,
+                Interaction::Quick
+            ),
+            None
+        );
     }
 
     #[test]

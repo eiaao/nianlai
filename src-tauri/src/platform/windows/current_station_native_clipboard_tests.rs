@@ -357,6 +357,12 @@ struct Edit {
 }
 impl Edit {
     fn new(guard: Guard) -> Result<Self> {
+        Self::new_with_setup(guard, |_| Ok(()))
+    }
+    fn new_with_setup(
+        guard: Guard,
+        setup: impl FnOnce(HWND) -> Result<()> + Send + 'static,
+    ) -> Result<Self> {
         let (ready, receive) = mpsc::channel();
         let join = thread::spawn(move || -> Result<()> {
             let thread = unsafe { GetCurrentThreadId() };
@@ -376,7 +382,7 @@ impl Edit {
                     None,
                     None,
                 ))?;
-                let control = api(CreateWindowExW(
+                let control = match api(CreateWindowExW(
                     WINDOW_EX_STYLE(0),
                     w!("EDIT"),
                     w!(""),
@@ -389,7 +395,17 @@ impl Edit {
                     None,
                     None,
                     None,
-                ))?;
+                )) {
+                    Ok(control) => control,
+                    Err(error) => {
+                        let _ = DestroyWindow(parent);
+                        return Err(error);
+                    }
+                };
+                if let Err(error) = setup(control) {
+                    let _ = DestroyWindow(parent);
+                    return Err(error);
+                }
                 Ok((parent, control))
             })();
             let (parent, control) = match created {
@@ -542,6 +558,17 @@ impl Drop for Production {
     }
 }
 fn production_write(guard: &Guard, directory: &Path) -> Result<(Production, Lease)> {
+    let (service, lease, _) = production_write_observed(guard, directory)?;
+    Ok((service, lease))
+}
+fn production_write_observed(
+    guard: &Guard,
+    directory: &Path,
+) -> Result<(
+    Production,
+    Lease,
+    Arc<std::sync::Mutex<clipboard::Observation>>,
+)> {
     let directories = Directories {
         settings_file: directory.join("unused-settings.json"),
         data: directory.join("history"),
@@ -583,7 +610,7 @@ fn production_write(guard: &Guard, directory: &Path) -> Result<(Production, Leas
     if process != unsafe { GetCurrentProcessId() } {
         return Err("生产writer owner不属于诊断进程".into());
     }
-    service.0.write(
+    let observation = service.0.write(
         clipboard::Record {
             id,
             fingerprint: content.fingerprint,
@@ -598,8 +625,11 @@ fn production_write(guard: &Guard, directory: &Path) -> Result<(Production, Leas
         "production-writer.json",
         &json!({"writer":"production_clipboard_service","delayed":false,"owner_process_verified":true,"owner_thread":thread,"desktop":guard.desktop,"sequence":lease.sequence,"history_mode":"isolated_memory"}),
     )?;
-    Ok((service, lease))
+    Ok((service, lease, observation))
 }
+
+#[path = "current_station_native_availability_tests.rs"]
+mod availability;
 struct Receiver {
     child: Child,
     directory: PathBuf,
