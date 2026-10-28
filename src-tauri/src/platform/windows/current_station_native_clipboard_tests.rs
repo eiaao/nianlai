@@ -153,6 +153,10 @@ impl Guard {
     fn verify_thread(&self, thread: u32) -> Result<()> {
         opt_in(std::env::var(OPT_IN_ENV).ok().as_deref())?;
         no_product()?;
+        self.verify_thread_live(thread)
+    }
+    fn verify_thread_live(&self, thread: u32) -> Result<()> {
+        opt_in(std::env::var(OPT_IN_ENV).ok().as_deref())?;
         unsafe {
             if object_name(HANDLE(api(GetProcessWindowStation())?.0))? != "WinSta0" {
                 return Err("当前站不是WinSta0；不切换或回退".into());
@@ -175,6 +179,15 @@ impl Guard {
     }
     fn own(&self, hwnd: HWND, process: u32, thread: u32) -> Result<()> {
         self.verify_thread(unsafe { GetCurrentThreadId() })?;
+        Self::identity(hwnd, process, thread)?;
+        self.verify_thread(thread)
+    }
+    fn own_live(&self, hwnd: HWND, process: u32, thread: u32) -> Result<()> {
+        self.verify_thread_live(unsafe { GetCurrentThreadId() })?;
+        Self::identity(hwnd, process, thread)?;
+        self.verify_thread_live(thread)
+    }
+    fn identity(hwnd: HWND, process: u32, thread: u32) -> Result<()> {
         let mut actual = 0;
         if !unsafe { IsWindow(Some(hwnd)) }.as_bool()
             || unsafe { GetWindowThreadProcessId(hwnd, Some(&mut actual)) } != thread
@@ -182,7 +195,7 @@ impl Guard {
         {
             return Err("自有窗口PID/TID/存活身份已变化".into());
         }
-        self.verify_thread(thread)
+        Ok(())
     }
 }
 

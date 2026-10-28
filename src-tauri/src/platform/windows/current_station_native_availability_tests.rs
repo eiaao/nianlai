@@ -208,6 +208,142 @@ impl Scenario {
     }
 }
 
+#[derive(serde::Serialize)]
+struct Timing {
+    stage: &'static str,
+    started_ms: f64,
+    finished_ms: f64,
+    status: &'static str,
+}
+impl Timing {
+    fn new(stage: &'static str, start: Duration, end: Duration, status: &'static str) -> Self {
+        Self {
+            stage,
+            started_ms: start.as_secs_f64() * 1000.0,
+            finished_ms: end.as_secs_f64() * 1000.0,
+            status,
+        }
+    }
+}
+
+struct Timed<E> {
+    inner: E,
+    operations: Vec<Timing>,
+}
+impl<E> Timed<E> {
+    fn new(inner: E) -> Self {
+        // 200ms / 5ms 条件轮询；热路径仅记录内存，不构造 JSON 或写文件。
+        Self {
+            inner,
+            operations: Vec::with_capacity(128),
+        }
+    }
+}
+impl<E: Environment> Environment for Timed<E> {
+    fn now(&self) -> Duration {
+        self.inner.now()
+    }
+    fn pause(&mut self, duration: Duration) {
+        let start = self.now();
+        self.inner.pause(duration);
+        self.operations
+            .push(Timing::new("pause", start, self.now(), "returned"));
+    }
+    fn guard(&mut self) -> std::result::Result<(), &'static str> {
+        let start = self.now();
+        let result = self.inner.guard();
+        self.operations.push(Timing::new(
+            "guard",
+            start,
+            self.now(),
+            result.err().unwrap_or("ready"),
+        ));
+        result
+    }
+    fn probe(&mut self, publication: Publication) -> Probe {
+        let start = self.now();
+        let result = self.inner.probe(publication);
+        let status = match result {
+            Probe::Ready => "ready",
+            Probe::Busy => "busy",
+            Probe::Changed => "changed",
+            Probe::CloseFailed => "close_failed",
+        };
+        self.operations
+            .push(Timing::new("probe", start, self.now(), status));
+        result
+    }
+}
+
+struct PreparationReport {
+    budget: Option<native_access::Budget>,
+    final_check: std::result::Result<(), &'static str>,
+    elapsed: Option<Duration>,
+    preflight_error: Option<String>,
+    stages: Vec<Timing>,
+}
+
+fn prepare_case(
+    preflight: impl FnOnce() -> Result<()>,
+    environment: &mut impl Environment,
+    publication: Publication,
+) -> PreparationReport {
+    let mut stages = Vec::with_capacity(3);
+    let start = environment.now();
+    let preflight = preflight();
+    stages.push(Timing::new(
+        "preflight",
+        start,
+        environment.now(),
+        if preflight.is_ok() { "ready" } else { "failed" },
+    ));
+    if let Err(error) = preflight {
+        return PreparationReport {
+            budget: None,
+            final_check: Err("diagnostic_preflight_failed"),
+            elapsed: None,
+            preflight_error: Some(error),
+            stages,
+        };
+    }
+    // 完整检查耗时不属于可用性预算；之后继续使用原生产 Budget 的真实单调时间。
+    let mut budget = native_access::Budget::new(environment.now());
+    let start = environment.now();
+    let prepare = budget.wait(environment, Some(publication));
+    stages.push(Timing::new(
+        "prepare",
+        start,
+        environment.now(),
+        prepare.err().unwrap_or("ready"),
+    ));
+    let final_check = prepare.and_then(|()| {
+        let start = environment.now();
+        let result = budget.wait(environment, Some(publication));
+        stages.push(Timing::new(
+            "final",
+            start,
+            environment.now(),
+            result.err().unwrap_or("ready"),
+        ));
+        result
+    });
+    let elapsed = Some(budget.elapsed(environment.now()));
+    PreparationReport {
+        budget: Some(budget),
+        final_check,
+        elapsed,
+        preflight_error: None,
+        stages,
+    }
+}
+
+fn submit_prepared<T>(
+    result: std::result::Result<(), &'static str>,
+    submit: impl FnOnce() -> T,
+) -> Option<T> {
+    result.ok().map(|()| submit())
+}
+
 struct Preparation<'a> {
     guard: &'a Guard,
     edit: &'a Edit,
@@ -231,12 +367,14 @@ impl Environment for Preparation<'_> {
         if self.holder_error.is_some() {
             return Err("diagnostic_holder_failed");
         }
-        self.guard
-            .own(
-                window::hwnd(self.edit.control),
-                unsafe { GetCurrentProcessId() },
-                self.edit.thread,
-            )
+        availability_opt_in(std::env::var(AVAILABILITY_OPT_IN_ENV).ok().as_deref())
+            .and_then(|()| {
+                self.guard.own_live(
+                    window::hwnd(self.edit.control),
+                    unsafe { GetCurrentProcessId() },
+                    self.edit.thread,
+                )
+            })
             .map_err(|error| {
                 self.holder_error = Some(error);
                 "diagnostic_guard_failed"
@@ -282,8 +420,8 @@ fn availability_case(
     } else {
         None
     };
-    let (budget, final_check, elapsed, busy_probes, guard_calls, guard_error) = {
-        let mut environment = Preparation {
+    let (report, operations, busy_probes, guard_calls, guard_error) = {
+        let mut environment = Timed::new(Preparation {
             guard,
             edit: &target.edit,
             clock: Instant::now(),
@@ -292,22 +430,40 @@ fn availability_case(
             busy_probes: 0,
             guard_calls: 0,
             holder_error: None,
-        };
-        let mut budget = native_access::Budget::new(environment.now());
-        let prepare = budget.wait(&mut environment, Some(publication));
-        let final_check = prepare.and_then(|()| budget.wait(&mut environment, Some(publication)));
-        let elapsed = budget.elapsed(environment.now());
+        });
+        let report = prepare_case(
+            || {
+                availability_opt_in(std::env::var(AVAILABILITY_OPT_IN_ENV).ok().as_deref())?;
+                guard.own(
+                    window::hwnd(target.edit.control),
+                    unsafe { GetCurrentProcessId() },
+                    target.edit.thread,
+                )?;
+                current.verify()
+            },
+            &mut environment,
+            publication,
+        );
         (
-            budget,
-            final_check,
-            elapsed,
-            environment.busy_probes,
-            environment.guard_calls,
-            environment.holder_error,
+            report,
+            environment.operations,
+            environment.inner.busy_probes,
+            environment.inner.guard_calls,
+            environment.inner.holder_error,
         )
     };
+    let final_check = report.final_check;
+    let elapsed = report.elapsed.unwrap_or_default();
+    let probes = report
+        .budget
+        .as_ref()
+        .map_or(0, native_access::Budget::probes);
+    let waits = report
+        .budget
+        .as_ref()
+        .map_or(0, native_access::Budget::waits);
     // 只有两个准备阶段都成功才允许调用一次生产wrapper；失败、超时后均无补发。
-    let delivery = final_check.ok().map(|()| {
+    let delivery = submit_prepared(final_check, || {
         submit_native_message(
             target.edit.control,
             target.edit.thread,
@@ -320,6 +476,22 @@ fn availability_case(
         .is_some_and(|holder| holder.release_requested);
     // 持续Busy的释放发生在Budget返回之后，不能在测试时钟到点前提前放行。
     let holder_cleanup = holder.as_mut().map_or(Ok(()), Holder::finish);
+    // 先保存阶段证据，再做可能失败的快照；末次探针到唯一发送之间不序列化/写文件。
+    save(
+        directory,
+        &format!("{}-timing.json", scenario.name()),
+        &json!({
+            "case":scenario.name(),"product_absence_scope":"per_case_preflight",
+            "clock":"monotonic_ms","intervals_overlap_do_not_sum":true,
+            "stages":report.stages,"operations":operations,"preflight_error":report.preflight_error,
+            "guard_error":guard_error,"preparation_reason":final_check.err(),
+            "budget_started":report.budget.is_some(),"budget_ms":native_access::BUDGET.as_millis() as u64,
+            "elapsed_ms":report.elapsed.map(|elapsed| elapsed.as_secs_f64()*1000.0),
+            "deadline_exhausted":report.elapsed.is_some_and(|elapsed| elapsed >= native_access::BUDGET),
+            "real_busy_probes":busy_probes,"submission_calls":u32::from(delivery.is_some()),
+            "holder_cleanup_error":holder_cleanup.as_ref().err(),
+        }),
+    )?;
     let after = target.edit.snapshot(guard)?;
     let received = target.counts.entered.load(Ordering::SeqCst);
     let completed = target.counts.completed.load(Ordering::SeqCst);
@@ -341,16 +513,16 @@ fn availability_case(
         && delivery.is_some() == (expected_submissions == 1)
         && delivery.is_none_or(|delivery| delivery.attempted && delivery.acknowledged)
         && match scenario {
-            Scenario::Clean => budget.waits() == 0 && busy_probes == 0,
+            Scenario::Clean => waits == 0 && busy_probes == 0,
             Scenario::ReleaseAfterBusy => {
-                busy_probes > 0 && release_requested_before_cleanup && budget.waits() > 0
+                busy_probes > 0 && release_requested_before_cleanup && waits > 0
             }
             Scenario::PersistentBusy => {
                 busy_probes > 0
                     && !release_requested_before_cleanup
                     && elapsed >= native_access::BUDGET
             }
-            Scenario::Changed => budget.waits() == 0,
+            Scenario::Changed => waits == 0,
         };
     save(
         directory,
@@ -358,10 +530,12 @@ fn availability_case(
         &json!({
             "case":scenario.name(),"passed":passed,"before":before,"after":after,"expected":expected,
             "preparation_reason":reason,"expected_reason":scenario.expected_reason(),
-            "probes":budget.probes(),"waits":budget.waits(),"real_busy_probes":busy_probes,
+            "probes":probes,"waits":waits,"real_busy_probes":busy_probes,
             "guard_calls":guard_calls,"guard_error":guard_error,
             "elapsed_ms":elapsed.as_secs_f64()*1000.0,"budget_ms":native_access::BUDGET.as_millis() as u64,
-            "one_budget_for_prepare_and_final":true,"submission_calls":u32::from(delivery.is_some()),
+            "one_budget_for_prepare_and_final":true,"product_absence_scope":"per_case_preflight",
+            "deadline_exhausted":report.elapsed.is_some_and(|elapsed| elapsed >= native_access::BUDGET),
+            "submission_calls":u32::from(delivery.is_some()),
             "expected_submissions":expected_submissions,"received_wm_paste":received,"completed_wm_paste":completed,
             "attempted":delivery.is_some_and(|delivery| delivery.attempted),
             "acknowledged":delivery.is_some_and(|delivery| delivery.acknowledged),
@@ -451,6 +625,9 @@ fn native_availability_opt_in_requires_new_exact_token() {
     }
     assert!(availability_opt_in(Some(AVAILABILITY_OPT_IN)).is_ok());
 }
+
+#[path = "current_station_native_availability_guard_tests.rs"]
+mod guard_tests;
 
 #[test]
 #[ignore = "必须新获本轮空档授权、双固定opt-in、无nianlai.exe后--exact显式运行；会写固定测试剪贴板"]
