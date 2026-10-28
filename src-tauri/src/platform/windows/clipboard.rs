@@ -49,6 +49,8 @@ pub struct Observation {
     delay_failed: bool,
     pub publication: Option<native_access::Publication>,
     pub publication_error: Option<&'static str>,
+    #[cfg(test)]
+    pub publication_trace: Option<crate::paste::native_publication_trace::PublicationTrace>,
 }
 
 impl Observation {
@@ -426,16 +428,43 @@ fn write(
         }
     }
     // 成功写入的事实和“可以安全提交”分开：关闭或快照失败仍然返回写入成功。
-    // 先在持锁时取本次 sequence 基线；Close 成功后、可能等待存储线程的 reuse 前采样，
-    // 且必须仍与基线一致，避免把同 owner 的后来改写误认成本次发布。
+    // Close 成功后、可能等待存储线程的 reuse 前采样；不假设 Close 前后 sequence 相等。
+    #[cfg(test)]
+    let trace_started = Instant::now();
+    #[cfg(test)]
+    let trace = crate::paste::native_publication_trace::Recorder::new(|| trace_started.elapsed());
     let publication = native_access::publish(
         owner.0 as usize,
-        || open.close(),
-        || unsafe { GetClipboardSequenceNumber() },
-        || unsafe { GetClipboardOwner() }.unwrap_or_default().0 as usize,
+        || {
+            // 仅测试构建额外观察一次锁内序号，不参与发布判断。
+            #[cfg(test)]
+            trace.baseline(unsafe { GetClipboardSequenceNumber() });
+            let closed = open.close();
+            #[cfg(test)]
+            trace.close(closed);
+            closed
+        },
+        || {
+            let sequence = unsafe { GetClipboardSequenceNumber() };
+            #[cfg(test)]
+            trace.sequence(sequence);
+            sequence
+        },
+        || {
+            let current = unsafe { GetClipboardOwner() }.unwrap_or_default().0 as usize;
+            #[cfg(test)]
+            trace.owner(current, owner.0 as usize);
+            current
+        },
     );
+    #[cfg(test)]
+    let trace = trace.finish();
     {
         let mut observed = observation.lock().unwrap();
+        #[cfg(test)]
+        {
+            observed.publication_trace = Some(trace);
+        }
         match publication {
             Ok(publication) => observed.publication = Some(publication),
             Err(reason) => observed.publication_error = Some(reason),

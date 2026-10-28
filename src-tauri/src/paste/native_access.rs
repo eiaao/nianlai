@@ -33,19 +33,14 @@ impl Publication {
 pub fn publish(
     writer: usize,
     close: impl FnOnce() -> bool,
-    mut sequence: impl FnMut() -> u32,
+    sequence: impl FnMut() -> u32,
     owner: impl FnOnce() -> usize,
 ) -> Result<Publication, &'static str> {
-    // 最后一次 SetClipboardData 成功且仍持锁时绑定本次发布。
-    // 同 owner 的外部 SetClipboardData 也会改变 sequence，不能在 Close 后认领新的稳定值。
-    let baseline = sequence();
-    // 即使 baseline 为零也必须关闭；关闭失败优先，绝不留下锁继续同步/发送。
+    // 发布快照在成功关闭之后采样；不假设 Close 前后的 sequence 必须相等。
     if !close() {
         return Err(CLOSE_FAILED);
     }
-    Publication::sample(writer, sequence, owner)
-        .filter(|publication| baseline != 0 && publication.sequence == baseline)
-        .ok_or(CHANGED)
+    Publication::sample(writer, sequence, owner).ok_or(CHANGED)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

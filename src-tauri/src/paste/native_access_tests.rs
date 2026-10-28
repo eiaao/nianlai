@@ -233,21 +233,19 @@ impl Backend for Script {
 }
 
 #[test]
-fn publication_binds_locked_baseline_before_checked_close_and_stable_writer_snapshot() {
-    for (writer, baseline, before, owner, after, valid) in [
-        (7, 42, 42, 7, 42, true),
-        (7, 0, 42, 7, 42, false),
-        (7, 41, 42, 7, 42, false),
-        (7, 42, 0, 7, 0, false),
-        (7, 42, 0, 7, 42, false),
-        (7, 42, 42, 7, 0, false),
-        (7, 42, 42, 7, 43, false),
-        (7, 42, 42, 8, 42, false),
-        (7, 42, 42, 0, 42, false),
-        (0, 42, 42, 0, 42, false),
+fn publication_requires_checked_close_then_stable_nonzero_sequence_and_exact_writer() {
+    for (writer, before, owner, after, valid) in [
+        (7, 42, 7, 42, true),
+        (7, 0, 7, 0, false),
+        (7, 0, 7, 42, false),
+        (7, 42, 7, 0, false),
+        (7, 42, 7, 43, false),
+        (7, 42, 8, 42, false),
+        (7, 42, 0, 42, false),
+        (0, 42, 0, 42, false),
     ] {
         let events = RefCell::new(Vec::new());
-        let mut sequences = [baseline, before, after].into_iter();
+        let mut sequences = [before, after].into_iter();
         let result = publish(
             writer,
             || {
@@ -268,31 +266,22 @@ fn publication_binds_locked_baseline_before_checked_close_and_stable_writer_snap
         assert_eq!(result.is_ok(), valid);
         assert_eq!(
             *events.borrow(),
-            [
-                "sequence", "close", "sequence", "owner", "sequence", "reuse"
-            ]
+            ["close", "sequence", "owner", "sequence", "reuse"]
         );
     }
-    for baseline in [0, 42] {
-        let mut reads = 0;
-        assert_eq!(
-            publish(
-                7,
-                || false,
-                || {
-                    reads += 1;
-                    baseline
-                },
-                || panic!("关闭失败不能采样owner")
-            ),
-            Err(CLOSE_FAILED)
-        );
-        assert_eq!(reads, 1, "关闭失败只读过锁内baseline，不采关闭后stamp");
-    }
+    assert_eq!(
+        publish(
+            7,
+            || false,
+            || panic!("关闭失败不能查询sequence"),
+            || panic!("关闭失败不能查询owner")
+        ),
+        Err(CLOSE_FAILED)
+    );
 }
 
 #[test]
-fn same_owner_replacement_during_close_cannot_become_the_authorized_publication() {
+fn close_sequence_change_accepts_a_stable_post_close_snapshot_of_the_writer() {
     let sequence = Cell::new(42);
     let result = publish(
         7,
@@ -303,16 +292,14 @@ fn same_owner_replacement_during_close_cannot_become_the_authorized_publication(
         || sequence.get(),
         || 7,
     );
-    assert_eq!(
-        result,
-        Err(CHANGED),
-        "Close之后稳定的同owner新sequence不能被重新认领"
-    );
-    let mut script = Script::new([]);
+    assert_eq!(result, Publication::sample(7, || 43, || 7).ok_or(CHANGED));
+    let mut script = Script::new([Step::SequenceChanged, Step::SequenceChanged]);
     script.publication = result.ok();
-    script.publication_error = Some(CHANGED);
-    script.not_submitted(CHANGED);
-    assert_eq!(script.count("open"), 0);
+    assert_eq!(
+        native::run(&mut script).unwrap(),
+        Completion::Submitted(Submission::Sent)
+    );
+    assert_eq!((script.writes, script.sends), (1, 1));
 }
 
 #[test]

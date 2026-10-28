@@ -561,6 +561,20 @@ fn production_write(guard: &Guard, directory: &Path) -> Result<(Production, Leas
     let (service, lease, _) = production_write_observed(guard, directory)?;
     Ok((service, lease))
 }
+
+fn publication_evidence(
+    trace: Option<crate::paste::native_publication_trace::PublicationTrace>,
+    publication_accepted: bool,
+    publication_error: Option<&str>,
+) -> Value {
+    json!({
+        "schema":1,"evidence_collected":trace.as_ref().is_some_and(|trace| trace.complete()),
+        "publication_accepted":publication_accepted,"publication_error":publication_error,
+        "trace":trace,"trace_build":"cfg_test","same_publish_call":true,
+        "locked_sequence_used_for_decision":false,"clipboard_body_read_by_trace":false,
+    })
+}
+
 fn production_write_observed(
     guard: &Guard,
     directory: &Path,
@@ -618,6 +632,22 @@ fn production_write_observed(
         content,
         unsafe { GetCurrentProcessId() },
         false,
+    )?;
+    // 发布拒绝或后续 lease 校验失败也要保留同次闭包值；此处 OS 锁已关闭。
+    let (trace, publication_accepted, publication_error) = {
+        let observed = observation
+            .lock()
+            .map_err(|_| "生产writer observation已poison")?;
+        (
+            observed.publication_trace,
+            observed.publication.is_some(),
+            observed.publication_error,
+        )
+    };
+    save(
+        directory,
+        "production-publication.json",
+        &publication_evidence(trace, publication_accepted, publication_error),
     )?;
     let lease = Lease::capture(owner)?;
     save(
@@ -821,6 +851,39 @@ fn current_station_zero_text_length_requires_successful_read() {
     assert!(checked_text_length(0, 5).is_err());
     assert!(checked_text_length(-1, 0).is_err());
     assert_eq!(checked_text_length(12, 0), Ok(12));
+}
+
+#[test]
+fn publication_evidence_distinguishes_collection_from_acceptance() {
+    use crate::paste::{native_access, native_publication_trace::Recorder};
+    for owner in [7, 8] {
+        let recorder = Recorder::new(|| Duration::ZERO);
+        let result = native_access::publish(
+            7,
+            || {
+                recorder.baseline(0);
+                recorder.close(true);
+                true
+            },
+            || {
+                recorder.sequence(42);
+                42
+            },
+            || {
+                recorder.owner(owner, 7);
+                owner
+            },
+        );
+        let value = publication_evidence(Some(recorder.finish()), result.is_ok(), result.err());
+        assert_eq!(value["evidence_collected"], true);
+        assert_eq!(value["publication_accepted"], owner == 7);
+        assert_eq!(value["trace"]["locked_sequence"]["value"], 0);
+        assert_eq!(value["locked_sequence_used_for_decision"], false);
+        assert_eq!(value["clipboard_body_read_by_trace"], false);
+    }
+    let absent = publication_evidence(None, false, None);
+    assert_eq!(absent["evidence_collected"], false);
+    assert!(absent["trace"].is_null());
 }
 
 #[test]
