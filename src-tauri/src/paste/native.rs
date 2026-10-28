@@ -5,7 +5,8 @@ pub struct Eligibility<'a> {
     pub copy: bool,
     pub ordinary: bool,
     pub control_class: &'a str,
-    pub pure_unicode: bool,
+    // 合法 Unicode TEXT，且仅伴随已物化的 HTML / RTF。
+    pub supported_text_formats: bool,
     pub builtin_default_ctrl_v: bool,
 }
 
@@ -19,7 +20,7 @@ pub fn eligible(value: Eligibility<'_>) -> bool {
         && !value.copy
         && value.ordinary
         && standard_edit(value.control_class)
-        && value.pure_unicode
+        && value.supported_text_formats
         && value.builtin_default_ctrl_v
 }
 
@@ -177,7 +178,7 @@ mod tests {
             copy: false,
             ordinary: true,
             control_class: "Edit",
-            pure_unicode: true,
+            supported_text_formats: true,
             builtin_default_ctrl_v: true,
         }
     }
@@ -202,7 +203,7 @@ mod tests {
                 ..eligibility()
             },
             Eligibility {
-                pure_unicode: false,
+                supported_text_formats: false,
                 ..eligibility()
             },
             Eligibility {

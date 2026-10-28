@@ -38,13 +38,6 @@ impl FixtureFormat {
             Self::Text => "text",
         }
     }
-
-    fn expected_submission_method(self) -> &'static str {
-        match self {
-            Self::Html | Self::Rtf => "send_input",
-            Self::Text => "depends",
-        }
-    }
 }
 
 fn html_header(start_html: usize, end_html: usize, start: usize, end: usize) -> String {
@@ -190,13 +183,8 @@ pub fn create(options: &BTreeMap<String, String>) -> Result<Value> {
         "expected_text_sha256_utf8":hex(&sha256(FIXTURE_TEXT.as_bytes())?),
         "safe_sample_preview_text":FIXTURE_TEXT,
         "expected_paste_mode":"normal",
-        "expected_submission_method":format.expected_submission_method(),
-        "submission_method_note":match format {
-            FixtureFormat::Html | FixtureFormat::Rtf =>
-                "Normal automatic rich-text paste uses send_input after target checks pass.",
-            FixtureFormat::Text =>
-                "Depends on native-text target qualification and runtime checks; no fixed submission method is promised.",
-        },
+        "expected_submission_method":"depends",
+        "submission_method_note":"Depends on target qualification, the selected paste-key rule, and runtime checks; no fixed submission method is promised.",
     });
     drop(reader);
     drop(db);
@@ -446,13 +434,7 @@ mod tests {
                 hex(&sha256(FIXTURE_TEXT.as_bytes()).unwrap())
             );
             assert_eq!(manifest["expected_paste_mode"], "normal");
-            assert_eq!(
-                manifest["expected_submission_method"],
-                match format {
-                    FixtureFormat::Html | FixtureFormat::Rtf => "send_input",
-                    FixtureFormat::Text => "depends",
-                }
-            );
+            assert_eq!(manifest["expected_submission_method"], "depends");
             let formats = manifest["formats"].as_array().unwrap();
             assert_eq!(formats.len(), loaded.formats.len());
             for entry in formats {

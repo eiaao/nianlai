@@ -488,7 +488,7 @@ fn generic_final_lightweight_guard_can_refuse_after_a_ready_probe() {
 }
 #[test]
 #[cfg(windows)]
-fn generic_production_strategy_preserves_rich_files_images_and_explicit_text() {
+fn generic_production_override_preserves_rich_files_images_and_explicit_text() {
     let plain = Content::text("synthetic-format-marker", sha256).unwrap();
     let bytes = |value: &'static [u8]| Data::Bytes(Arc::from(value));
     let rich = |name: &str| {
@@ -520,15 +520,23 @@ fn generic_production_strategy_preserves_rich_files_images_and_explicit_text() {
         sha256,
     )
     .unwrap();
-    for content in [rich(HTML), rich(RTF), files, image] {
+    for (content, native_default) in [
+        (rich(HTML), true),
+        (rich(RTF), true),
+        (files, false),
+        (image, false),
+    ] {
         let (written, conversion) = as_text::apply(&content, Mode::Paste, None, None, sha256);
         assert!(conversion.is_null());
         let mut script = Script::new(written.clone());
-        assert!(!crate::platform::paste::native_candidate(
-            &script.request,
-            &written,
-            true
-        ));
+        assert_eq!(
+            crate::platform::paste::native_candidate(&script.request, &written, true),
+            native_default
+        );
+        assert!(
+            !crate::platform::paste::native_candidate(&script.request, &written, false),
+            "正式覆盖规则仍走generic，包含HTML/RTF时也不绕过真实通用runner"
+        );
         assert_eq!(
             run(&mut script).unwrap(),
             Completion::Submitted(Submission::Sent)

@@ -1,6 +1,6 @@
 use super::{clipboard, hash, uia, window};
 use crate::{
-    history::content::{Content, TEXT},
+    history::content::{Content, Data, HTML, RTF, TEXT},
     paste::{
         as_text,
         capture_access::AccessGuard,
@@ -516,19 +516,19 @@ fn open_holder(target: u32) -> Value {
         "classification":native::open_holder(!window.is_invalid(), process, unsafe { GetCurrentProcessId() }, target)})
 }
 
-fn pure_unicode(content: &Content) -> bool {
-    content.formats.len() == 1
-        && content.raw(TEXT).is_some_and(|bytes| {
-            bytes.len() % 2 == 0
-                && String::from_utf16(
-                    &bytes
-                        .chunks_exact(2)
-                        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
-                        .take_while(|unit| *unit != 0)
-                        .collect::<Vec<_>>(),
-                )
-                .is_ok()
-        })
+fn native_text_formats(content: &Content) -> bool {
+    content.formats.iter().all(|(name, format)| {
+        matches!(name.as_str(), TEXT | HTML | RTF) && matches!(&format.data, Data::Bytes(_))
+    }) && content.raw(TEXT).is_some_and(|bytes| {
+        bytes.len() % 2 == 0
+            && String::from_utf16(
+                &bytes
+                    .chunks_exact(2)
+                    .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                    .collect::<Vec<_>>(),
+            )
+            .is_ok()
+    })
 }
 
 pub(crate) fn native_candidate(
@@ -544,7 +544,7 @@ pub(crate) fn native_candidate(
         copy: request.mode == Mode::Copy,
         ordinary: !request.external_switch && request.copy_only_reason.is_none(),
         control_class: &request.target.focus_class,
-        pure_unicode: pure_unicode(written),
+        supported_text_formats: native_text_formats(written),
         builtin_default_ctrl_v,
     })
 }
@@ -1215,6 +1215,157 @@ pub fn execute(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn native_multiformat_request(content: Arc<Content>) -> Request {
+        native_multiformat_request_mode(content, Mode::Paste)
+    }
+
+    fn native_multiformat_request_mode(content: Arc<Content>, mode: Mode) -> Request {
+        use crate::paste::permit::{Monitor, Selection, Session};
+        let target = Target {
+            window: 20,
+            focus: 21,
+            thread: 2,
+            process: 3,
+            focus_class: "Edit".into(),
+            ..Target::default()
+        };
+        let monitor = Arc::new(Monitor::new(10, 20));
+        monitor.started();
+        let mut session = Session::new(7, target.clone(), monitor);
+        let permit = session
+            .select(
+                7,
+                9,
+                mode,
+                Selection {
+                    revision: 0,
+                    nonce: 1,
+                },
+                10,
+            )
+            .unwrap();
+        Request {
+            session: 7,
+            target,
+            panel: 10,
+            record_id: 9,
+            content,
+            mode,
+            started: Instant::now(),
+            external_switch: false,
+            permit: Some(permit),
+            copy_only_reason: None,
+            cancelled: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    #[test]
+    fn native_multiformat_candidate_accepts_materialized_html_and_rtf_with_unicode_text() {
+        use crate::history::content::{Data, HTML, RTF};
+        use std::collections::BTreeMap;
+        let text = Content::text("合成多格式文字", hash::sha256).unwrap();
+        for companions in [vec![HTML], vec![RTF], vec![HTML, RTF]] {
+            let mut formats = BTreeMap::from([(TEXT.into(), text.formats[TEXT].data.clone())]);
+            for name in companions {
+                formats.insert(
+                    name.into(),
+                    Data::Bytes(Arc::from(&b"synthetic-companion\0"[..])),
+                );
+            }
+            let content = Content::new(formats, hash::sha256).unwrap();
+            let request = native_multiformat_request(content.clone());
+            assert!(
+                native_candidate(&request, &content, true),
+                "普通标准Edit的合法文字及HTML/RTF伴随格式应在初始资格阶段进入native"
+            );
+        }
+    }
+
+    #[test]
+    fn native_multiformat_candidate_rejects_unsupported_or_unmaterialized_formats_and_invalid_text()
+    {
+        use crate::history::content::{FILES, PNG};
+        use std::collections::BTreeMap;
+        let text = Content::text("合成文字", hash::sha256).unwrap();
+        let bytes = |value: &'static [u8]| Data::Bytes(Arc::from(value));
+        let paired = |name: &str, data: Data| {
+            BTreeMap::from([
+                (TEXT.into(), text.formats[TEXT].data.clone()),
+                (name.into(), data),
+            ])
+        };
+        for formats in [
+            BTreeMap::new(),
+            BTreeMap::from([(HTML.into(), bytes(b"synthetic-html"))]),
+            BTreeMap::from([(RTF.into(), bytes(b"synthetic-rtf"))]),
+            paired(PNG, bytes(b"synthetic-png")),
+            paired(
+                FILES,
+                Data::Files(vec!["C:\\synthetic.txt".to_owned()].into()),
+            ),
+            paired("Unknown Format", bytes(b"synthetic-unknown")),
+            paired(
+                HTML,
+                Data::Files(vec!["C:\\not-materialized-html".to_owned()].into()),
+            ),
+            paired(
+                RTF,
+                Data::Files(vec!["C:\\not-materialized-rtf".to_owned()].into()),
+            ),
+            BTreeMap::from([(TEXT.into(), bytes(&[1]))]),
+            BTreeMap::from([(TEXT.into(), bytes(&[0x00, 0xd8]))]),
+            BTreeMap::from([(TEXT.into(), bytes(&[0, 0, 0x00, 0xd8]))]),
+        ] {
+            let content = Content::new(formats, hash::sha256).unwrap();
+            let request = native_multiformat_request(content.clone());
+            assert!(!native_candidate(&request, &content, true));
+        }
+    }
+
+    #[test]
+    fn native_multiformat_candidate_keeps_target_selection_and_rule_limits() {
+        use std::collections::BTreeMap;
+        let text = Content::text("合成文字", hash::sha256).unwrap();
+        let content = Content::new(
+            BTreeMap::from([
+                (TEXT.into(), text.formats[TEXT].data.clone()),
+                (HTML.into(), Data::Bytes(Arc::from(&b"synthetic-html"[..]))),
+            ]),
+            hash::sha256,
+        )
+        .unwrap();
+        assert!(!native_candidate(
+            &native_multiformat_request(content.clone()),
+            &content,
+            false
+        ));
+        for excluded in [
+            "copy",
+            "external",
+            "copy_only",
+            "quick",
+            "RichEdit20W",
+            "Chrome_RenderWidgetHostHWND",
+        ] {
+            let mut request = native_multiformat_request(content.clone());
+            match excluded {
+                "copy" => request.mode = Mode::Copy,
+                "external" => request.external_switch = true,
+                "copy_only" => request.copy_only_reason = Some("target_control_unverified"),
+                "quick" => {
+                    use crate::paste::permit::{Monitor, Session};
+                    let monitor = Arc::new(Monitor::new(10, 20));
+                    monitor.started();
+                    request.permit = Some(
+                        Session::new(7, request.target.clone(), monitor).quick(9, Mode::Paste),
+                    );
+                }
+                class => request.target.focus_class = class.into(),
+            }
+            assert!(!native_candidate(&request, &content, true), "{excluded}");
+        }
+    }
     #[test]
     fn generic_partial_input_cleanup_only_releases_successful_held_keys() {
         for (key, prefixes) in [
@@ -1260,11 +1411,11 @@ mod tests {
         }
     }
     #[test]
-    fn native_text_qualification_uses_the_actual_fixed_conversion_and_rejects_extra_formats() {
+    fn native_text_qualification_uses_the_actual_fixed_conversion() {
         use crate::history::content::{Data, HTML};
         use std::collections::BTreeMap;
         let text = Content::text("合成文字", hash::sha256).unwrap();
-        assert!(pure_unicode(&text));
+        assert!(native_text_formats(&text));
         let rich = Content::new(
             BTreeMap::from([
                 (TEXT.into(), text.formats[TEXT].data.clone()),
@@ -1272,23 +1423,32 @@ mod tests {
                     HTML.into(),
                     Data::Bytes(Arc::<[u8]>::from(&b"synthetic"[..])),
                 ),
+                (
+                    "Unknown Format".into(),
+                    Data::Bytes(Arc::from(&b"synthetic-extra"[..])),
+                ),
             ]),
             hash::sha256,
         )
         .unwrap();
-        assert!(!pure_unicode(&rich));
+        assert!(!native_text_formats(&rich));
         let (written, conversion) = as_text::apply(&rich, Mode::Text, None, None, hash::sha256);
         assert_eq!(conversion["conversion"], "plain_text");
         assert!(
-            pure_unicode(&written),
+            native_text_formats(&written),
             "资格依据转换后的实际格式而非历史 kind"
+        );
+        let request = native_multiformat_request_mode(rich, Mode::Text);
+        assert!(
+            native_candidate(&request, &written, true),
+            "不能改按request.content原格式分流"
         );
         let malformed = Content::new(
             BTreeMap::from([(TEXT.into(), Data::Bytes(Arc::<[u8]>::from(&[1u8][..])))]),
             hash::sha256,
         )
         .unwrap();
-        assert!(!pure_unicode(&malformed));
+        assert!(!native_text_formats(&malformed));
     }
     #[test]
     fn requires_all_four_preflight_conditions() {
