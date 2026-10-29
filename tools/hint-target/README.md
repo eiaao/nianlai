@@ -10,7 +10,7 @@ pwsh -File tools/hint-target/build.ps1
 
 输出在 `release/hint-target/HintTarget.exe`。脚本只编译并运行 `--self-test`，不弹窗口、不发键。可以通过 `-OutputDirectory` 选择独立产物目录，保留旧候选。
 
-自测包含 7 项事件配对记账/文本校验、4 项原生粘贴观测内存自测及 12 项文件测试。内存自测检查前后摘要、调用计数、不保存正文及用例重置，不构造控件或真实调用 WM_PASTE。文件测试用真实 Windows 句柄检查未共享 DELETE 的短暂/永久占用、共享 DELETE 的读取者、只读目标和追加失败；另用注入错误检查替换已经提交却报错、部分替换丢失路径、目标无法确认等结果不确定性。自测不能代替真实输入验收，也没有实测 GUI 故障退出流程。
+自测包含 7 项事件配对记账/文本校验、7 项原生编辑消息观测内存自测及 12 项文件测试。内存自测检查前后摘要、调用计数、WM_PASTE 与 EM_REPLACESEL 两类记录分离、不保存正文及双记录用例重置，不构造控件或真实调用这两种消息。文件测试用真实 Windows 句柄检查未共享 DELETE 的短暂/永久占用、共享 DELETE 的读取者、只读目标和追加失败；另用注入错误检查替换已经提交却报错、部分替换丢失路径、目标无法确认等结果不确定性。自测不能代替真实输入验收，也没有实测 GUI 故障退出流程。
 
 ## 文件读取与故障判定
 
@@ -31,26 +31,26 @@ HintTarget.exe --output D:\test-runs\新一轮\normal-target
 HintTarget.exe --output D:\test-runs\新一轮\admin-target
 ```
 
-启动后核对 `ready.json` 的新 `run_id`、PID、`elevated` 和时间，随后确认 `state.json` 的时间持续更新。每个用例先点击“开始新用例”，记录新的 `case_id`；它只清空本目标文本和配对记账。用例中间不要重置。
+启动后核对 `ready.json` 的新 `run_id`、PID、`elevated` 和时间，随后确认 `state.json` 的时间持续更新。每个用例先点击“开始新用例”，记录新的 `case_id`；它清空本目标文本、配对记账和两类原生编辑消息记录。用例中间不要重置。
 
 - `events.jsonl`：本目标收到的按键和时间，`repeat` 对应 Windows 消息中的上一状态位；`matching_down=false` 表示本用例未观察到对应按下，不自动等同产品错误，呼出快捷键、焦点变化也需结合判断。
 - `state.json`：当前文本 UTF-16 长度、UTF-8 SHA-256、前台是否本目标、收到但尚未配对的键、事件计数。`observed_held` 不是物理键盘状态，被产品吞掉的键不会出现在这里。
 - `native_paste`：本 case 内的 WM_PASTE 次数 `count`、单调时钟 `timestamp_frequency_hz` 及最后一次 `last`。last 包括 `call_index/completed`、紧邻 base.WndProc 前后的 `before_timestamp_ticks/after_timestamp_ticks`，以及 `before_text_utf16_length/before_text_sha256_utf8/after_text_utf16_length/after_text_sha256_utf8`。尚未收到消息时 count=0、last=null；开始新用例会清零，计数不影响键盘 events 协议。
+- `native_replace`：本 case 内的 EM_REPLACESEL（`0x00C2`）观测，字段与 `native_paste` 相同，但独立计数和保存最后一次摘要。`native_paste` 仍只统计 WM_PASTE；一次替换不会增加其次数或覆盖其摘要。开始新用例会同时清零两类记录。
 - 单次实例最多记录 4096 个按键事件，超出后标记 `truncated`，不能将截断证据判为通过。30 分钟后自动关闭。
 - 关窗口或在输出目录创建 `STOP` 文件可结束；`phase=closed` 表示正常关闭。读取方还应确认 PID 已结束，不能只依赖文件。
 - 默认仅记录文本校验，不保存文本正文。测试只粘贴产品自带的虚构示例。
 
-WM_PASTE 的前后观测只在自有 TextBox.WndProc 中更新内存，恰好调用一次 base.WndProc，不新增文件 IO、不显式访问剪贴板或改变焦点。由原有定时/用例/关闭 Snapshot 经 EvidenceOutput 发布。顶层 `text_utf16_length/text_sha256_utf8` 来自 Snapshot 当次一次读取的当前 Text，其 `text_observed_timestamp_ticks` 与 native_paste 使用同一 Stopwatch 时钟；它们不能代替 last.after。若同 case 的 completed=true 且 after 长度非零，而后续当前长度变零，说明消息返回后到快照间文本又改变了，不能再推断为“从未插入”。若 after=0，只能说消息返回时未观察到文本；无法排除调用内部瞬时变化。count=0 表示未观察到 WM_PASTE，不排除其他编辑路径；仅保留最后一次，不能从它还原全部中间变化。completed=false 表示观测尚未完整，不能用于插入结论。时间戳用于单调排序/差值，除以 frequency 得到秒，不是 UTC 或物理按键时刻。
+WM_PASTE 与 EM_REPLACESEL 的前后观测只在自有 TextBox.WndProc 中更新各自内存记录，每次消息恰好调用一次 base.WndProc，不读取或解引用 EM_REPLACESEL 的 lParam，不新增文件 IO、不显式访问剪贴板或改变焦点。由原有定时/用例/关闭 Snapshot 经 EvidenceOutput 发布。顶层 `text_utf16_length/text_sha256_utf8` 来自 Snapshot 当次一次读取的当前 Text，其 `text_observed_timestamp_ticks` 与两类记录使用同一 Stopwatch 时钟；它们不能代替各自 last.after。若同 case 的 completed=true 且 after 长度非零，而后续当前长度变零，说明该消息返回后到快照间文本又改变了，不能再推断为“从未插入”。若 after=0，只能说该消息返回时未观察到文本；无法排除调用内部瞬时变化。每类 count=0 仅表示未观察到该类消息，不排除其他编辑路径；各自仅保留最后一次，不能从它还原全部中间变化。completed=false 表示观测尚未完整，不能用于插入结论。时间戳用于单调排序/差值，除以 frequency 得到秒，不是 UTC 或物理按键时刻。
 
 此目标没有请求文件或外部发键接口，解决了前一版夹具复用旧请求、旧响应的问题；它**没有**解决当前 computer-use 接口无法操作管理员窗口和无法分离按下/松开的限制。补测需要真实键盘参与，或另一个经验证确实具备这些能力的受支持输入接口。不得把构建成功或普通窗口按键成功当成管理员输入能力已验证。
 
 ## 补测顺序
 
-当前增量按以下顺序执行，无需单独按 V，也不要求重跑既有场景。既往 V 基线及其他测试结果按原证据保留。
+按本轮验收计划执行指定尚未通过的用例，无需单独按 V。已通过格按对应产品版本、目标工具版本和原始证据保留，不默认重测。
 
-1. 自动完成目标/进程健康预检，并使用独立数据/配置启动本轮诊断构建。仅该进程设置 `NIANLAI_G0_FOREGROUND_TRACE=1`，呼出键使用 `Ctrl+Shift+F12`。
-2. 产品启动后开始新 case，首条直接 B4。重置前保存完整原始 `state.json`（含 `native_paste`）、目标事件、产品日志和操作者记录，核对消息返回时的 after 与快照当前文本。
-3. B4 成功且证据保存后，执行本轮受影响的普通搜索对照；记录目标 case、产品 session 和输入方式。
-4. 其余管理员、长按、重叠按键、外部点击、超时和退出等场景依本轮计划执行。此工具只记录目标收到的消息，未执行的格保持待验。
+1. 使用本轮计划指定的构建和配置，记录产品版本、目标工具版本、目标 `run_id/case_id`、产品 session 和输入方式。
+2. 重置前保存完整原始 `state.json`（含 `native_paste` 和 `native_replace`）、目标事件、产品日志和用户报告，核对对应消息返回时的 after 与快照当前文本。
+3. 仅执行本轮计划指定的未通过用例；未执行的格保持待验，工具更新本身不改变已通过格的结论。
 
-每个用例都要同时保留产品日志、目标证据和操作者记录。工具不会替人确认“确实物理按住了 3 秒”，也不会把目标记录为空自动判为吞键成功。
+工具不会替人确认“确实物理按住了 3 秒”，也不会把目标记录为空自动判为吞键成功。
