@@ -7,6 +7,7 @@ use crate::{
         generic,
         keys::{Key, Match, Table},
         native, native_access,
+        native_edit::{self, NativeTransport},
         request::{
             Callbacks, Mode, Outcome, Request, RestorePolicy, conclude, generic_outcome,
             native_outcome,
@@ -32,7 +33,7 @@ use windows::Win32::{
         TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TokenElevation, TokenIntegrityLevel,
     },
     System::{
-        DataExchange::GetOpenClipboardWindow,
+        DataExchange::{GetClipboardOwner, GetClipboardSequenceNumber, GetOpenClipboardWindow},
         Threading::{
             GetCurrentProcess, GetCurrentProcessId, GetCurrentThreadId, OpenProcess,
             OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -41,7 +42,7 @@ use windows::Win32::{
     UI::Input::KeyboardAndMouse::*,
     UI::WindowsAndMessaging::{
         GetWindowThreadProcessId, IsWindowVisible, SMTO_ABORTIFHUNG, SMTO_BLOCK, SMTO_ERRORONEXIT,
-        SendMessageTimeoutW, WM_PASTE,
+        SendMessageTimeoutW, WM_GETTEXTLENGTH, WM_PASTE,
     },
 };
 
@@ -432,6 +433,11 @@ fn copy(
 }
 
 const NATIVE_TIMEOUT_MS: u32 = 200;
+// System EDIT messages (winuser.h); no private/async pointer message is used.
+const EM_GETSEL: u32 = 0x00b0;
+const EM_REPLACESEL: u32 = 0x00c2;
+const EM_GETPASSWORDCHAR: u32 = 0x00d2;
+const EM_GETLIMITTEXT: u32 = 0x00d5;
 
 #[cfg(test)]
 #[path = "native_message_tests.rs"]
@@ -506,6 +512,51 @@ fn submit_native_message_observed(
     }
 }
 
+fn submit_native_replacement(
+    target: &Target,
+    text: &native_edit::Text,
+    timeout_ms: u32,
+) -> native::Delivery {
+    let mut process = 0;
+    let thread =
+        unsafe { GetWindowThreadProcessId(window::hwnd(target.focus), Some(&mut process)) };
+    if thread == 0
+        || thread != target.thread
+        || process != target.process
+        || thread == unsafe { GetCurrentThreadId() }
+        || process == unsafe { GetCurrentProcessId() }
+    {
+        return native::Delivery {
+            attempted: false,
+            acknowledged: false,
+            error_code: None,
+        };
+    }
+    // Cross-process system-message marshalling owns the receiver copy through WndProc.
+    // The fixed UTF-16 buffer stays alive through this call, including timeout/early Reply.
+    // Same-process cross-thread pointer messages are explicitly excluded above.
+    let acknowledged = unsafe {
+        SetLastError(WIN32_ERROR(0));
+        SendMessageTimeoutW(
+            window::hwnd(target.focus),
+            EM_REPLACESEL,
+            WPARAM(1), // Allow undo; do not clear the user's undo buffer or alter the selection.
+            LPARAM(text.terminated().as_ptr() as isize),
+            SMTO_ABORTIFHUNG | SMTO_BLOCK | SMTO_ERRORONEXIT,
+            timeout_ms,
+            None,
+        )
+        .0 != 0
+    };
+    let error_code = (!acknowledged).then(|| unsafe { GetLastError().0 });
+    // EM_REPLACESEL has no content-success return value. Zero can still complete later.
+    native::Delivery {
+        attempted: true,
+        acknowledged,
+        error_code,
+    }
+}
+
 fn open_holder(target: u32) -> Value {
     let window = unsafe { GetOpenClipboardWindow() }.unwrap_or_default();
     let mut process = 0;
@@ -555,6 +606,8 @@ struct Native<'a> {
     publication_error: Option<&'static str>,
     clock: Instant,
     budget: Option<native_access::Budget>,
+    query_budget: Option<native_edit::QueryBudget>,
+    transport: Option<NativeTransport>,
     request: &'a Request,
     written: &'a Arc<Content>,
     clipboard: &'a clipboard::Service,
@@ -565,6 +618,130 @@ struct Native<'a> {
     report: &'a mut Value,
 }
 impl Native<'_> {
+    fn edit_style(&self) -> Result<native_edit::Style, &'static str> {
+        window::native_edit_style(&self.request.target)
+            .map(native_edit::Style::from_bits)
+            .ok_or("invalid_target")
+    }
+    fn query_remaining(&self) -> Result<u32, &'static str> {
+        self.query_budget
+            .ok_or(native_edit::QUERY_FAILED)?
+            .remaining_ms(self.clock.elapsed())
+    }
+    fn edit_query(&mut self, message: u32) -> Result<usize, &'static str> {
+        self.query_budget
+            .get_or_insert_with(|| native_edit::QueryBudget::new(self.clock.elapsed()));
+        native::guarded(self)?;
+        let timeout = self.query_remaining()?;
+        let mut value = 0;
+        // Scalar system messages only: no cross-process output pointer or target text body.
+        let completed = unsafe {
+            SetLastError(WIN32_ERROR(0));
+            SendMessageTimeoutW(
+                window::hwnd(self.request.target.focus),
+                message,
+                WPARAM(0),
+                LPARAM(0),
+                SMTO_ABORTIFHUNG | SMTO_BLOCK | SMTO_ERRORONEXIT,
+                timeout,
+                Some(&mut value),
+            )
+            .0 != 0
+        };
+        if cancelled(self.request, self.stopping) {
+            return Err("request_cancelled");
+        }
+        self.query_remaining()?;
+        if completed {
+            Ok(value)
+        } else {
+            Err(native_edit::QUERY_FAILED)
+        }
+    }
+    fn edit_snapshot(
+        &mut self,
+        style: native_edit::Style,
+        length: usize,
+        password: usize,
+    ) -> Result<native_edit::Snapshot, &'static str> {
+        let selection = self.edit_query(EM_GETSEL)?;
+        let limit = self.edit_query(EM_GETLIMITTEXT)?;
+        NativeTransport::validate_style(style, self.edit_style()?)?;
+        native_edit::Snapshot::from_queries(style, length, selection, limit, password)
+    }
+    fn publication_stable(&mut self) -> Result<(), &'static str> {
+        native::guarded(self)?;
+        let matched = self.publication.is_some_and(|publication| {
+            publication.matches(
+                || unsafe { GetClipboardSequenceNumber() },
+                || unsafe { GetClipboardOwner() }.unwrap_or_default().0 as usize,
+            )
+        });
+        if cancelled(self.request, self.stopping) {
+            return Err("request_cancelled");
+        }
+        if matched {
+            Ok(())
+        } else {
+            Err(self.publication_error.unwrap_or(native_access::CHANGED))
+        }
+    }
+    fn choose_transport(&mut self) -> Result<NativeTransport, &'static str> {
+        let style = self.edit_style()?;
+        let text = native_edit::prepare(self.written.raw(TEXT).ok_or("native_edit_invalid_text")?)?;
+        let Some(text) = text else {
+            return NativeTransport::wm_paste(style);
+        };
+        if !style.compatible(&text)
+            || self.request.target.process == unsafe { GetCurrentProcessId() }
+        {
+            return NativeTransport::wm_paste(style);
+        }
+        let password = self.edit_query(EM_GETPASSWORDCHAR)?;
+        NativeTransport::validate_style(style, self.edit_style()?)?;
+        // Password masking without ES_PASSWORD is still a known old-WM compatibility case.
+        if password > u16::MAX as usize {
+            return Err(native_edit::QUERY_FAILED);
+        }
+        if password != 0 {
+            return NativeTransport::wm_paste(style);
+        }
+        let length = self.edit_query(WM_GETTEXTLENGTH)?;
+        if native_edit::legacy_length(length)? {
+            NativeTransport::validate_style(style, self.edit_style()?)?;
+            return NativeTransport::wm_paste(style);
+        }
+        let snapshot = self.edit_snapshot(style, length, password)?;
+        NativeTransport::choose(text, snapshot)
+    }
+    fn submit_replacement(
+        &mut self,
+        text: native_edit::Text,
+        snapshot: native_edit::Snapshot,
+    ) -> Result<native::Submission, &'static str> {
+        let style = self.edit_style()?;
+        let password = self.edit_query(EM_GETPASSWORDCHAR)?;
+        let length = self.edit_query(WM_GETTEXTLENGTH)?;
+        if native_edit::legacy_length(length)? {
+            return Err(native_edit::STATE_CHANGED);
+        }
+        let observed = self.edit_snapshot(style, length, password)?;
+        NativeTransport::validate_snapshot(snapshot, observed)?;
+        self.publication_stable()?;
+        let timeout = self.query_remaining()?;
+        let sent_at = Instant::now();
+        let delivery = submit_native_replacement(&self.request.target, &text, timeout);
+        self.report["native_publication"] =
+            json!({"stage":"final","status":"matched","metadata_only":true});
+        self.report["native_submission"] = json!({"attempted":delivery.attempted,"acknowledged":delivery.acknowledged,
+            "status":if !delivery.attempted {"not_submitted"} else if delivery.acknowledged {"sent"} else {"unknown"},
+            "timeout_ms":timeout,"error_code":delivery.error_code,"content_confirmed":false});
+        if delivery.attempted {
+            self.report["selected_to_send_ms"] =
+                json!(sent_at.duration_since(self.request.started).as_secs_f64() * 1000.0);
+        }
+        Ok(delivery.submission())
+    }
     fn report_availability(&mut self, stage: &'static str, result: Result<(), &'static str>) {
         if let Some(budget) = self.budget.as_ref() {
             self.report["native_availability"] = json!({
@@ -677,9 +854,35 @@ impl native::Backend for Native<'_> {
         Ok(())
     }
     fn prepare_submit(&mut self) -> Result<(), &'static str> {
-        self.available("prepare")
+        if self.transport.is_some() {
+            return Err("native_transport_already_selected");
+        }
+        let transport = self.choose_transport()?;
+        self.report["submission_method"] = json!(transport.method());
+        let direct = matches!(transport, NativeTransport::ReplaceSel { .. });
+        self.transport = Some(transport); // Frozen once, before any target mutation.
+        if direct {
+            self.publication_stable()?;
+            self.report["native_publication"] =
+                json!({"stage":"prepare","status":"matched","metadata_only":true});
+            Ok(())
+        } else {
+            self.available("prepare")
+        }
     }
     fn submit(&mut self) -> Result<native::Submission, &'static str> {
+        match self
+            .transport
+            .take()
+            .ok_or("native_transport_not_selected")?
+        {
+            NativeTransport::ReplaceSel { text, snapshot } => {
+                return self.submit_replacement(text, snapshot);
+            }
+            NativeTransport::WmPaste { style } => {
+                NativeTransport::validate_style(style, self.edit_style()?)?
+            }
+        }
         let mut holders = [Value::Null, Value::Null];
         // 诊断查询在末次实际探针之前；它不以 NULL 或持有者分类代替可用性判断。
         holders[0] = open_holder(self.request.target.process);
@@ -1147,7 +1350,7 @@ pub fn execute(
     );
     let ordinary = candidate && compare_integrity(&request.target)["native_ordinary"] == true;
     let outcome = if ordinary {
-        report["submission_method"] = json!("wm_paste");
+        report["submission_method"] = json!("native_pending");
         report["native_submission"] =
             json!({"attempted":false,"acknowledged":false,"status":"not_submitted"});
         let access_started = Instant::now();
@@ -1169,6 +1372,8 @@ pub fn execute(
                     publication_error: None,
                     clock: Instant::now(),
                     budget: None,
+                    query_budget: None,
+                    transport: None,
                     request: &request,
                     written: &written,
                     clipboard,

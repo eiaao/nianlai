@@ -414,6 +414,17 @@ pub fn native_control_valid(target: &Target) -> bool {
     false
 }
 
+pub(crate) fn native_edit_style(target: &Target) -> Option<u32> {
+    if !native_control_valid(target) {
+        return None;
+    }
+    unsafe {
+        SetLastError(WIN32_ERROR(0));
+        let style = GetWindowLongPtrW(hwnd(target.focus), GWL_STYLE);
+        (style != 0 || GetLastError().0 == 0).then_some(style as u32)
+    }
+}
+
 struct RestoreBackend<'a, G> {
     target: &'a Target,
     permitted: G,

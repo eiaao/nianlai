@@ -319,6 +319,8 @@ mod tests {
         operations: Vec<&'static str>,
         submission: Submission,
         writes_fail: bool,
+        prepare_failure: Option<&'static str>,
+        submit_failure: Option<&'static str>,
         synchronized: bool,
         committed: usize,
         finished: Option<Completion>,
@@ -330,6 +332,8 @@ mod tests {
                 operations: Vec::new(),
                 submission: Submission::Sent,
                 writes_fail: false,
+                prepare_failure: None,
+                submit_failure: None,
                 synchronized: true,
                 committed: 0,
                 finished: None,
@@ -355,10 +359,13 @@ mod tests {
         }
         fn prepare_submit(&mut self) -> Result<(), &'static str> {
             self.operations.push("prepare");
-            Ok(())
+            self.prepare_failure.map_or(Ok(()), Err)
         }
         fn submit(&mut self) -> Result<Submission, &'static str> {
             self.operations.push("submit");
+            if let Some(reason) = self.submit_failure {
+                return Err(reason);
+            }
             self.committed += 1;
             Ok(self.submission)
         }
@@ -528,5 +535,51 @@ mod tests {
             run(&mut script).unwrap(),
             Completion::NotSubmitted("native_target_unavailable")
         );
+    }
+
+    #[test]
+    fn metadata_or_publication_refusal_never_dispatches_an_alternative_transport() {
+        for reason in [
+            super::super::native_edit::QUERY_FAILED,
+            super::super::native_edit::QUERY_TIMEOUT,
+            super::super::native_edit::STATE_CHANGED,
+            super::super::native_access::CHANGED,
+        ] {
+            for prepare in [true, false] {
+                let mut script = Script::new([Ok(()), Ok(()), Ok(())]);
+                if prepare {
+                    script.prepare_failure = Some(reason);
+                } else {
+                    script.submit_failure = Some(reason);
+                }
+                assert_eq!(run(&mut script).unwrap(), Completion::NotSubmitted(reason));
+                assert_eq!(script.committed, 0);
+                assert_eq!(
+                    script
+                        .operations
+                        .iter()
+                        .filter(|&&op| op == "write")
+                        .count(),
+                    1
+                );
+                assert_eq!(
+                    script
+                        .operations
+                        .iter()
+                        .filter(|&&op| op == "submit")
+                        .count(),
+                    usize::from(!prepare)
+                );
+                assert_eq!(
+                    script
+                        .operations
+                        .iter()
+                        .filter(|&&op| op == "release")
+                        .count(),
+                    1
+                );
+                assert!(!script.operations.contains(&"activate"));
+            }
+        }
     }
 }

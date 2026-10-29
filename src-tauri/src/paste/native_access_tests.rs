@@ -9,6 +9,35 @@ fn publication() -> Publication {
     Publication::sample(7, || 42, || 7).unwrap()
 }
 
+#[test]
+fn direct_metadata_match_checks_the_exact_publication_without_opening_clipboard() {
+    let expected = publication();
+    for (before, owner, after, matched) in [
+        (42, 7, 42, true),
+        (0, 7, 0, false),
+        (42, 8, 42, false),
+        (43, 7, 43, false),
+        (42, 7, 43, false),
+    ] {
+        let operations = RefCell::new(Vec::new());
+        let mut sequences = [before, after].into_iter();
+        assert_eq!(
+            expected.matches(
+                || {
+                    operations.borrow_mut().push("sequence");
+                    sequences.next().unwrap()
+                },
+                || {
+                    operations.borrow_mut().push("owner");
+                    owner
+                }
+            ),
+            matched
+        );
+        assert_eq!(*operations.borrow(), ["sequence", "owner", "sequence"]);
+    }
+}
+
 #[derive(Clone, Copy)]
 enum Step {
     Busy,

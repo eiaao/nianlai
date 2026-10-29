@@ -28,6 +28,15 @@ impl Publication {
             owner,
         })
     }
+
+    // Direct Edit insertion does not consume the clipboard. Keep the publication fence,
+    // without taking an OS clipboard lock or treating an external reader as a change.
+    pub fn matches(self, mut sequence: impl FnMut() -> u32, owner: impl FnOnce() -> usize) -> bool {
+        let before = sequence();
+        let owner = owner();
+        let after = sequence();
+        before != 0 && before == self.sequence && after == self.sequence && owner == self.owner
+    }
 }
 
 pub fn publish(
