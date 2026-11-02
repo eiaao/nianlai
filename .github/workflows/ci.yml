@@ -83,7 +83,7 @@ jobs:
       - name: 构建 Windows x64 便携版
         run: powershell -NoProfile -ExecutionPolicy Bypass -File tools/release.ps1
       - name: 上传 Windows 便携版与构建信息
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: nianlai-windows
           path: |
