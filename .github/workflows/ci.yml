@@ -43,7 +43,7 @@ jobs:
       - name: 检查搜索确认键的自动重复
         run: node tools/test-panel-key-repeat.mjs
       - name: 安装 Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: 核对发布版本来源
