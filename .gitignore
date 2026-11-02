@@ -1,6 +1,7 @@
-# 内部文档是单独的私有仓库（Gitea），不进公开仓库
+# 本地文档与工具配置，不进仓库
 internal/
 CLAUDE.local.md
+.claude/
 
 __pycache__/
 *.pyc

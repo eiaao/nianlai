@@ -22,10 +22,10 @@ cargo build -p focus-matrix
 
 # 默认就是只读空跑；不会创建 --out 或临时目录
 cargo run -p focus-matrix -- --dry-run
-cargo run -p focus-matrix -- --dry-run --exe D:\project\nianlai\target\release\nianlai.exe
+cargo run -p focus-matrix -- --dry-run --exe target\release\nianlai.exe
 
 # 用户离机后先做 2 次 × 2 模式的基准冒烟
-cargo run -p focus-matrix -- --real-input --only helper --trials 2 --exe D:\project\nianlai\target\release\nianlai.exe
+cargo run -p focus-matrix -- --real-input --only helper --trials 2 --exe target\release\nianlai.exe
 
 # 2 次不会轮到 Esc；4 次能覆盖数字、Enter、数字、Esc 的完整轮换
 cargo run -p focus-matrix -- --real-input --only helper --trials 4

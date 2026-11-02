@@ -2,13 +2,13 @@
 
 一个 .NET Framework C# EXE 的 driver/child。它不接入产品，不读写系统剪贴板，不发送输入，不查询/修改用户窗口或焦点，不要求日常版退出。工具默认不执行 live；`--self-test` 仅做纯数据判断。**当前交付只编译和纯自测，`--run` 未运行。**
 
-源码在本目录；所有编译产物和记录在：
+源码在本目录；编译产物和记录写到调用者指定的输出目录，例如：
 
-`D:\project\nianlai\internal\docs\v0.1\任务\M0-标准编辑器直接插入-20261029\probe-build\r2`
+`<输出目录>\probe-build`
 
 ```powershell
 # 从本仓库根目录运行；输出目录由调用者显式指定。
-pwsh -NoProfile -File tools/native-edit-probe/build.ps1 -OutputDirectory 'D:\project\nianlai\internal\docs\v0.1\任务\M0-标准编辑器直接插入-20261029\probe-build\r2'
+pwsh -NoProfile -File tools/native-edit-probe/build.ps1 -OutputDirectory '<输出目录>\probe-build'
 ```
 
 脚本用 Framework64 `csc.exe`、`/warnaserror /codepage:65001 /optimize+ /platform:x64 /target:exe` 和系统 WinForms/Drawing/Web.Extensions 依赖编译，再只执行 `--self-test`。manifest 绑定源码/EXE/编译和自测摘要；已有 manifest 时拒绝覆盖。没有安装依赖或修改 Cargo。
@@ -18,7 +18,7 @@ pwsh -NoProfile -File tools/native-edit-probe/build.ps1 -OutputDirectory 'D:\pro
 由父任务静态审查通过后才安排：
 
 ```powershell
-& 'D:\project\nianlai\internal\docs\v0.1\任务\M0-标准编辑器直接插入-20261029\probe-build\r2\NativeEditProbe.exe' --run --output 'D:\project\nianlai\internal\docs\v0.1\任务\M0-标准编辑器直接插入-20261029\probe-run-NEW'
+& '<输出目录>\probe-build\NativeEditProbe.exe' --run --output '<输出目录>\probe-run'
 ```
 
 输出须为绝对、规范、尚不存在的新目录。driver 顺序运行下列8个短固定用例，首个失败后停止；不要求任何键盘操作。
