@@ -3,8 +3,8 @@ name = "nianlai"
 version = "0.1.0-alpha.1"
 description = "拈来：开源剪贴板工具"
 authors = ["Nianlai contributors"]
-license = ""
-repository = ""
+license = "MIT"
+repository = "https://github.com/eiaao/nianlai"
 edition = "2024"
 rust-version = "1.90"
 

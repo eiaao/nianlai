@@ -1,0 +1,19 @@
+name: Feature request / 功能建议
+description: Suggest an idea / 提一个想法
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do / 想解决什么问题
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: How you would like it to work / 希望怎么做
+  - type: textarea
+    id: others
+    attributes:
+      label: How other tools do it / 其他工具的做法
+      description: Ditto, Win+V, Paste, Raycast… / 可选

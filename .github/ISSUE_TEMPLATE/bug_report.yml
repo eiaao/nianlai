@@ -1,0 +1,36 @@
+name: Bug report / 问题反馈
+description: Something does not work as expected / 有功能不正常
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened / 发生了什么
+      description: Steps to reproduce, what you expected and what you saw. / 复现步骤、期望结果和实际结果。
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Nianlai version / 版本
+      placeholder: 0.1.0-alpha.1
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Windows version / 系统版本
+      placeholder: Windows 11 24H2, 150% scaling
+    validations:
+      required: true
+  - type: input
+    id: target
+    attributes:
+      label: Target app / 粘贴到哪个程序
+      description: If the problem is about pasting or focus. / 如果和粘贴、焦点有关。
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / 日志
+      description: Optional. Files under `%LOCALAPPDATA%\Nianlai\logs`. They do not contain clipboard content, but check before posting. / 可选，日志不含剪贴板内容，贴出前请自己再看一眼。
+      render: text
