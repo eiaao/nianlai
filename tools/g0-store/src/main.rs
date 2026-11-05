@@ -54,6 +54,8 @@ fn event(number: u64) -> CopyEvent {
         time_ms: store::now_ms(),
         sequence: number as u32,
         source_process: "synthetic.exe".into(),
+        // M1-S：来源应用路径；合成数据没有真实进程，留空（只记进程名）。
+        source_path: String::new(),
         owner_process: "synthetic.exe".into(),
         owner_pid: 0,
         observed: Instant::now(),

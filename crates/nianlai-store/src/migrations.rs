@@ -13,16 +13,17 @@
 //! - user_version == VERSION → 什么都不做。
 //! - user_version > VERSION → `Error::NewerSchema { found, supported }`，不改库。
 //!
-//! 将来怎么加一步（以 v2 为例）：
-//! 1. 写 `fn v2(tx: &Transaction<'_>) -> Result<()>`，里面只放 SQL（DDL / DML）；不要 COMMIT、不要改 journal_mode、
+//! 将来怎么加一步（以 v3 为例）：
+//! 1. 写 `fn v3(tx: &Transaction<'_>) -> Result<()>`，里面只放 SQL（DDL / DML）；不要 COMMIT、不要改 journal_mode、
 //!    不要写 user_version（框架负责），也不要调用按“最新结构”读写的业务代码——此刻库还是旧结构。
-//! 2. 在 `STEPS` 末尾追加 `Step { apply: v2 }`，`VERSION` 自动变成 2。已经发布过的步骤不能再改，
+//! 2. 在 `STEPS` 末尾追加 `Step { apply: v3 }`，`VERSION` 自动变成 3。已经发布过的步骤不能再改，
 //!    改结构只能追加新步骤；`schema::structure` 补上新结构的检查，`snapshot::relational_check` 有新不变量也补上。
 //! 3. 测试（见 upgrade_tests.rs）：`fixture_v1_opens_with_latest_code_and_matches_manifest` 会自动从
-//!    `tests/fixtures/v1.db` 升到 VERSION 并比对 v1.json，不用改；再加一条针对 v2 的注入测试——
-//!    用 `migrate` 传入“v2 中途失败”的步骤，断言库仍是 v1、文件完好。
-//! 4. v2 发布后，在 VERSION 仍为 2 的提交上跑 `rebuild_fixture(2)`（照 `rebuild_v1_fixture` 加一个 ignored 测试）
-//!    生成 `v2.db` / `v2.json`，给以后的升级测试用；旧夹具代表旧版本写出的库，不要重建。
+//!    `tests/fixtures/v1.db` 升到 VERSION 并比对 v1.json，不用改；再加一条针对 v3 的注入测试——
+//!    用 `migrate` 传入“v3 中途失败”的步骤，断言库仍停在 v2、文件完好。
+//! 4. v3 发布后，在 VERSION 仍为 3 的提交上跑 `rebuild_fixture(3)`（照 `rebuild_v1_fixture` 加一个 ignored 测试）
+//!    生成 `v3.db` / `v3.json`，给以后的升级测试用；旧夹具代表旧版本写出的库，不要重建。
+//!    （v2 夹具同理：v2 定稿发布后跑 `rebuild_fixture(2)`，当前还没有生成。）
 
 use crate::*;
 use rusqlite::{Transaction, TransactionBehavior};
@@ -34,7 +35,7 @@ pub struct Step {
     pub apply: fn(&Transaction<'_>) -> Result<()>,
 }
 
-pub const STEPS: &[Step] = &[Step { apply: v1 }];
+pub const STEPS: &[Step] = &[Step { apply: v1 }, Step { apply: v2 }];
 pub const VERSION: u32 = STEPS.len() as u32;
 
 pub fn user_version(c: &Connection) -> Result<u32> {
@@ -138,6 +139,48 @@ fn v1(tx: &Transaction<'_>) -> Result<()> {
                 INSERT INTO search_index(search_index,rowid,search_text) VALUES('delete',old.id,old.search_text);
                 INSERT INTO search_index(rowid,search_text) VALUES(new.id,new.search_text);
             END;",
+    )?;
+    Ok(())
+}
+
+// v2（M1-S）：来源应用（A06）与收藏（E01/B03）。
+// - source_apps：来源进程的程序信息。进程名 + exe 路径决定一行（拿不到路径时路径为空串），
+//   显示名先落一个退回值（文件名去扩展名或进程名），采集线程之外的后台刷新再改成
+//   版本信息里的 FileDescription 并补图标；icon_key 由路径和文件修改时间决定，exe 升级后变化。
+// - favorites：收藏引用 contents 行，position 是稳定顺序（新收藏放最后，永不重排）；
+//   外键保证物理删除被收藏的内容会失败——B03“删除历史不影响收藏”的数据库层兜底。
+// - copy_events.source_app_id / contents.source_app_id：事件级来源应用引用；
+//   contents 上的是最近一次复制的事件引用，列表取它，避免按行子查询。
+// - 回填：v1 的 copy_events.source_process 只有进程名，按它建 source_apps 行
+//   （display_name 先用进程名，等该应用下次被复制时后台刷新修正）。
+fn v2(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute_batch(
+        "CREATE TABLE source_apps (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                process_name TEXT NOT NULL, exe_path TEXT NOT NULL,
+                display_name TEXT NOT NULL, icon_file TEXT NOT NULL, icon_key TEXT NOT NULL,
+                updated_ms INTEGER NOT NULL,
+                UNIQUE(process_name, exe_path));
+            CREATE INDEX source_app_path ON source_apps(exe_path);
+            CREATE TABLE favorites (
+                content_id INTEGER PRIMARY KEY REFERENCES contents(id),
+                position INTEGER NOT NULL UNIQUE,
+                title TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '',
+                created_ms INTEGER NOT NULL, updated_ms INTEGER NOT NULL);
+            ALTER TABLE copy_events ADD COLUMN source_app_id INTEGER REFERENCES source_apps(id);
+            ALTER TABLE contents ADD COLUMN source_app_id INTEGER REFERENCES source_apps(id);
+            INSERT INTO source_apps(process_name,exe_path,display_name,icon_file,icon_key,updated_ms)
+                SELECT DISTINCT source_process,'',source_process,'','',
+                    CAST(strftime('%s','now') AS INTEGER)*1000
+                FROM copy_events WHERE source_process != '';
+            UPDATE copy_events SET source_app_id=(
+                SELECT a.id FROM source_apps a
+                WHERE a.process_name=copy_events.source_process AND a.exe_path='')
+                WHERE source_process != '';
+            UPDATE contents SET source_app_id=(
+                SELECT e.source_app_id FROM copy_events e
+                WHERE e.content_id=contents.id AND e.source_app_id IS NOT NULL
+                ORDER BY e.time_ms DESC,e.id DESC LIMIT 1);",
     )?;
     Ok(())
 }

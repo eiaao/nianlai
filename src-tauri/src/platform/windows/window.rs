@@ -117,30 +117,33 @@ pub fn process_of(window: usize) -> String {
 }
 
 pub fn process_name(id: u32) -> String {
+    process_path(id)
+        .and_then(|full| {
+            Path::new(&full)
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .unwrap_or_default()
+}
+
+// 进程可执行文件的完整路径（A06 来源应用）；权限不够或进程已退出时返回 None。
+pub fn process_path(id: u32) -> Option<String> {
+    if id == 0 {
+        return None;
+    }
     unsafe {
-        if let Ok(process) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, id) {
-            let mut buffer = [0u16; 32768];
-            let mut length = buffer.len() as u32;
-            if QueryFullProcessImageNameW(
-                process,
-                PROCESS_NAME_WIN32,
-                PWSTR(buffer.as_mut_ptr()),
-                &mut length,
-            )
-            .is_ok()
-            {
-                let full = String::from_utf16_lossy(&buffer[..length as usize]);
-                let name = Path::new(&full)
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned();
-                let _ = CloseHandle(process);
-                return name;
-            }
-            let _ = CloseHandle(process);
-        }
-        String::new()
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, id).ok()?;
+        let mut buffer = [0u16; 32768];
+        let mut length = buffer.len() as u32;
+        let result = QueryFullProcessImageNameW(
+            process,
+            PROCESS_NAME_WIN32,
+            PWSTR(buffer.as_mut_ptr()),
+            &mut length,
+        )
+        .is_ok();
+        let _ = CloseHandle(process);
+        result.then(|| String::from_utf16_lossy(&buffer[..length as usize]))
     }
 }
 

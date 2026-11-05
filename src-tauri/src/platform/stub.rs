@@ -263,3 +263,20 @@ pub mod memory {
         serde_json::Value::Null
     }
 }
+
+// A06 来源应用：非 Windows 无实现；只提供可编译的空刷新器。
+pub mod apps {
+    use crate::history::Shared;
+    use crate::log::Logger;
+    use std::sync::Arc;
+
+    #[derive(Clone)]
+    pub struct Refresher;
+    impl Refresher {
+        pub fn refresh(&self, _exe_path: &str) {}
+    }
+
+    pub fn start(_shared: Arc<Shared>, _logger: Logger) -> Refresher {
+        Refresher
+    }
+}

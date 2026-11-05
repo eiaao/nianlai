@@ -27,6 +27,7 @@ fn event(sequence: u32, observed: Instant) -> CopyEvent {
         time_ms: sequence as u64,
         sequence,
         source_process: "source.exe".into(),
+        source_path: r"C:\Apps\source\source.exe".into(),
         owner_process: "owner.exe".into(),
         owner_pid: 7,
         observed,
@@ -54,7 +55,7 @@ fn ingest(store: &Store, content: Arc<Content>, sequence: u32, at: Instant) -> I
 fn create_reopen_and_refuse_future_version_without_touching_file() {
     let temp = Temp::new();
     let store = temp.store();
-    assert_eq!(store.report().version, 1);
+    assert_eq!(store.report().version, VERSION);
     let c = store.reader().unwrap();
     assert_eq!(
         c.connection
@@ -65,16 +66,19 @@ fn create_reopen_and_refuse_future_version_without_touching_file() {
     drop(c);
     drop(store);
     let c = writable(&temp.0.join("history.db")).unwrap();
-    c.execute_batch("PRAGMA user_version=2; PRAGMA wal_checkpoint(TRUNCATE);")
-        .unwrap();
+    c.execute_batch(&format!(
+        "PRAGMA user_version={}; PRAGMA wal_checkpoint(TRUNCATE);",
+        VERSION + 1
+    ))
+    .unwrap();
     drop(c);
     let before = fs::read(temp.0.join("history.db")).unwrap();
     assert!(matches!(
         Store::open(&temp.0, sha256),
         Err(Error::NewerSchema {
-            found: 2,
+            found,
             supported: VERSION
-        })
+        }) if found == VERSION + 1
     ));
     assert_eq!(before, fs::read(temp.0.join("history.db")).unwrap());
 }
@@ -513,4 +517,218 @@ fn samples_dedup_without_advancing_the_real_observation_and_readers_see_commits(
     let counts = validate_snapshot(&shot.file).unwrap();
     assert!((50..=80).contains(&counts.contents));
     check(&temp.0).unwrap();
+}
+
+// A12：去重合并后每一次复制事件都保留，且内容移到历史最前；同次观察后到的格式不新增事件。
+#[test]
+fn dedup_keeps_every_event_moves_content_to_front_and_reuse_keeps_order() {
+    let temp = Temp::new();
+    let store = temp.store();
+    let at = Instant::now();
+    for i in 1..=5 {
+        ingest(&store, text(&format!("第{i}条")), i, at);
+    }
+    // 再复制第 1 条（duplicate）：追加事件、前移到最前，总记录数不变。
+    let result = ingest(&store, text("第1条"), 6, at);
+    assert_eq!(result.outcome, "duplicate");
+    assert_eq!(store.cache().total, 5);
+    assert_eq!(store.cache().items[0].preview, "第1条");
+    assert_eq!(store.cache().items[0].copy_count, 2);
+    // 粘贴复用（reuse）也前移，但不追加事件。
+    store.reuse(3, 700).unwrap();
+    assert_eq!(store.cache().items[0].preview, "第3条");
+    assert_eq!(store.cache().items[0].copy_count, 1);
+    // 再次复制第 3 条仍走 duplicate；随后补齐的富文本格式合并进原记录，不新增事件。
+    assert_eq!(ingest(&store, text("第3条"), 7, at).outcome, "duplicate");
+    assert_eq!(
+        ingest(&store, rich("第3条"), 8, at).outcome,
+        "merged_late_formats"
+    );
+    let counts = check(&temp.0).unwrap();
+    assert_eq!(counts.events, 7);
+    // 事件明细：每条内容的事件数与内容表一致。
+    let c = writable(&temp.0.join("history.db")).unwrap();
+    let mismatch: usize = c
+        .query_row(
+            "SELECT count(*) FROM contents WHERE copy_count!=(SELECT count(*) FROM copy_events WHERE content_id=contents.id)",
+            [],
+            |r| schema::number(r, 0),
+        )
+        .unwrap();
+    assert_eq!(mismatch, 0);
+}
+
+// A06：来源应用行随事件写入并被列表引用；同进程同路径只建一行，最近一次复制决定列表来源。
+#[test]
+fn source_apps_upsert_with_events_and_lists_latest_source() {
+    let temp = Temp::new();
+    let store = temp.store();
+    let at = Instant::now();
+    let mut first = event(1, at);
+    first.source_process = "app.exe".into();
+    first.source_path = r"C:\Tools\app.exe".into();
+    store.ingest(text("来自 app"), first, false, at).unwrap();
+    let mut second = event(2, at);
+    second.source_process = "app.exe".into();
+    second.source_path = r"C:\Tools\app.exe".into();
+    store
+        .ingest(text("再次来自 app"), second, false, at)
+        .unwrap();
+    // 拿不到路径的进程只记进程名，是另一行（显示名退回进程名）。
+    let mut third = event(3, at);
+    third.source_process = "app.exe".into();
+    third.source_path = String::new();
+    store.ingest(text("无路径来源"), third, false, at).unwrap();
+    let reader = store.reader().unwrap();
+    assert_eq!(reader.counts().unwrap().source_apps, 2);
+    let c = writable(&temp.0.join("history.db")).unwrap();
+    let rows: Vec<(String, String, String)> = c
+        .prepare("SELECT process_name,exe_path,display_name FROM source_apps ORDER BY exe_path")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            ("app.exe".into(), String::new(), "app.exe".into()),
+            ("app.exe".into(), r"C:\Tools\app.exe".into(), "app".into()),
+        ]
+    );
+    // 每条内容引用最近一次复制的事件来源：最新记录来自无路径事件，显示名退回进程名。
+    assert_eq!(store.cache().items[0].preview, "无路径来源");
+    assert_eq!(
+        store.cache().items[0].source_name.as_deref(),
+        Some("app.exe")
+    );
+    let missing: usize = c
+        .query_row(
+            "SELECT count(*) FROM copy_events WHERE source_app_id IS NULL",
+            [],
+            |r| schema::number(r, 0),
+        )
+        .unwrap();
+    assert_eq!(missing, 0);
+    check(&temp.0).unwrap();
+}
+
+// E01/B03：收藏的增删、顺序稳定；再次复制、搜索、粘贴复用都不改变收藏顺序。
+#[test]
+fn favorites_are_stable_ordered_and_survive_copies_search_and_reuse() {
+    let temp = Temp::new();
+    let store = temp.store();
+    let at = Instant::now();
+    for i in 1..=4 {
+        ingest(&store, text(&format!("内容{i}")), i, at);
+    }
+    // 收藏 2、4、1（顺序即收藏顺序）。
+    store.set_favorite(2, true).unwrap().unwrap();
+    store.set_favorite(4, true).unwrap().unwrap();
+    store.set_favorite(1, true).unwrap().unwrap();
+    let order = |store: &Store| {
+        store
+            .reader()
+            .unwrap()
+            .favorites()
+            .unwrap()
+            .into_iter()
+            .map(|item| item.id)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(order(&store), vec![2, 4, 1]);
+    // 再次复制被收藏的内容、搜索、粘贴复用之后顺序不变。
+    ingest(&store, text("内容1"), 5, at);
+    store.reader().unwrap().search("内容").unwrap();
+    store.reuse(4, 600).unwrap();
+    assert_eq!(order(&store), vec![2, 4, 1]);
+    // 列表项带着收藏状态。
+    let listed: Vec<(usize, bool, Option<u64>)> = store
+        .cache()
+        .items
+        .iter()
+        .map(|item| (item.id, item.favorite, item.favorite_position))
+        .collect();
+    assert!(listed.contains(&(2, true, Some(1))));
+    assert!(listed.contains(&(4, true, Some(2))));
+    assert!(listed.contains(&(1, true, Some(3))));
+    assert!(listed.contains(&(3, false, None)));
+    // 取消收藏后从列表消失；再收藏排到最后（顺序稳定但不复活旧位置）。
+    store.set_favorite(2, false).unwrap().unwrap();
+    assert_eq!(order(&store), vec![4, 1]);
+    store.set_favorite(2, true).unwrap().unwrap();
+    assert_eq!(order(&store), vec![4, 1, 2]);
+    // 收藏不存在的内容返回 None。
+    assert!(store.set_favorite(999, true).unwrap().is_none());
+    check(&temp.0).unwrap();
+}
+
+// B03：被收藏的内容不能物理删除；补齐合并撞上被收藏的重复内容时保留收藏行。
+#[test]
+fn favorited_content_is_not_deletable_and_merges_keep_the_favorite() {
+    let temp = Temp::new();
+    let store = temp.store();
+    let at = Instant::now();
+    ingest(&store, rich("收藏后补齐合并"), 1, at);
+    store.set_favorite(1, true).unwrap().unwrap();
+    let reader = store.reader().unwrap();
+    assert!(!reader.deletable(1).unwrap());
+    store.set_favorite(1, false).unwrap().unwrap();
+    assert!(reader.deletable(1).unwrap());
+    store.set_favorite(1, true).unwrap().unwrap();
+
+    // 已有一条未收藏的纯文本记录；补齐成富文本后与“收藏后补齐合并”同指纹，必须并成一行。
+    ingest(&store, text("收藏后补齐合并"), 2, at);
+    assert_eq!(
+        ingest(&store, rich("收藏后补齐合并"), 3, at).outcome,
+        "merged_late_formats"
+    );
+    let counts = check(&temp.0).unwrap();
+    assert_eq!(counts.contents, 1);
+    assert_eq!(counts.favorites, 1);
+    // 收藏仍在，且指向合并后保留的那一行。
+    let favorites = store.reader().unwrap().favorites().unwrap();
+    assert_eq!(favorites.len(), 1);
+    assert_eq!(favorites[0].preview, "收藏后补齐合并");
+    assert!(favorites[0].favorite);
+    // 外键兜底：直接删被收藏的内容行会被数据库拒绝。
+    let c = writable(&temp.0.join("history.db")).unwrap();
+    c.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+    let id: i64 = c
+        .query_row("SELECT content_id FROM favorites", [], |r| r.get(0))
+        .unwrap();
+    assert!(c.execute("DELETE FROM contents WHERE id=?1", [id]).is_err());
+}
+
+// A06：后台刷新只改显示名和图标引用，不动事件与指纹。
+#[test]
+fn refresh_source_app_updates_display_and_icon_reference_only() {
+    let temp = Temp::new();
+    let store = temp.store();
+    let at = Instant::now();
+    let mut event = event(1, at);
+    event.source_process = "app.exe".into();
+    event.source_path = r"C:\Tools\app.exe".into();
+    store
+        .ingest(text("有来源的记录"), event, false, at)
+        .unwrap();
+    let app = store
+        .reader()
+        .unwrap()
+        .source_app_by_path(r"C:\Tools\app.exe")
+        .unwrap()
+        .unwrap();
+    store
+        .refresh_source_app(
+            app.id,
+            "工具盒".into(),
+            "abc123".into(),
+            "abc123.png".into(),
+        )
+        .unwrap();
+    let item = &store.cache().items[0];
+    assert_eq!(item.source_name.as_deref(), Some("工具盒"));
+    assert_eq!(item.icon_file.as_deref(), Some("abc123.png"));
+    let counts = check(&temp.0).unwrap();
+    assert_eq!((counts.events, counts.source_apps), (1, 1));
 }

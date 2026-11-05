@@ -616,6 +616,7 @@ fn production_write_observed(
             time_ms: crate::log::now_ms(),
             sequence: 1,
             source_process: "controlled_diagnostic".into(),
+            source_path: String::new(),
             owner_process: "controlled_diagnostic".into(),
             owner_pid: unsafe { GetCurrentProcessId() },
             observed: Instant::now(),

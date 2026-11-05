@@ -4,6 +4,7 @@ use content::{Content, Fingerprint, Hash};
 use serde::Serialize;
 use std::{
     collections::VecDeque,
+    path::Path,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -17,6 +18,7 @@ pub struct CopyEvent {
     pub time_ms: u64,
     pub sequence: u32,
     pub source_process: String,
+    pub source_path: String,
     pub owner_process: String,
     pub owner_pid: u32,
     pub observed: Instant,
@@ -29,6 +31,9 @@ pub struct Record {
     pub observation: CopyEvent,
     pub updated_ms: u64,
     pub partial: bool,
+    // 收藏（E01）：顺序一经分配不再变化；被收藏的记录不参与容量淘汰（B03）。
+    pub favorite: bool,
+    pub favorite_position: Option<u64>,
     observed: bool,
 }
 
@@ -65,11 +70,26 @@ pub struct History {
     last_recorded_ms: Option<u64>,
     max_records: usize,
     max_bytes: usize,
+    next_favorite_position: u64,
 }
 
 // DWORD 序列号会回绕；半个序列空间内按有符号差判断新旧。
 pub fn older(sequence: u32, latest: u32) -> bool {
     (sequence.wrapping_sub(latest) as i32) < 0
+}
+
+// 来源应用显示名的退回值：路径文件名去扩展名，无路径时用进程名。
+// 内存模式不做后台刷新（图标与 FileDescription 需要磁盘库），显示到这一层为止。
+fn source_name(event: &CopyEvent) -> String {
+    if !event.source_path.is_empty()
+        && let Some(stem) = Path::new(&event.source_path)
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .filter(|stem| !stem.is_empty())
+    {
+        return stem;
+    }
+    event.source_process.clone()
 }
 
 impl History {
@@ -90,6 +110,7 @@ impl History {
             last_recorded_ms: None,
             max_records: MAX_RECORDS,
             max_bytes: MAX_BYTES,
+            next_favorite_position: 1,
         }
     }
 
@@ -167,6 +188,32 @@ impl History {
             }
             self.latest_sequence = Some(sequence);
         }
+    }
+
+    // E01：收藏 / 取消收藏；返回更新后的项（内容不存在为 None）。
+    pub fn set_favorite(&mut self, id: usize, favorite: bool) -> Option<Preview> {
+        let record = self.records.iter_mut().find(|record| record.id == id)?;
+        if favorite && !record.favorite {
+            record.favorite = true;
+            record.favorite_position = Some(self.next_favorite_position);
+            self.next_favorite_position += 1;
+        } else if !favorite {
+            record.favorite = false;
+            record.favorite_position = None;
+        }
+        self.snapshot().items.into_iter().find(|item| item.id == id)
+    }
+
+    // 收藏列表按收藏顺序返回（E01）。
+    pub fn favorites(&self) -> Vec<Preview> {
+        let mut items: Vec<Preview> = self
+            .snapshot()
+            .items
+            .into_iter()
+            .filter(|item| item.favorite)
+            .collect();
+        items.sort_by_key(|item| item.favorite_position);
+        items
     }
 
     pub fn ingest(
@@ -258,19 +305,20 @@ impl History {
                 observation: event.clone(),
                 updated_ms: event.time_ms,
                 partial,
+                favorite: false,
+                favorite_position: None,
                 observed: true,
             }
         };
         record.observation = event.clone();
         record.observed = true;
         record.updated_ms = event.time_ms;
-        // 补齐后可能与另一条完整内容相同，仍只保留一份内容，复制事件全部归并。
+        // 补齐后可能与另一条完整内容相同，仍只保留一份内容，复制事件全部归并；
+        // 被收藏的那条不能被并掉（B03）。
         if same.is_some() || late.is_some() {
-            while let Some(index) = self
-                .records
-                .iter()
-                .position(|other| other.content.fingerprint == record.content.fingerprint)
-            {
+            while let Some(index) = self.records.iter().position(|other| {
+                !other.favorite && other.content.fingerprint == record.content.fingerprint
+            }) {
                 record
                     .events
                     .extend(self.records.remove(index).unwrap().events);
@@ -291,16 +339,17 @@ impl History {
         Ok(result)
     }
 
+    // 容量淘汰只动未收藏的记录；收藏不随历史过期（B03/E01）。
     fn evict(&mut self) {
         let mut bytes: usize = self.records.iter().map(|record| record.content.bytes).sum();
         while self.records.len() > self.max_records || bytes > self.max_bytes {
-            if let Some(record) = self.records.pop_back() {
-                bytes -= record.content.bytes;
-                if self.last_observation_id == Some(record.id) {
-                    self.last_observation_id = None;
-                }
-            } else {
+            let Some(index) = self.records.iter().rposition(|record| !record.favorite) else {
                 break;
+            };
+            let record = self.records.remove(index).unwrap();
+            bytes -= record.content.bytes;
+            if self.last_observation_id == Some(record.id) {
+                self.last_observation_id = None;
             }
         }
     }
@@ -326,6 +375,13 @@ impl History {
                         copied_ms: record.updated_ms,
                         copy_count: record.events.len(),
                         partial: record.partial,
+                        favorite: record.favorite,
+                        favorite_position: record.favorite_position,
+                        source_name: (!event.source_process.is_empty()
+                            || !event.source_path.is_empty())
+                        .then(|| source_name(event)),
+                        // 内存模式不做图标提取（无磁盘库可写缓存），图标字段留空。
+                        source_icon: None,
                     }
                 })
                 .collect(),
@@ -342,6 +398,7 @@ impl History {
                 time_ms: crate::log::now_ms(),
                 sequence: 0,
                 source_process: "示例".into(),
+                source_path: String::new(),
                 owner_process: "示例".into(),
                 owner_pid: 0,
                 observed: Instant::now(),
@@ -353,6 +410,8 @@ impl History {
                 observation: event.clone(),
                 updated_ms: event.time_ms,
                 partial: false,
+                favorite: false,
+                favorite_position: None,
                 observed: false,
             });
             self.next_id += 1;

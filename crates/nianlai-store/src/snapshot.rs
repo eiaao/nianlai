@@ -70,6 +70,7 @@ fn relational_check(c: &Connection) -> Result<Counts> {
     }
     schema::pragma_check(c, "integrity_check")?;
     schema::structure(c)?;
+    // v2 起：收藏必须指向存在的内容；contents / copy_events 的来源应用引用必须指向存在的行。
     let invalid:bool=c.query_row("SELECT
         EXISTS(SELECT 1 FROM contents c WHERE NOT EXISTS(SELECT 1 FROM formats f WHERE f.content_id=c.id)
             OR NOT EXISTS(SELECT 1 FROM copy_events e WHERE e.content_id=c.id)
@@ -78,7 +79,10 @@ fn relational_check(c: &Connection) -> Result<Counts> {
         OR EXISTS(SELECT 1 FROM formats f LEFT JOIN contents c ON c.id=f.content_id WHERE c.id IS NULL OR (f.encoding=0 AND f.bytes!=length(f.data)))
         OR EXISTS(SELECT 1 FROM copy_events e LEFT JOIN contents c ON c.id=e.content_id WHERE c.id IS NULL)
         OR EXISTS(SELECT 1 FROM contents c LEFT JOIN search_index_docsize s ON s.id=c.id WHERE s.id IS NULL)
-        OR EXISTS(SELECT 1 FROM search_index_docsize s LEFT JOIN contents c ON c.id=s.id WHERE c.id IS NULL)",[],|r|r.get(0))?;
+        OR EXISTS(SELECT 1 FROM search_index_docsize s LEFT JOIN contents c ON c.id=s.id WHERE c.id IS NULL)
+        OR EXISTS(SELECT 1 FROM favorites fv LEFT JOIN contents c ON c.id=fv.content_id WHERE c.id IS NULL)
+        OR EXISTS(SELECT 1 FROM copy_events e LEFT JOIN source_apps a ON a.id=e.source_app_id WHERE e.source_app_id IS NOT NULL AND a.id IS NULL)
+        OR EXISTS(SELECT 1 FROM contents c LEFT JOIN source_apps a ON a.id=c.source_app_id WHERE c.source_app_id IS NOT NULL AND a.id IS NULL)",[],|r|r.get(0))?;
     if invalid {
         return Err(Error::Invalid("relational_integrity"));
     }

@@ -292,6 +292,56 @@ impl Store {
             p95_ms: p95,
         }
     }
+    // 收藏 / 取消收藏（E01）。收藏放最后，顺序一经分配永不改变；取消后再收藏会排到最后。
+    pub fn set_favorite(&self, id: usize, favorite: bool) -> Result<Option<Metadata>> {
+        self.call(move |w| {
+            let tx = w.connection.transaction()?;
+            let exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM contents WHERE id=?1)",
+                [id as i64],
+                |r| r.get(0),
+            )?;
+            if !exists {
+                return Ok(None);
+            }
+            if favorite {
+                let now = now_ms() as i64;
+                tx.execute(
+                    "INSERT INTO favorites(content_id,position,title,note,created_ms,updated_ms) \
+                     VALUES(?1,(SELECT coalesce(max(position),0)+1 FROM favorites),'','',?2,?2) \
+                     ON CONFLICT(content_id) DO NOTHING",
+                    params![id as i64, now],
+                )?;
+            } else {
+                tx.execute("DELETE FROM favorites WHERE content_id=?1", [id as i64])?;
+            }
+            let item = schema::metadata(&tx, id)?;
+            tx.commit()?;
+            update_cached_item(&mut w.cache.write().unwrap(), &item);
+            Ok(Some(item))
+        })
+    }
+    // 后台刷新来源应用（A06）：更新显示名和图标缓存引用。图标文件由调用方先写好。
+    pub fn refresh_source_app(
+        &self,
+        app_id: i64,
+        display_name: String,
+        icon_key: String,
+        icon_file: String,
+    ) -> Result<()> {
+        self.call(move |w| {
+            let tx = w.connection.transaction()?;
+            tx.execute(
+                "UPDATE source_apps SET display_name=?2,icon_key=?3,icon_file=?4,updated_ms=?5 \
+                 WHERE id=?1",
+                params![app_id, display_name, icon_key, icon_file, now_ms() as i64],
+            )?;
+            tx.commit()?;
+            // 来源应用信息变了，最近列表缓存整体重载（图标刷新不频繁，重载开销可忽略）。
+            w.cache.write().unwrap().items = schema::recent(&w.connection)?;
+            Ok(())
+        })
+    }
     #[cfg(test)]
     pub(crate) fn inject_after_formats(&self) -> Result<()> {
         self.call(|w| {
@@ -324,6 +374,7 @@ fn update_cache(cache: &mut Cache, item: Metadata, deleted: &[usize], delta: isi
     cache.items.retain(|item| {
         bytes += item.preview.len()
             + item.source.len()
+            + item.source_name.as_deref().map_or(0, str::len)
             + item.file_names.iter().map(String::len).sum::<usize>()
             + item
                 .formats
@@ -333,6 +384,14 @@ fn update_cache(cache: &mut Cache, item: Metadata, deleted: &[usize], delta: isi
             + 256;
         bytes <= 256 * 1024 * 1024
     });
+}
+
+// 收藏状态变化只改缓存里这一项的字段，顺序和其余条目不动（愉悦标准：可预期）。
+fn update_cached_item(cache: &mut Cache, item: &Metadata) {
+    if let Some(cached) = cache.items.iter_mut().find(|cached| cached.id == item.id) {
+        cached.favorite = item.favorite;
+        cached.favorite_position = item.favorite_position;
+    }
 }
 
 impl Writer {
@@ -394,6 +453,8 @@ impl Writer {
         let tx = self
             .connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        // 来源应用行只做一次点查，找不到才插入；版本信息和图标由采集线程之外的后台刷新补上。
+        let source_app_id = upsert_source_app(&tx, &event)?;
         let mut same = false;
         let mut merged = content.clone();
         let mut partial = partial;
@@ -434,26 +495,45 @@ impl Writer {
         let id;
         let mut delta = 0;
         if let Some(existing) = merge_id {
-            id = existing;
+            let mut keep = existing;
             outcome = if same {
                 "merged_same_observation"
             } else {
                 "merged_late_formats"
             };
-            if let Some(other) = duplicate.filter(|other| *other != id) {
+            if let Some(other) = duplicate.filter(|other| *other != existing) {
+                // 补齐后与另一条内容同指纹，必须并成一行；保留被收藏的那行（B03），收藏随保留行迁移。
+                let keeper = if schema::deletable(&tx, existing)? && !schema::deletable(&tx, other)?
+                {
+                    other
+                } else {
+                    existing
+                };
+                let dropped = if keeper == existing { other } else { existing };
                 tx.execute(
                     "UPDATE copy_events SET content_id=?1 WHERE content_id=?2",
-                    params![id as i64, other as i64],
+                    params![keeper as i64, dropped as i64],
                 )?;
-                tx.execute("DELETE FROM contents WHERE id=?1", [other as i64])?;
-                deleted.push(other);
+                // 两行都被收藏时二合一：position 撞车的收藏行（保留行先占了位置）直接并入。
+                tx.execute(
+                    "UPDATE OR IGNORE favorites SET content_id=?1 WHERE content_id=?2",
+                    params![keeper as i64, dropped as i64],
+                )?;
+                tx.execute(
+                    "DELETE FROM favorites WHERE content_id=?1",
+                    [dropped as i64],
+                )?;
+                tx.execute("DELETE FROM contents WHERE id=?1", [dropped as i64])?;
+                deleted.push(dropped);
                 delta -= 1;
+                keep = keeper;
             }
             let text = search_text(&merged)?;
             tx.execute("UPDATE contents SET fingerprint=?2,kind=?3,preview=?4,file_names=?5,bytes=?6,partial=?7,sort_ms=?8,search_text=?9 WHERE id=?1",
-                params![id as i64,merged.fingerprint.as_slice(),merged.kind,merged.preview,serde_json::to_string(&merged.file_names).unwrap(),merged.bytes as i64,partial,event.time_ms as i64,text])?;
-            tx.execute("DELETE FROM formats WHERE content_id=?1", [id as i64])?;
-            insert_formats(&tx, id, &merged)?;
+                params![keep as i64,merged.fingerprint.as_slice(),merged.kind,merged.preview,serde_json::to_string(&merged.file_names).unwrap(),merged.bytes as i64,partial,event.time_ms as i64,text])?;
+            tx.execute("DELETE FROM formats WHERE content_id=?1", [keep as i64])?;
+            insert_formats(&tx, keep, &merged)?;
+            id = keep;
         } else if let Some(existing) = duplicate {
             id = existing;
             outcome = "duplicate";
@@ -477,13 +557,13 @@ impl Writer {
             return Err(Error::Invalid("injected_after_formats"));
         }
         let event_id = if merge_id.is_none() {
-            tx.execute("INSERT INTO copy_events(content_id,time_ms,source_process,owner_process,owner_pid,sequence) VALUES(?1,?2,?3,?4,?5,?6)",
-                params![id as i64,event.time_ms as i64,event.source_process,event.owner_process,event.owner_pid,event.sequence])?;
+            tx.execute("INSERT INTO copy_events(content_id,time_ms,source_process,owner_process,owner_pid,sequence,source_app_id) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+                params![id as i64,event.time_ms as i64,event.source_process,event.owner_process,event.owner_pid,event.sequence,(source_app_id != 0).then_some(source_app_id)])?;
             Some(tx.last_insert_rowid())
         } else {
             None
         };
-        tx.execute("UPDATE contents SET copy_count=(SELECT count(*) FROM copy_events WHERE content_id=?1),source=(SELECT source_process FROM copy_events WHERE content_id=?1 ORDER BY time_ms DESC,id DESC LIMIT 1) WHERE id=?1",[id as i64])?;
+        tx.execute("UPDATE contents SET copy_count=(SELECT count(*) FROM copy_events WHERE content_id=?1),source=(SELECT source_process FROM copy_events WHERE content_id=?1 ORDER BY time_ms DESC,id DESC LIMIT 1),source_app_id=(SELECT source_app_id FROM copy_events WHERE content_id=?1 ORDER BY time_ms DESC,id DESC LIMIT 1) WHERE id=?1",[id as i64])?;
         let item = schema::metadata(&tx, id)?;
         // 合并删掉缓存内条目时，补回第 301 条，避免最近列表出现缺口。
         let refill = if deleted.is_empty() {
@@ -529,6 +609,49 @@ fn search_text(content: &Content) -> Result<String> {
     }
     Ok(text.to_ascii_lowercase())
 }
+
+// 来源应用显示名的退回值（A06）：有路径用不带扩展名的文件名，否则用进程名。
+// FileDescription 由后台刷新覆盖，这里只保证列表立即有东西可显示。
+fn fallback_display_name(process_name: &str, exe_path: &str) -> String {
+    if !exe_path.is_empty()
+        && let Some(stem) = std::path::Path::new(exe_path)
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .filter(|stem| !stem.is_empty())
+    {
+        return stem;
+    }
+    process_name.to_owned()
+}
+
+// 事件落库时找到（或建出）来源应用行；进程名拿不到就不建（v1 以来 source_process 可为空）。
+fn upsert_source_app(tx: &Connection, event: &CopyEvent) -> Result<i64> {
+    if event.source_process.is_empty() {
+        return Ok(0);
+    }
+    let existing: Option<i64> = tx
+        .query_row(
+            "SELECT id FROM source_apps WHERE process_name=?1 AND exe_path=?2",
+            params![event.source_process, event.source_path],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(id) = existing {
+        return Ok(id);
+    }
+    tx.execute(
+        "INSERT INTO source_apps(process_name,exe_path,display_name,icon_file,icon_key,updated_ms) \
+         VALUES(?1,?2,?3,'','',?4)",
+        params![
+            event.source_process,
+            event.source_path,
+            fallback_display_name(&event.source_process, &event.source_path),
+            event.time_ms as i64
+        ],
+    )?;
+    Ok(tx.last_insert_rowid())
+}
+
 fn insert_formats(tx: &Connection, id: usize, content: &Content) -> Result<()> {
     let mut statement=tx.prepare_cached("INSERT INTO formats(content_id,name,fingerprint,bytes,encoding,data) VALUES(?1,?2,?3,?4,?5,?6)")?;
     for (name, format) in &content.formats {

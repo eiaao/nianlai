@@ -34,9 +34,13 @@ pub fn initialize(c: &mut Connection, directory: &Path) -> Result<Option<u32>> {
 }
 
 pub fn structure(c: &Connection) -> Result<()> {
-    c.prepare("SELECT id,fingerprint,kind,preview,file_names,bytes,partial,sort_ms,source,copy_count,sort_order,search_text FROM contents LIMIT 0")?;
+    c.prepare("SELECT id,fingerprint,kind,preview,file_names,bytes,partial,sort_ms,source,copy_count,sort_order,source_app_id FROM contents LIMIT 0")?;
     c.prepare("SELECT content_id,name,fingerprint,bytes,encoding,data FROM formats LIMIT 0")?;
-    c.prepare("SELECT id,content_id,time_ms,source_process,owner_process,owner_pid,sequence FROM copy_events LIMIT 0")?;
+    c.prepare("SELECT id,content_id,time_ms,source_process,owner_process,owner_pid,sequence,source_app_id FROM copy_events LIMIT 0")?;
+    c.prepare("SELECT id,process_name,exe_path,display_name,icon_file,icon_key,updated_ms FROM source_apps LIMIT 0")?;
+    c.prepare(
+        "SELECT content_id,position,title,note,created_ms,updated_ms FROM favorites LIMIT 0",
+    )?;
     let triggers: i64 = c.query_row("SELECT count(*) FROM sqlite_schema WHERE type='trigger' AND name IN ('content_insert','content_delete','content_search_update')", [], |r|r.get(0))?;
     if triggers != 3 {
         return Err(Error::Invalid("missing_index_triggers"));
@@ -45,10 +49,13 @@ pub fn structure(c: &Connection) -> Result<()> {
     Ok(())
 }
 
-pub const COLUMNS: &str = "c.id,c.fingerprint,c.kind,c.preview,c.file_names,c.bytes,c.partial,c.sort_ms,c.source,c.copy_count,c.sort_order";
+// 列表项统一带收藏状态和来源应用信息（A06/E01）；三个 JOIN 都是主键点查，不改变排序索引的驱动方式。
+pub const COLUMNS: &str = "c.id,c.fingerprint,c.kind,c.preview,c.file_names,c.bytes,c.partial,c.sort_ms,c.source,c.copy_count,c.sort_order,fv.position,sa.display_name,sa.icon_file";
+pub const JOINS: &str = "FROM contents c LEFT JOIN favorites fv ON fv.content_id=c.id LEFT JOIN source_apps sa ON sa.id=c.source_app_id";
 pub fn metadata_row(r: &Row<'_>) -> rusqlite::Result<Metadata> {
     let fingerprint: Vec<u8> = r.get(1)?;
     let names: String = r.get(4)?;
+    let favorite_position: Option<i64> = r.get(11)?;
     Ok(Metadata {
         id: number(r, 0)?,
         fingerprint: fingerprint
@@ -62,6 +69,10 @@ pub fn metadata_row(r: &Row<'_>) -> rusqlite::Result<Metadata> {
         copied_ms: r.get::<_, i64>(7)? as u64,
         source: r.get(8)?,
         copy_count: number(r, 9)?,
+        favorite: favorite_position.is_some(),
+        favorite_position: favorite_position.map(|v| v as u64),
+        source_name: r.get(12)?,
+        icon_file: r.get(13)?,
         sort_order: r.get(10)?,
         formats: Vec::new(),
     })
@@ -86,7 +97,7 @@ pub fn formats_meta(c: &Connection, item: &mut Metadata) -> Result<()> {
 }
 pub fn metadata(c: &Connection, id: usize) -> Result<Metadata> {
     let mut item = c.query_row(
-        &format!("SELECT {COLUMNS} FROM contents c WHERE id=?1"),
+        &format!("SELECT {COLUMNS} {JOINS} WHERE c.id=?1"),
         [id as i64],
         metadata_row,
     )?;
@@ -96,7 +107,7 @@ pub fn metadata(c: &Connection, id: usize) -> Result<Metadata> {
 pub fn recent(c: &Connection) -> Result<Vec<Metadata>> {
     let mut items = c
         .prepare(&format!(
-            "SELECT {COLUMNS} FROM contents c ORDER BY sort_ms DESC,sort_order DESC LIMIT 300"
+            "SELECT {COLUMNS} {JOINS} ORDER BY c.sort_ms DESC,c.sort_order DESC LIMIT 300"
         ))?
         .query_map([], metadata_row)?
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -104,6 +115,50 @@ pub fn recent(c: &Connection) -> Result<Vec<Metadata>> {
         formats_meta(c, item)?;
     }
     Ok(items)
+}
+// 收藏列表：按收藏顺序（position）返回；content 仍在 contents 排序之外单独取。
+pub fn favorites(c: &Connection) -> Result<Vec<Metadata>> {
+    let mut items = c
+        .prepare(&format!(
+            "SELECT {COLUMNS} FROM contents c JOIN favorites fv ON fv.content_id=c.id \
+             LEFT JOIN source_apps sa ON sa.id=c.source_app_id ORDER BY fv.position ASC LIMIT 300"
+        ))?
+        .query_map([], metadata_row)?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    for item in &mut items {
+        formats_meta(c, item)?;
+    }
+    Ok(items)
+}
+/// 这条内容能不能物理删除：被收藏的内容不能（B03，删除历史与自动清理都必须先问这里）。
+/// 收藏引用由外键兜底——即使调用方漏了检查，删除也会在数据库层失败。
+pub fn deletable(c: &Connection, id: usize) -> Result<bool> {
+    let favorited: bool = c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM favorites WHERE content_id=?1)",
+        [id as i64],
+        |r| r.get(0),
+    )?;
+    Ok(!favorited)
+}
+pub fn source_app_by_path(c: &Connection, exe_path: &str) -> Result<Option<SourceApp>> {
+    let app = c
+        .query_row(
+            "SELECT id,process_name,exe_path,display_name,icon_file,icon_key \
+             FROM source_apps WHERE exe_path=?1 ORDER BY id LIMIT 1",
+            [exe_path],
+            |r| {
+                Ok(SourceApp {
+                    id: r.get(0)?,
+                    process_name: r.get(1)?,
+                    exe_path: r.get(2)?,
+                    display_name: r.get(3)?,
+                    icon_file: r.get(4)?,
+                    icon_key: r.get(5)?,
+                })
+            },
+        )
+        .optional()?;
+    Ok(app)
 }
 pub fn counts(c: &Connection) -> Result<Counts> {
     Ok(Counts {
@@ -113,6 +168,8 @@ pub fn counts(c: &Connection) -> Result<Counts> {
         indexed: c.query_row("SELECT count(*) FROM search_index_docsize", [], |r| {
             number(r, 0)
         })?,
+        favorites: c.query_row("SELECT count(*) FROM favorites", [], |r| number(r, 0))?,
+        source_apps: c.query_row("SELECT count(*) FROM source_apps", [], |r| number(r, 0))?,
     })
 }
 pub fn content(c: &Connection, id: usize, hash: Hash) -> Result<Option<Arc<Content>>> {

@@ -423,10 +423,20 @@ pub(super) fn run(shared: &Shared) {
         if attempt.reason.is_none() {
             match Content::new(std::mem::take(&mut attempt.data), hash::sha256) {
                 Ok(content) => {
+                    // 来源进程的完整路径（A06）：拿不到（权限不够或已退出）就只有进程名。
+                    let source_path = if attempt.notice.source != 0 {
+                        window::process_path(attempt.notice.source)
+                    } else {
+                        None
+                    }
+                    .unwrap_or_default();
+                    // 显示名与图标的后台刷新只需要路径；先留下副本再移动事件。
+                    let refresh_path = (!source_path.is_empty()).then(|| source_path.clone());
                     let event = CopyEvent {
                         time_ms: attempt.notice.time_ms,
                         sequence: attempt.notice.sequence,
                         source_process: source.clone(),
+                        source_path,
                         owner_process: owner.clone(),
                         owner_pid: attempt.notice.owner,
                         observed: attempt.notice.at,
@@ -457,6 +467,10 @@ pub(super) fn run(shared: &Shared) {
                             attempt.reason = Some("store_failed");
                         }
                         None => attempt.reason = Some("stopping"),
+                    }
+                    // 来源应用的显示名与图标交给后台线程（A06），不占用本次读取的路径。
+                    if changed && let Some(path) = refresh_path {
+                        shared.history.refresh_source_app(&path);
                     }
                 }
                 Err(_) => attempt.reason = Some("hash_failed"),

@@ -57,6 +57,11 @@ struct ManifestCounts {
     formats: usize,
     events: usize,
     indexed: usize,
+    // v2 起有的计数；旧清单（v1.json）没有这两个字段，读入时按 0 处理。
+    #[serde(default)]
+    favorites: usize,
+    #[serde(default)]
+    source_apps: usize,
 }
 impl From<Counts> for ManifestCounts {
     fn from(c: Counts) -> Self {
@@ -65,6 +70,8 @@ impl From<Counts> for ManifestCounts {
             formats: c.formats,
             events: c.events,
             indexed: c.indexed,
+            favorites: c.favorites,
+            source_apps: c.source_apps,
         }
     }
 }
@@ -187,6 +194,10 @@ fn event(sequence: u32, origin: Instant) -> CopyEvent {
         time_ms: BASE_MS + sequence as u64 * 60_000,
         sequence,
         source_process: source.into(),
+        source_path: format!(
+            r"C:\Program Files\{}\{source}",
+            &source.trim_end_matches(".exe")
+        ),
         owner_process: source.into(),
         owner_pid: 1000 + sequence % 4,
         observed: origin + Duration::from_secs(sequence as u64 * 60),
@@ -395,9 +406,12 @@ fn manifest_of(directory: &Path) -> Manifest {
     }
 }
 // 结构以外的部分逐项比对（结构在真正迁移之后会变，单独测）。
+// v2 起回填来源应用表，其行数取决于旧数据，不列入逐项比对（专门的 v2 测试单独断言）；
+// 收藏表迁移不产生行，保持比对。
 fn assert_matches(directory: &Path, expected: &Manifest) {
     let actual = manifest_of(directory);
-    assert_eq!(actual.counts, expected.counts);
+    let counts = |c: &ManifestCounts| (c.contents, c.formats, c.events, c.indexed, c.favorites);
+    assert_eq!(counts(&actual.counts), counts(&expected.counts));
     assert_eq!(actual.records.len(), expected.records.len());
     for (actual, expected) in actual.records.iter().zip(&expected.records) {
         assert_eq!(actual, expected, "记录 {} 与清单不一致", expected.id);
@@ -605,6 +619,11 @@ fn backup_failure_prevents_migration() {
     assert_eq!(user_version(&c).unwrap(), 1);
     assert!(!table_exists(&c, "migration_probe"));
     schema::pragma_check(&c, "integrity_check").unwrap();
+    drop(c);
+    // 库还停在 v1；按正常路径打开会续上迁移，内容与清单一致。
+    drop(Store::open(&temp.0, sha256).unwrap());
+    assert_matches(&temp.0, &load_manifest(1));
+    check(&temp.0).unwrap();
 }
 
 #[test]
@@ -681,7 +700,10 @@ fn real_backup_directory_failure_prevents_migration_without_changing_data() {
     schema::pragma_check(&c, "integrity_check").unwrap();
     drop(c);
     assert_eq!(fs::read(&db).unwrap(), before);
-    assert_eq!(fs::read(blocked).unwrap(), b"existing-file");
+    assert_eq!(fs::read(&blocked).unwrap(), b"existing-file");
+    // 备份目录仍被占着，但库本身没动：清掉占位文件后按正常路径打开、迁移、比对。
+    fs::remove_file(blocked).unwrap();
+    drop(Store::open(&temp.0, sha256).unwrap());
     assert_matches(&temp.0, &manifest);
     check(&temp.0).unwrap();
 }
@@ -722,7 +744,17 @@ fn backup_is_a_verified_copy_including_wal_content() {
         migrations::backup(&c, &temp.0, VERSION + 7),
         Err(Error::Invalid("backup_version"))
     );
-    assert_eq!(backups(&temp.0), [file]);
+    // 打开夹具时的 v1→v2 迁移留下一份 v1 备份，手动备份是第二份（最新）；失败副本不落盘。
+    let copies = backups(&temp.0);
+    assert_eq!(copies.len(), 2);
+    assert_eq!(copies[1], file);
+    assert!(
+        copies[0]
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("pre-migrate-v1-")
+    );
 }
 
 #[test]
@@ -799,4 +831,118 @@ fn rebuild_fixture(version: u32) {
 #[ignore = "重建夹具才跑，见 rebuild_fixture 的说明"]
 fn rebuild_v1_fixture() {
     rebuild_fixture(1);
+}
+
+// v1 夹具里出现过的来源进程名（populate 的 sources）；回填的 source_apps 应当恰好是这些。
+const BACKFILLED_APPS: &[&str] = &["Code.exe", "chrome.exe", "explorer.exe", "notepad.exe"];
+
+#[test]
+fn v2_migration_backfills_source_apps_and_keeps_content_and_search() {
+    let manifest = load_manifest(1);
+    let temp = fixture_copy(1);
+    let store = Store::open(&temp.0, sha256).unwrap();
+    assert_eq!(store.report().version, 2);
+    assert_eq!(store.report().migrated_from, Some(1));
+    // 记录、搜索结果与清单一致；收藏表为空。
+    assert_matches(&temp.0, &manifest);
+    check(&temp.0).unwrap();
+    // 来源应用从旧的 source_process 回填：每个进程名一行，路径为空、显示名先等于进程名。
+    let c =
+        Connection::open_with_flags(temp.0.join("history.db"), OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    let apps: Vec<(String, String, String)> = c
+        .prepare("SELECT process_name,exe_path,display_name FROM source_apps ORDER BY process_name")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    let mut expected: Vec<_> = BACKFILLED_APPS
+        .iter()
+        .map(|n| ((*n).to_owned(), String::new(), (*n).to_owned()))
+        .collect();
+    expected.sort();
+    assert_eq!(apps, expected);
+    // 事件全部指向回填行；列表的最近来源引用也补齐了。
+    let unlinked: usize = c
+        .query_row(
+            "SELECT count(*) FROM copy_events WHERE source_process != '' \
+             AND source_app_id IS NULL",
+            [],
+            |r| schema::number(r, 0),
+        )
+        .unwrap();
+    assert_eq!(unlinked, 0);
+    let listed: usize = c
+        .query_row(
+            "SELECT count(*) FROM contents WHERE source_app_id IS NOT NULL",
+            [],
+            |r| schema::number(r, 0),
+        )
+        .unwrap();
+    assert!(listed > 0);
+    // 升级后的新复制给同一个应用复用回填行之外新建带路径的行（路径不同算不同来源应用）。
+    drop(c);
+    let origin = Instant::now();
+    let mut event = event(100, origin);
+    event.source_process = "notepad.exe".into();
+    event.source_path = r"C:\Windows\System32\notepad.exe".into();
+    store
+        .ingest(text("升级后带路径的新复制"), event, false, origin)
+        .unwrap();
+    let reader = store.reader().unwrap();
+    assert_eq!(
+        reader.counts().unwrap().source_apps,
+        BACKFILLED_APPS.len() + 1
+    );
+    let item = reader
+        .search("升级后带路径")
+        .unwrap()
+        .items
+        .into_iter()
+        .next()
+        .unwrap();
+    assert_eq!(item.source_name.as_deref(), Some("notepad"));
+    assert!(!item.favorite);
+    assert_eq!(item.favorite_position, None);
+}
+
+// v2 中途失败：先建了 favorites 再失败，事务回滚后库仍是完整的 v1，文件完好。
+#[test]
+fn failing_v2_step_keeps_database_at_v1() {
+    let manifest = load_manifest(1);
+    let temp = fixture_copy(1);
+    let db = temp.0.join("history.db");
+    let mut c = writable(&db).unwrap();
+    let failing_v2 = |tx: &Transaction<'_>| -> Result<()> {
+        tx.execute_batch("CREATE TABLE favorites(x);")?;
+        Err(Error::Invalid("injected_v2_failure"))
+    };
+    let steps = vec![STEPS[0], Step { apply: failing_v2 }];
+    let directory = temp.0.clone();
+    assert_eq!(
+        migrate(&mut c, &steps, &mut |c, from| {
+            migrations::backup(c, &directory, from).map(drop)
+        }),
+        Err(Error::Invalid("injected_v2_failure"))
+    );
+    assert_eq!(user_version(&c).unwrap(), 1);
+    assert!(!table_exists(&c, "source_apps"));
+    assert!(!table_exists(&c, "favorites"));
+    let columns: Vec<String> = c
+        .prepare("PRAGMA table_info(copy_events)")
+        .unwrap()
+        .query_map([], |r| r.get::<_, String>(1))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert!(!columns.contains(&"source_app_id".to_owned()));
+    schema::pragma_check(&c, "integrity_check").unwrap();
+    drop(c);
+    let backups = backups(&temp.0);
+    assert_eq!(backups.len(), 1);
+    assert_valid_backup(&backups[0], 1, &manifest);
+    // 修好步骤后重新打开：正常升到最新，内容与清单一致。
+    drop(Store::open(&temp.0, sha256).unwrap());
+    assert_matches(&temp.0, &manifest);
 }

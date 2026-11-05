@@ -71,6 +71,8 @@ pub struct CopyEvent {
     pub time_ms: u64,
     pub sequence: u32,
     pub source_process: String,
+    // 来源进程的可执行文件路径；权限不够或进程已退出时为空串，此时来源应用只记进程名。
+    pub source_path: String,
     pub owner_process: String,
     pub owner_pid: u32,
     pub observed: Instant,
@@ -95,10 +97,26 @@ pub struct Metadata {
     pub copied_ms: u64,
     pub source: String,
     pub copy_count: usize,
+    // 收藏状态（E01）：favorite 为真时 favorite_position 是收藏顺序，永不因复制、搜索或粘贴变化。
+    pub favorite: bool,
+    pub favorite_position: Option<u64>,
+    // 来源应用（A06）：display_name 与图标文件名（icons 目录内的相对名，调用方拼绝对路径）。
+    pub source_name: Option<String>,
+    pub icon_file: Option<String>,
     #[serde(skip)]
     pub sort_order: i64,
     #[serde(skip)]
     pub formats: Vec<FormatMeta>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct SourceApp {
+    pub id: i64,
+    pub process_name: String,
+    pub exe_path: String,
+    pub display_name: String,
+    pub icon_file: String,
+    pub icon_key: String,
 }
 
 #[derive(Clone, Default, Debug, Serialize)]
@@ -107,6 +125,8 @@ pub struct Counts {
     pub formats: usize,
     pub events: usize,
     pub indexed: usize,
+    pub favorites: usize,
+    pub source_apps: usize,
 }
 #[derive(Clone, Default)]
 pub struct Cache {
@@ -176,6 +196,26 @@ impl Reader {
         let counts = schema::counts(&tx)?;
         tx.commit()?;
         Ok(counts)
+    }
+    // 收藏列表（E01）：按收藏顺序返回，不按复制时间。
+    pub fn favorites(&self) -> Result<Vec<Metadata>> {
+        let tx = self.connection.unchecked_transaction()?;
+        let items = schema::favorites(&tx)?;
+        tx.commit()?;
+        Ok(items)
+    }
+    pub fn source_app_by_path(&self, exe_path: &str) -> Result<Option<SourceApp>> {
+        let tx = self.connection.unchecked_transaction()?;
+        let app = schema::source_app_by_path(&tx, exe_path)?;
+        tx.commit()?;
+        Ok(app)
+    }
+    // 这条内容现在能不能物理删除：被收藏的内容不能（B03）。自动清理（B02）与删除命令都走这里。
+    pub fn deletable(&self, id: usize) -> Result<bool> {
+        let tx = self.connection.unchecked_transaction()?;
+        let deletable = schema::deletable(&tx, id)?;
+        tx.commit()?;
+        Ok(deletable)
     }
     pub fn content(&self, id: usize) -> Result<Option<std::sync::Arc<content::Content>>> {
         let tx = self.connection.unchecked_transaction()?;

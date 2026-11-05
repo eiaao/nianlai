@@ -36,8 +36,9 @@ pub fn search(c: &Connection, query: &str) -> Result<Search> {
         (false, false) => SearchMode::Mixed,
     };
     // 常见词可能命中半个库；沿排序索引取满 300 条即停止，避免先搬出全部预览再排序。
+    // favorites / source_apps 都是主键点查 JOIN，不影响排序索引驱动 contents。
     let mut sql = format!(
-        "SELECT {} FROM contents c INDEXED BY content_order",
+        "SELECT {} FROM contents c INDEXED BY content_order LEFT JOIN favorites fv ON fv.content_id=c.id LEFT JOIN source_apps sa ON sa.id=c.source_app_id",
         schema::COLUMNS
     );
     let mut predicates = Vec::new();

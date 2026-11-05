@@ -26,24 +26,12 @@ pub struct Preview {
     copied_ms: u64,
     copy_count: usize,
     partial: bool,
-}
-impl From<Metadata> for Preview {
-    fn from(item: Metadata) -> Self {
-        Self {
-            id: item.id,
-            kind: item.kind,
-            preview: item.preview,
-            file_names: item.file_names,
-            source: if item.source.is_empty() {
-                "来源未知".into()
-            } else {
-                item.source
-            },
-            copied_ms: item.copied_ms,
-            copy_count: item.copy_count,
-            partial: item.partial,
-        }
-    }
+    // E01：收藏状态；favorite_position 是收藏顺序（收藏列表的排序键），永不因复制、搜索、粘贴变化。
+    favorite: bool,
+    favorite_position: Option<u64>,
+    // A06：来源应用的显示名（FileDescription，缺省为文件名或进程名）与图标 PNG 的绝对路径。
+    source_name: Option<String>,
+    source_icon: Option<String>,
 }
 #[derive(Serialize)]
 pub struct Snapshot {
@@ -59,7 +47,17 @@ pub struct SearchReply {
     items: Vec<Preview>,
 }
 
-pub struct History {
+// 面板控制器（panel.rs）持有唯一的 History，但字段不对外公开；Tauri 命令（lib.rs）
+// 通过这里的进程注册表取当前实例。产品进程只有一个，测试不受影响。
+static ACTIVE: Mutex<Vec<std::sync::Weak<Shared>>> = Mutex::new(Vec::new());
+pub fn active() -> Option<Arc<Shared>> {
+    let mut entries = ACTIVE.lock().unwrap();
+    entries.retain(|weak| weak.upgrade().is_some());
+    entries.last().and_then(|weak| weak.upgrade())
+}
+
+// 全部可变状态聚在 Shared 里，命令层（active()）与采集线程（Arc<History>）访问同一份。
+pub struct Shared {
     application_guard: Mutex<Option<std::fs::File>>,
     directory: OnceLock<PathBuf>,
     store: RwLock<Option<Store>>,
@@ -68,14 +66,22 @@ pub struct History {
     status: Mutex<Option<&'static str>>,
     recording: AtomicBool,
     last_write: Mutex<Option<Instant>>,
+    refresh: Mutex<Option<crate::platform::apps::Refresher>>,
     hash: Hash,
     logger: Logger,
+}
+
+pub struct History(Arc<Shared>);
+impl Clone for History {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
 }
 impl History {
     pub fn new(hash: Hash, logger: Logger) -> Self {
         let mut memory = memory::History::new(hash);
         memory.isolate_fallback_ids();
-        Self {
+        let shared = Arc::new(Shared {
             application_guard: Mutex::new(None),
             directory: OnceLock::new(),
             store: RwLock::new(None),
@@ -84,18 +90,107 @@ impl History {
             status: Mutex::new(Some("正在加载历史")),
             recording: AtomicBool::new(false),
             last_write: Mutex::new(None),
+            refresh: Mutex::new(None),
             hash,
             logger,
+        });
+        ACTIVE.lock().unwrap().push(Arc::downgrade(&shared));
+        Self(shared)
+    }
+    pub fn initialize(&self) {
+        self.0.initialize(&self.0.clone());
+    }
+    pub fn snapshot(&self) -> Snapshot {
+        self.0.snapshot()
+    }
+    pub fn search(&self, query: &str, request_id: u64) -> Result<SearchReply, String> {
+        self.0.search(query, request_id)
+    }
+    pub fn ingest(
+        &self,
+        content: Arc<Content>,
+        event: CopyEvent,
+        partial: bool,
+        now: Instant,
+    ) -> Result<Ingest, String> {
+        self.0.ingest(content, event, partial, now)
+    }
+    pub fn get(&self, id: usize) -> Result<Option<Arc<Content>>, String> {
+        self.0.get(id)
+    }
+    pub fn before_write(
+        &self,
+        id: usize,
+        fingerprint: Fingerprint,
+        written: Fingerprint,
+        now: Instant,
+    ) -> bool {
+        self.0.before_write(id, fingerprint, written, now)
+    }
+    pub fn reuse(&self, id: usize) {
+        self.0.reuse(id);
+    }
+    pub fn latest_sequence(&self) -> Option<u32> {
+        self.0.latest_sequence()
+    }
+    pub fn skipped_sequence(&self, sequence: u32) {
+        self.0.skipped_sequence(sequence);
+    }
+    pub fn set_recording(&self, value: bool) {
+        self.0.recording.store(value, Ordering::Release);
+    }
+    pub fn last_write(&self) -> Option<Instant> {
+        *self.0.last_write.lock().unwrap()
+    }
+    pub fn summary(&self) {
+        self.0.summary();
+    }
+    pub fn maintenance(self: &Arc<Self>, changed: Arc<dyn Fn() + Send + Sync>) {
+        let Some(store) = self.0.store() else {
+            return;
+        };
+        let history = Arc::new(Self(self.0.clone()));
+        let logger = self.0.logger.clone();
+        if std::thread::Builder::new().name("history-check".into()).spawn(move || {
+            let started=Instant::now();
+            let result=store.reader().and_then(|r|r.quick_check());
+            logger.event("store_check",json!({"success":result.is_ok(),"elapsed_ms":started.elapsed().as_secs_f64()*1000.0,"error_code":result.as_ref().err().map(ToString::to_string)}));
+            if result.is_err() {
+                *history.0.status.lock().unwrap()=Some("历史库异常，未落盘");
+                    history.0.disabled.store(true, Ordering::Release);
+                changed();return;
+            }
+            let result=nianlai_store::snapshot_due(store.directory()).and_then(|due| {
+                if due {nianlai_store::snapshot(store.directory()).map(Some)}else{Ok(None)}
+            });
+            match result {
+                Ok(Some(report))=>logger.event("snapshot",json!({"elapsed_ms":report.elapsed_ms,"bytes":report.bytes,"retained":report.retained,"deleted":report.deleted})),
+                Ok(None)=>{},
+                Err(error)=>logger.event("snapshot_failed",json!({"error_code":error.to_string()})),
+            }
+        }).is_err() {self.0.logger.event("store_check_failed",json!({"error_code":"thread_start"}));}
+    }
+    // 图片降级成路径时 PNG 存在这里；库没打开（内存模式）也照样用数据目录。
+    pub fn exports(&self) -> Option<PathBuf> {
+        self.0.exports_path()
+    }
+    // 采集线程在内容保存成功后调用：把来源 exe 交给后台刷新显示名和图标（A06）。
+    pub fn refresh_source_app(&self, exe_path: &str) {
+        if let Some(refresher) = self.0.refresh.lock().unwrap().as_ref() {
+            refresher.refresh(exe_path);
         }
     }
-    fn store(&self) -> Option<Store> {
+}
+
+impl Shared {
+    pub(crate) fn store(&self) -> Option<Store> {
         if self.disabled.load(Ordering::Acquire) {
             None
         } else {
             self.store.read().unwrap().clone()
         }
     }
-    pub fn initialize(&self) {
+    pub fn initialize(&self, this: &Arc<Shared>) {
         let location = self.logger.directories.data_source;
         let directory = self.logger.directories.data.clone();
         let _ = self.directory.set(directory.clone());
@@ -110,6 +205,9 @@ impl History {
                 report["location"] = json!(location);
                 self.logger.event("store_opened", report);
                 *self.status.lock().unwrap() = None;
+                // 来源应用的显示名与图标在采集线程之外刷新（A06）：门槛 P95 ≤ 500 ms 不受影响。
+                let refresher = crate::platform::apps::start(this.clone(), self.logger.clone());
+                *self.refresh.lock().unwrap() = Some(refresher);
                 *self.store.write().unwrap() = Some(store);
             }
             Err(error) => {
@@ -140,6 +238,7 @@ impl History {
                                     time_ms: now_ms(),
                                     sequence: 0,
                                     source_process: "示例".into(),
+                                    source_path: String::new(),
                                     owner_process: "示例".into(),
                                     owner_pid: 0,
                                     observed: Instant::now(),
@@ -157,42 +256,57 @@ impl History {
             }
         }
     }
-    pub fn maintenance(self: &Arc<Self>, changed: Arc<dyn Fn() + Send + Sync>) {
-        let Some(store) = self.store() else {
-            return;
-        };
-        let history = self.clone();
-        let logger = self.logger.clone();
-        if std::thread::Builder::new().name("history-check".into()).spawn(move || {
-            let started=Instant::now();
-            let result=store.reader().and_then(|r|r.quick_check());
-            logger.event("store_check",json!({"success":result.is_ok(),"elapsed_ms":started.elapsed().as_secs_f64()*1000.0,"error_code":result.as_ref().err().map(ToString::to_string)}));
-            if result.is_err() {
-                *history.status.lock().unwrap()=Some("历史库异常，未落盘");
-                    history.disabled.store(true, Ordering::Release);
-                changed();return;
-            }
-            let result=nianlai_store::snapshot_due(store.directory()).and_then(|due| {
-                if due {nianlai_store::snapshot(store.directory()).map(Some)}else{Ok(None)}
-            });
-            match result {
-                Ok(Some(report))=>logger.event("snapshot",json!({"elapsed_ms":report.elapsed_ms,"bytes":report.bytes,"retained":report.retained,"deleted":report.deleted})),
-                Ok(None)=>{},
-                Err(error)=>logger.event("snapshot_failed",json!({"error_code":error.to_string()})),
-            }
-        }).is_err() {self.logger.event("store_check_failed",json!({"error_code":"thread_start"}));}
-    }
     // 图片降级成路径时 PNG 存在这里；库没打开（内存模式）也照样用数据目录。
-    pub fn exports(&self) -> Option<PathBuf> {
+    pub fn exports_path(&self) -> Option<PathBuf> {
         self.directory
             .get()
             .map(|directory| directory.join("exports"))
+    }
+    // 图标缓存目录（A06）：<数据目录>\icons。
+    pub fn icons(&self) -> Option<PathBuf> {
+        self.directory
+            .get()
+            .map(|directory| directory.join("icons"))
+    }
+    // 图标文件的绝对路径：icon_file 是 icons 目录内的相对名。
+    fn icon_path(&self, icon_file: Option<&str>) -> Option<String> {
+        let file = icon_file.filter(|file| !file.is_empty())?;
+        let directory = self.directory.get()?;
+        directory
+            .join("icons")
+            .join(file)
+            .to_str()
+            .map(str::to_owned)
+    }
+    fn preview(&self, item: Metadata) -> Preview {
+        Preview {
+            id: item.id,
+            kind: item.kind,
+            preview: item.preview,
+            file_names: item.file_names,
+            source: if item.source.is_empty() {
+                "来源未知".into()
+            } else {
+                item.source
+            },
+            copied_ms: item.copied_ms,
+            copy_count: item.copy_count,
+            partial: item.partial,
+            favorite: item.favorite,
+            favorite_position: item.favorite_position,
+            source_name: item.source_name,
+            source_icon: self.icon_path(item.icon_file.as_deref()),
+        }
     }
     pub fn snapshot(&self) -> Snapshot {
         let mut snapshot = if let Some(store) = self.store() {
             let cache = store.cache();
             Snapshot {
-                items: cache.items.into_iter().map(Preview::from).collect(),
+                items: cache
+                    .items
+                    .into_iter()
+                    .map(|item| self.preview(item))
+                    .collect(),
                 total: cache.total,
                 recording: false,
                 last_recorded_ms: cache.last_recorded_ms,
@@ -210,7 +324,11 @@ impl History {
         let (result, mode) = if let Some(store) = self.store() {
             match store.reader().and_then(|r| r.search(query)) {
                 Ok(result) => (
-                    Ok(result.items.into_iter().map(Preview::from).collect()),
+                    Ok(result
+                        .items
+                        .into_iter()
+                        .map(|item| self.preview(item))
+                        .collect()),
                     json!(result.mode),
                 ),
                 Err(error) => (Err(error.to_string()), json!("failed")),
@@ -241,6 +359,7 @@ impl History {
                 time_ms: event.time_ms,
                 sequence: event.sequence,
                 source_process: event.source_process,
+                source_path: event.source_path,
                 owner_process: event.owner_process,
                 owner_pid: event.owner_pid,
                 observed: event.observed,
@@ -323,11 +442,26 @@ impl History {
             self.memory.lock().unwrap().skipped_sequence(sequence);
         }
     }
-    pub fn set_recording(&self, value: bool) {
-        self.recording.store(value, Ordering::Release);
+    pub fn favorites(&self) -> Result<Vec<Preview>, String> {
+        if let Some(store) = self.store() {
+            store
+                .reader()
+                .and_then(|r| r.favorites())
+                .map(|items| items.into_iter().map(|item| self.preview(item)).collect())
+                .map_err(|e| e.to_string())
+        } else {
+            Ok(self.memory.lock().unwrap().favorites())
+        }
     }
-    pub fn last_write(&self) -> Option<Instant> {
-        *self.last_write.lock().unwrap()
+    pub fn set_favorite(&self, id: usize, favorite: bool) -> Result<Option<Preview>, String> {
+        if let Some(store) = self.store() {
+            store
+                .set_favorite(id, favorite)
+                .map(|item| item.map(|item| self.preview(item)))
+                .map_err(|e| e.to_string())
+        } else {
+            Ok(self.memory.lock().unwrap().set_favorite(id, favorite))
+        }
     }
     pub fn summary(&self) {
         let stats = self
@@ -364,9 +498,10 @@ mod startup_tests {
         let logger = Logger::with_settings(&directories, 20).unwrap();
         let history = History::new(nianlai_store::hash::sha256, logger);
         history.initialize();
-        assert_eq!(history.store().unwrap().directory(), directories.data);
+        assert_eq!(history.0.store().unwrap().directory(), directories.data);
         assert!(directories.data.join("history.db").is_file());
         assert_eq!(history.exports(), Some(directories.data.join("exports")));
+        assert_eq!(history.0.icons(), Some(directories.data.join("icons")));
         assert_eq!(history.snapshot().store_status, None);
         assert!(!directories.settings_file.exists());
     }
@@ -382,7 +517,7 @@ mod startup_tests {
             let history = History::new(nianlai_store::hash::sha256, logger.clone());
             if persistent {
                 history.initialize();
-                assert!(history.store().is_some());
+                assert!(history.0.store().is_some());
             }
             let now = Instant::now();
             let saved = history
@@ -392,6 +527,7 @@ mod startup_tests {
                         time_ms: now_ms(),
                         sequence: 1,
                         source_process: "privacy-test.exe".into(),
+                        source_path: String::new(),
                         owner_process: "privacy-test.exe".into(),
                         owner_pid: 1,
                         observed: now,
@@ -458,7 +594,7 @@ mod startup_tests {
         let logger = Logger::with_settings(&directories, 20).unwrap();
         let history = History::new(nianlai_store::hash::sha256, logger);
         history.initialize();
-        assert!(history.store().is_none());
+        assert!(history.0.store().is_none());
         assert_eq!(
             history.snapshot().store_status,
             Some("这个数据目录由更新版本的拈来创建，请升级后再打开")
@@ -466,5 +602,54 @@ mod startup_tests {
         assert_eq!(history.exports(), Some(directories.data.join("exports")));
         assert_eq!(fs::read(database_file).unwrap(), database);
         assert!(!directories.data.join("backups").exists());
+    }
+
+    // 命令层（lib.rs）通过注册表取到活动的历史服务，磁盘与内存模式行为一致（M1-S）。
+    // 注册表按“最后注册”取实例，并行测试会互相插队，所以功能断言走自己的 Shared，
+    // 注册表本身只断言拿得到某个活动实例。
+    #[test]
+    fn active_registry_serves_favorites_for_stored_and_memory_modes() {
+        for persistent in [false, true] {
+            let directory = Directory::new();
+            let directories = directories(&directory);
+            let logger = Logger::with_settings(&directories, 20).unwrap();
+            let history = History::new(nianlai_store::hash::sha256, logger);
+            if persistent {
+                history.initialize();
+            }
+            assert!(active().is_some());
+            let shared = &history.0;
+            let now = Instant::now();
+            let saved = shared
+                .ingest(
+                    Content::text("收藏注册表", nianlai_store::hash::sha256).unwrap(),
+                    CopyEvent {
+                        time_ms: now_ms(),
+                        sequence: 1,
+                        source_process: "registry-test.exe".into(),
+                        source_path: r"C:\Tools\registry-test.exe".into(),
+                        owner_process: "registry-test.exe".into(),
+                        owner_pid: 1,
+                        observed: now,
+                    },
+                    false,
+                    now,
+                )
+                .unwrap();
+            let id = saved.record_id.unwrap();
+            assert!(shared.set_favorite(id, true).unwrap().unwrap().favorite);
+            let favorites = shared.favorites().unwrap();
+            assert_eq!(favorites.len(), 1);
+            assert_eq!(favorites[0].id, id);
+            assert_eq!(favorites[0].favorite_position, Some(1));
+            assert_eq!(favorites[0].source_name.as_deref(), Some("registry-test"));
+            // 图标要等后台线程刷新（测试不等待），此处为空。
+            assert_eq!(favorites[0].source_icon, None);
+            assert!(!shared.set_favorite(id, false).unwrap().unwrap().favorite);
+            assert!(shared.favorites().unwrap().is_empty());
+            // 列表快照同样带收藏字段。
+            let listed = shared.snapshot();
+            assert!(listed.items.iter().all(|item| !item.favorite));
+        }
     }
 }

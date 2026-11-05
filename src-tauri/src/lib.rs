@@ -52,6 +52,19 @@ async fn search_history(
     .await
     .map_err(|_| "search_worker_failed".to_owned())?
 }
+// E01 收藏：面板控制器不暴露历史服务字段，命令层经 history::active() 取当前实例。
+#[tauri::command]
+fn get_favorites() -> Result<Vec<history::Preview>, String> {
+    history::active()
+        .ok_or_else(|| "历史服务未就绪".to_owned())?
+        .favorites()
+}
+#[tauri::command]
+fn set_favorite(id: usize, favorite: bool) -> Result<Option<history::Preview>, String> {
+    history::active()
+        .ok_or_else(|| "历史服务未就绪".to_owned())?
+        .set_favorite(id, favorite)
+}
 #[tauri::command]
 fn frontend_ready(app: AppHandle) -> Result<(), String> {
     panel::dispatch(&app, Action::FrontendReady)
@@ -217,6 +230,8 @@ pub fn run() {
             set_settings,
             get_history,
             search_history,
+            get_favorites,
+            set_favorite,
             frontend_ready,
             start_search,
             search_ready,
@@ -271,6 +286,12 @@ pub fn run() {
                 resuspend,
                 experiments,
             )?);
+            // A06 图标：asset 协议只放开 <数据目录>\icons 这一个目录（非递归），
+            // 数据目录其余内容（库、日志、导出文件）不进入 webview 可读范围；
+            // 数据目录可由设置指定，所以范围在运行时登记，配置里只留空 scope。
+            let icons = resolved.directories.data.join("icons");
+            std::fs::create_dir_all(&icons)?;
+            app.asset_protocol_scope().allow_directory(&icons, false)?;
             tray::setup(app.handle(), &logger)?;
             let handle = app.handle().clone();
             let capture_logger = logger.clone();

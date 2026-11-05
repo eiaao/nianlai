@@ -18,6 +18,7 @@ fn event(sequence: u32, observed: Instant) -> CopyEvent {
         time_ms: sequence as u64,
         sequence,
         source_process: "source.exe".into(),
+        source_path: String::new(),
         owner_process: "owner.exe".into(),
         owner_pid: 7,
         observed,
@@ -318,4 +319,84 @@ fn default_count_limit_and_frontend_preview_limit_are_enforced() {
     assert_eq!(snapshot.total, 300);
     assert_eq!(snapshot.items.len(), 300);
     assert_eq!(snapshot.items[0].id, 1001);
+}
+
+// E01：内存模式的收藏接口与磁盘模式同名同义；顺序稳定、容量淘汰不清理收藏（B03）。
+#[test]
+fn memory_favorites_are_ordered_stable_and_survive_eviction() {
+    let mut history = History::new(sha256);
+    let at = Instant::now();
+    history.max_records = 3;
+    for sequence in 1..=3 {
+        history
+            .ingest(
+                content(&[(TEXT, sequence.to_string().as_bytes())]),
+                event(sequence, at),
+                false,
+                at,
+            )
+            .unwrap();
+    }
+    history.set_favorite(1, true).unwrap();
+    history.set_favorite(3, true).unwrap();
+    let order = |history: &History| {
+        history
+            .favorites()
+            .into_iter()
+            .map(|item| item.id)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(order(&history), vec![1, 3]);
+    // 再次复制与复用不改变收藏顺序（愉悦标准：可预期）。
+    history
+        .ingest(content(&[(TEXT, b"1")]), event(4, at), false, at)
+        .unwrap();
+    history.reuse(3);
+    assert_eq!(order(&history), vec![1, 3]);
+    // 容量淘汰只动未收藏的记录。
+    history
+        .ingest(content(&[(TEXT, b"5")]), event(5, at), false, at)
+        .unwrap();
+    assert!(history.get(2).is_none());
+    assert!(history.get(1).is_some());
+    assert_eq!(order(&history), vec![1, 3]);
+    // 取消后从收藏列表消失；再收藏排到最后。
+    history.set_favorite(1, false).unwrap();
+    assert_eq!(order(&history), vec![3]);
+    history.set_favorite(1, true).unwrap();
+    assert_eq!(order(&history), vec![3, 1]);
+    // 不存在的记录返回 None。
+    assert!(history.set_favorite(999, true).is_none());
+    // 快照项带收藏字段与来源显示名（无路径来源退回进程名原样）。
+    let listed = history.snapshot();
+    let favorited: Vec<_> = listed
+        .items
+        .iter()
+        .filter(|item| item.favorite)
+        .map(|item| (item.id, item.favorite_position))
+        .collect();
+    assert_eq!(favorited, vec![(3, Some(2)), (1, Some(3))]);
+    let first = listed.items.iter().find(|item| item.id == 1).unwrap();
+    assert_eq!(first.source_name.as_deref(), Some("source.exe"));
+    assert_eq!(first.source_icon, None);
+}
+
+// A06：内存模式记来源路径；显示名退回文件名去扩展名，无路径时用进程名。
+#[test]
+fn memory_source_names_fall_back_to_file_stem_then_process() {
+    let mut history = History::new(sha256);
+    let at = Instant::now();
+    let mut with_path = event(1, at);
+    with_path.source_path = r"C:\Program Files\Editor\The Editor.exe".into();
+    history
+        .ingest(content(&[(TEXT, b"p")]), with_path, false, at)
+        .unwrap();
+    let mut without_path = event(2, at);
+    without_path.source_path = String::new();
+    history
+        .ingest(content(&[(TEXT, b"n")]), without_path, false, at)
+        .unwrap();
+    let items = history.snapshot().items;
+    assert_eq!(items[0].source_name.as_deref(), Some("source.exe"));
+    assert_eq!(items[1].source_name.as_deref(), Some("The Editor"));
 }
