@@ -1,10 +1,16 @@
-/* 设置窗口的全局基础样式。变量在 lib/theme.css，和面板共用。 */
+/* 设置窗口与面板共用 v7 tokens。 */
 :root {
-  font-family: var(--font-family-ui);
+  font-family: var(--font-ui);
   font-size: var(--font-size-body);
-  color: var(--color-text-primary);
-  background: var(--color-bg-panel);
+  color: var(--settings-text);
+  background: var(--settings-bg);
 }
 
 * { box-sizing: border-box; }
-html, body, #app { margin: 0; height: 100%; }
+html, body, #app { margin: 0; width: 100%; height: 100%; }
+body { overflow: hidden; }
+button, input, select { font: inherit; color: inherit; }
+button { cursor: pointer; }
+button:disabled { cursor: default; }
+[hidden] { display: none !important; }
+:focus-visible { outline: 2px solid var(--settings-accent); outline-offset: 3px; }

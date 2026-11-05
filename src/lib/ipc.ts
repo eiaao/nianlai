@@ -2,12 +2,23 @@
 // 这些函数直接返回 Tauri 的 Promise，不吞错误、不碰界面状态；出错怎么提示由 state.svelte.ts 决定。
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 export type { UnlistenFn };
 
-export type HistoryItem = { id: number; kind: string; preview: string; file_names: string[]; source: string; copied_ms: number; copy_count: number; partial: boolean };
+export type HistoryItem = {
+  id: number; kind: string; preview: string; file_names: string[]; source: string; copied_ms: number;
+  copy_count: number; partial: boolean; favorite: boolean; favorite_position: number | null;
+  source_name: string | null; source_icon: string | null;
+};
 export type HistorySnapshot = { items: HistoryItem[]; total: number; recording: boolean; last_recorded_ms: number | null; store_status: string | null };
+export type AppSettings = {
+  theme?: "system" | "light" | "dark";
+  panel?: { layout?: "a" | "b" | "c"; density?: "compact" | "comfortable" };
+  feedback?: { motion?: "none" | "soft" | "spring" };
+  [key: string]: unknown;
+};
+export type SettingsUpdate = AppSettings;
 export type SearchReply = { request_id: number; items: HistoryItem[] };
 export type SessionEvent = { session: number };
 export type Experiments = { searchBoxFocus?: boolean };
@@ -37,6 +48,12 @@ export type PasteResult = SessionEvent & {
 // ---------- 命令 ----------
 export const getHistory = () => invoke<HistorySnapshot>("get_history");
 export const searchHistory = (query: string, requestId: number) => invoke<SearchReply>("search_history", { query, requestId });
+export const getFavorites = () => invoke<HistoryItem[]>("get_favorites");
+export const setFavorite = (id: number, favorite: boolean) => invoke<HistoryItem | null>("set_favorite", { id, favorite });
+export const getSettings = () => invoke<AppSettings>("get_settings");
+export const setSettings = (settings: SettingsUpdate) => invoke<AppSettings>("set_settings", { settings });
+export const publishSettings = (settings: AppSettings) => emit("settings:changed", settings);
+export const openSettings = () => invoke("open_settings");
 export const frontendReady = () => invoke("frontend_ready");
 export const startSearch = (session: number) => invoke("start_search", { session });
 export const retryActivation = (session: number) => invoke("retry_activation", { session });
@@ -64,3 +81,4 @@ export const onPanelHidden = on<SessionEvent>("panel:hidden");
 export const onPanelTiming = on<Timing>("panel:timing");
 export const onPanelError = on<PanelError>("panel:error");
 export const onPasteResult = on<PasteResult>("panel:paste-result");
+export const onSettingsChanged = on<AppSettings>("settings:changed");

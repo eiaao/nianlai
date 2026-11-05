@@ -3,6 +3,14 @@
 import { tick, untrack } from "svelte";
 import * as ipc from "./ipc";
 import type { HistoryItem, HistorySnapshot, PanelInteraction, PasteMode, SearchSelection, Timing, UnlistenFn } from "./ipc";
+import type { Preferences } from "./preferences";
+
+const DEFAULT_PREFERENCES: Preferences = { layout: "a", theme: "system", motion: "soft", density: "compact" };
+
+export type PasteFeedback = {
+  kind: "copied" | "failed"; title: string; detail: string; duration: number; startedAt: number;
+};
+export type LastPasteResult = "confirmed" | "sent" | "copied";
 
 // 缺少后端确认时不猜权限或原输入控件是否恢复。
 export const COPIED_HINT = "已复制，请先点击目标输入位置，再按 Ctrl+V";
@@ -16,6 +24,14 @@ export const formatTime = (millis: number) => new Date(millis).toLocaleTimeStrin
 
 export class PanelState {
   history = $state<HistorySnapshot>({ items: [], total: 0, recording: false, last_recorded_ms: null, store_status: null });
+  favorites = $state<HistoryItem[]>([]);
+  favoritePending = $state<number | null>(null);
+  preferences = $state<Preferences>({ ...DEFAULT_PREFERENCES });
+  motion = $derived(this.preferences.motion);
+  previewOpen = $state(false);
+  imeActive = $state(false);
+  lastResult = $state<LastPasteResult | null>(null);
+  feedback = $state<PasteFeedback | null>(null);
   query = $state("");
   mode = $state<"quick" | "search">("quick");
   interaction = $state<PanelInteraction>("quick");
@@ -41,7 +57,27 @@ export class PanelState {
   searchItems = $state<HistoryItem[]>([]);
   searchedQuery = $state("");
   searchRevision = $state(0);
-  filtered = $derived(!this.interactive ? [] : this.mode === "search" ? this.searchItems : this.history.items);
+  private resultItems = $derived(!this.interactive ? [] : this.mode === "search" ? this.searchItems : this.history.items);
+  private orderItems(items: HistoryItem[]) {
+    const byId = new Map(items.map((item) => [item.id, item]));
+    const ordered: HistoryItem[] = [];
+    const included = new Set<number>();
+    // get_favorites() 是收藏区顺序的唯一来源；后端暂时拿不到时按项目字段降级。
+    for (const favorite of this.favorites) {
+      const item = byId.get(favorite.id);
+      if (item?.favorite && !included.has(item.id)) { ordered.push(item); included.add(item.id); }
+    }
+    const missing = items.filter((item) => item.favorite && !included.has(item.id))
+      .sort((a, b) => (a.favorite_position ?? Number.MAX_SAFE_INTEGER) - (b.favorite_position ?? Number.MAX_SAFE_INTEGER));
+    for (const item of missing) { ordered.push(item); included.add(item.id); }
+    for (const item of items) if (!item.favorite && !included.has(item.id)) { ordered.push(item); included.add(item.id); }
+    return ordered;
+  }
+  filtered = $derived.by(() => this.orderItems(this.resultItems));
+  // 被动提示只读展示旧历史，但可操作序列仍为空，继续封锁搜索、数字和鼠标取用。
+  visibleItems = $derived.by(() => this.interaction === "passive" ? this.orderItems(this.history.items) : this.filtered);
+  favoriteCount = $derived(this.visibleItems.reduce((count, item) => count + (item.favorite ? 1 : 0), 0));
+  currentItem = $derived(this.visibleItems[this.selected] ?? null);
 
   // 以下故意不是响应式状态：搜索副作用不能因为它们变化而重跑。
   composing = false;
@@ -69,6 +105,8 @@ export class PanelState {
   private focusFrames = new Set<number>();
   private searchTimer: ReturnType<typeof setTimeout> | null = null;
   private searchAfterFocus = false;
+  private lastResultTimer: ReturnType<typeof setTimeout> | null = null;
+  private feedbackTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** 登记面板的两个副作用（搜索、选中项夹紧和滚动）。必须在根组件初始化期间调用，顺序不要换。 */
   watch() {
@@ -81,13 +119,123 @@ export class PanelState {
 
     $effect(() => {
       const index = this.selected;
-      const count = this.filtered.length;
+      const count = this.visibleItems.length;
       if (count && index >= count) this.selected = count - 1;
-      void tick().then(() => this.list?.querySelector<HTMLElement>('[aria-pressed="true"]')?.scrollIntoView({ block: "nearest" }));
+      void tick().then(() => this.list?.querySelector<HTMLElement>('[aria-selected="true"]')?.scrollIntoView({ block: "nearest" }));
     });
   }
 
+  applySettings = (settings: import("./ipc").AppSettings) => {
+    const motion = settings.feedback?.motion;
+    const density = settings.panel?.density;
+    this.preferences = {
+      layout: "a",
+      theme: settings.theme === "light" || settings.theme === "dark" || settings.theme === "system" ? settings.theme : "system",
+      motion: motion === "none" || motion === "spring" || motion === "soft" ? motion : "soft",
+      density: density === "comfortable" || density === "compact" ? density : "compact",
+    };
+    // 与 preferences.ts 保持同一映射；本地实现让 G0 的单文件 Node 回归无需打包器。
+    document.documentElement.dataset.layout = "a";
+    document.documentElement.dataset.theme = this.preferences.theme;
+    document.documentElement.dataset.motion = this.preferences.motion;
+    document.documentElement.dataset.density = "compact";
+  };
+
+  refreshFavorites = async () => {
+    const selectedId = this.currentItem?.id;
+    const session = this.session;
+    try {
+      const favorites = await ipc.getFavorites?.();
+      if (!favorites) return;
+      this.favorites = favorites;
+      if (this.visible && session === this.session && selectedId !== undefined) {
+        const index = this.visibleItems.findIndex((item) => item.id === selectedId);
+        this.selected = Math.max(0, index);
+      }
+    } catch {
+      if (this.visible) this.message = "收藏顺序读取失败，已按记录中的收藏标记显示。";
+    }
+  };
+
+  refreshRecordingStatus = async () => {
+    const session = this.session;
+    const selectedId = this.currentItem?.id;
+    try {
+      const snapshot = await ipc.getHistory();
+      if (!this.visible || session !== this.session) return;
+      this.history = snapshot;
+      const index = this.visibleItems.findIndex((item) => item.id === selectedId);
+      this.selected = Math.max(0, index);
+      await this.refreshFavorites();
+    } catch {
+      if (this.visible && session === this.session) this.message = "状态读取失败，请稍后重试。";
+    }
+  };
+
+  toggleFavorite = async (id: number) => {
+    if (!this.visible || !this.interactive || this.busy || this.favoritePending !== null) return;
+    const item = this.filtered.find((entry) => entry.id === id);
+    if (!item) return;
+    const selectedId = this.currentItem?.id;
+    const session = this.session;
+    this.dismissLastResult();
+    this.favoritePending = id;
+    try {
+      const updated = await ipc.setFavorite(id, !item.favorite);
+      if (session !== this.session) return;
+      if (!updated) { this.message = "这条记录已不在历史里。"; return; }
+      // 只补丁更新返回项；原始最近/搜索数组不重载、不重新排序，其他收藏的位置不变。
+      const patch = (entry: HistoryItem) => entry.id === id ? updated : entry;
+      this.history = { ...this.history, items: this.history.items.map(patch) };
+      this.searchItems = this.searchItems.map(patch);
+      if (updated.favorite) {
+        const at = this.favorites.findIndex((entry) => entry.id === id);
+        if (at >= 0) this.favorites = this.favorites.map(patch);
+        else this.favorites = [...this.favorites, updated];
+      } else {
+        this.favorites = this.favorites.filter((entry) => entry.id !== id);
+      }
+      const index = this.filtered.findIndex((entry) => entry.id === selectedId);
+      this.selected = Math.max(0, index);
+    } catch {
+      if (session === this.session) this.message = "收藏状态未保存，请重试。";
+    } finally {
+      if (session === this.session) this.favoritePending = null;
+    }
+  };
+
+  togglePreview = () => {
+    if (!this.visible || !this.interactive || this.busy || this.awaitingRelease || this.mode !== "quick") return;
+    this.dismissLastResult();
+    if (this.previewOpen) this.previewOpen = false;
+    else if (this.currentItem) this.previewOpen = true;
+  };
+
+  dismissLastResult = () => {
+    this.lastResult = null;
+    if (this.lastResultTimer !== null) clearTimeout(this.lastResultTimer);
+    this.lastResultTimer = null;
+  };
+
+  private showLastResult() {
+    if (this.lastResultTimer !== null) clearTimeout(this.lastResultTimer);
+    this.lastResultTimer = setTimeout(() => { this.lastResult = null; this.lastResultTimer = null; }, 4000);
+  }
+
+  private clearFeedback() {
+    this.feedback = null;
+    if (this.feedbackTimer !== null) clearTimeout(this.feedbackTimer);
+    this.feedbackTimer = null;
+  }
+
+  private showFailure(message: string) {
+    this.clearFeedback();
+    this.feedback = { kind: "failed", title: "粘贴失败", detail: message, duration: 5000, startedAt: Date.now() };
+    this.feedbackTimer = setTimeout(() => { this.clearFeedback(); }, 5000);
+  }
+
   search = async (value: string) => {
+    if (value) this.dismissLastResult();
     const requestId = ++this.searchRequest;
     const currentSession = this.session;
     const reset = value !== this.previousQuery || currentSession !== this.previousSession;
@@ -101,7 +249,7 @@ export class PanelState {
       const scrollTop = this.list?.scrollTop ?? 0;
       this.searchItems = reply.items;
       this.searchedQuery = value;
-      const index = reset ? 0 : this.searchItems.findIndex((item) => item.id === selectedId);
+      const index = reset ? 0 : this.visibleItems.findIndex((item) => item.id === selectedId);
       this.selected = Math.max(0, index);
       await tick();
       if (!reset && requestId === this.searchRequest && this.list) this.list.scrollTop = scrollTop;
@@ -237,7 +385,7 @@ export class PanelState {
       this.cancelDomFocus();
       this.domFocus = "failed";
     }
-    if (this.composing) { this.composing = false; this.compositionEnded = performance.now(); this.searchRevision += 1; }
+    if (this.composing) { this.composing = false; this.imeActive = false; this.compositionEnded = performance.now(); this.searchRevision += 1; }
   };
 
   windowBlur = () => this.inputBlur();
@@ -358,6 +506,7 @@ export class PanelState {
     if (!transitions[this.interaction]?.includes(interaction)) return;
     if (this.interaction === interaction) return;
     const enteringPassive = interaction === "passive" && this.interaction !== "passive";
+    const selectedId = enteringPassive ? this.currentItem?.id : undefined;
     this.interaction = interaction;
     this.clearDomChoice(true);
     this.clearSearchTimer();
@@ -374,15 +523,21 @@ export class PanelState {
       if (interaction !== "activated") this.input?.blur();
     }
     if (interaction === "activated") this.prepareDomFocus();
-    if (enteringPassive) { this.busy = true; this.message = "正在确认复制结果…"; }
+    if (enteringPassive) {
+      const index = this.visibleItems.findIndex((item) => item.id === selectedId);
+      this.selected = Math.max(0, index);
+      this.busy = true; this.message = "正在确认复制结果…";
+    }
   }
 
   move = (offset: number) => {
+    this.dismissLastResult();
     this.selected = Math.max(0, Math.min(this.filtered.length - 1, this.selected + offset));
   };
 
   choose = async (index = this.selected, pasteMode: PasteMode = "paste", event?: KeyboardEvent | MouseEvent) => {
     if (!this.visible || !this.interactive || this.busy || this.pendingDom || !this.filtered[index]) return;
+    this.dismissLastResult();
     // 第一次 await 之前固定全部请求字段；绝不在 IPC/读库返回后换用更新的条目或 revision。
     const session = this.session;
     const id = this.filtered[index].id;
@@ -419,7 +574,9 @@ export class PanelState {
 
   navigate = (key: string, event?: KeyboardEvent) => {
     if (!this.visible || !this.interactive) return;
+    this.dismissLastResult();
     switch (key) {
+      case "Space": this.togglePreview(); break;
       case "ArrowUp": this.move(-1); break;
       case "ArrowDown": this.move(1); break;
       case "PageUp": this.move(-7); break;
@@ -430,6 +587,7 @@ export class PanelState {
       case "Shift+Enter": void this.choose(this.selected, "copy", event); break;
       case "Ctrl+Enter": void this.choose(this.selected, "text", event); break;
       case "Escape":
+        if (this.previewOpen) { this.previewOpen = false; break; }
         if (this.interaction === "activated" && event) this.armDomChoice({ session: this.session, panelMode: this.mode,
           id: null, mode: "copy", code: this.domCode(event), downAt: event.timeStamp, released: false });
         else this.close();
@@ -458,6 +616,11 @@ export class PanelState {
       if (event.isComposing || this.composing || event.keyCode === 229) { this.clearDomChoice(); return; }
       if (event.key === "Escape") {
         event.preventDefault();
+        if (this.previewOpen && !event.repeat && performance.now() - this.compositionEnded >= 50 && event.timeStamp - this.compositionEnded >= 50) {
+          this.clearDomChoice();
+          this.previewOpen = false;
+          return;
+        }
         if (!event.repeat && performance.now() - this.compositionEnded >= 50 && event.timeStamp - this.compositionEnded >= 50) {
           this.clearDomChoice();
           this.armDomChoice({ session: this.session, panelMode: this.mode, id: null, mode: "copy",
@@ -477,7 +640,7 @@ export class PanelState {
         const unmodified = !event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey;
         const action = event.key === "Enter" && !event.altKey && !event.metaKey && !(event.ctrlKey && event.shiftKey)
           ? event.ctrlKey ? "Ctrl+Enter" : event.shiftKey ? "Shift+Enter" : "Enter"
-          : unmodified && (/^[1-9]$/.test(event.key) || ["Escape", "ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End"].includes(event.key)) ? event.key : null;
+          : unmodified && (/^[1-9]$/.test(event.key) || event.key === " " || ["Escape", "ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End"].includes(event.key)) ? event.key === " " ? "Space" : event.key : null;
         if (action) {
           event.preventDefault();
           const navigation = ["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End"].includes(action);
@@ -564,16 +727,19 @@ export class PanelState {
 
   startComposition = (event?: CompositionEvent) => {
     this.composing = true;
+    this.imeActive = true;
     this.clearDomChoice();
     if (event && this.mode === "quick" && this.ensureDomInput(event)) this.requestActivatedSearch();
   };
 
-  endComposition = () => { this.composing = false; this.compositionEnded = performance.now(); this.searchRevision += 1; };
+  endComposition = () => { this.composing = false; this.imeActive = false; this.compositionEnded = performance.now(); this.searchRevision += 1; };
 
   /** onMount 时调用：读版本号、订阅后端事件，全部订阅好后再发 frontend_ready；返回卸载时的清理函数。 */
   connect = () => {
     let disposed = false;
     void ipc.appVersion().then((value) => { if (!disposed) this.version = value; }).catch(() => {});
+    const settingsReady = Promise.resolve(ipc.getSettings?.()).then((settings) => { if (!disposed && settings) this.applySettings(settings); }).catch(() => {});
+    void this.refreshFavorites();
     const unlisten: UnlistenFn[] = [];
     const frames = new Set<number>();
     let fetching = false;
@@ -591,8 +757,9 @@ export class PanelState {
             const selectedId = this.filtered[this.selected]?.id;
             this.history = snapshot;
             if (this.mode === "search") this.searchRevision += 1;
-            const index = this.filtered.findIndex((item) => item.id === selectedId);
+            const index = this.visibleItems.findIndex((item) => item.id === selectedId);
             this.selected = index >= 0 ? index : 0;
+            void this.refreshFavorites();
           }
         }
       } catch { if (!disposed && this.interaction !== "close_only") this.message = "读取历史失败，请查看 G0 日志。"; }
@@ -607,6 +774,7 @@ export class PanelState {
       if (disposed) stop(); else unlisten.push(stop);
     };
     const initialize = async () => {
+      if (ipc.onSettingsChanged) await subscribe(ipc.onSettingsChanged, (settings) => this.applySettings(settings));
       await subscribe(ipc.onPanelShown, (payload) => {
         const receivedAt = performance.now();
         if (!Number.isSafeInteger(payload.session) || payload.session < this.session) return;
@@ -622,11 +790,19 @@ export class PanelState {
         this.mode = "quick";
         this.interaction = payload.interaction;
         this.query = "";
-        // 每次呼出都从最新一条开始；只有面板开着时来了新复制，才保持原来的选中项。
+        // 新呼出优先选中最近区第一条；没有最近记录时才落到第一条收藏。
         this.history = payload.history;
-        this.selected = 0;
+        const firstRecent = this.history.items.find((item) => !item.favorite);
+        this.selected = firstRecent ? Math.max(0, this.filtered.findIndex((item) => item.id === firstRecent.id)) : 0;
         this.busy = false;
         this.message = "";
+        this.clearFeedback();
+        this.previewOpen = false;
+        this.imeActive = false;
+        this.favoritePending = null;
+        if (this.lastResult) this.showLastResult();
+        else this.dismissLastResult();
+        void this.refreshFavorites();
         this.activationRetrying = false;
         this.composing = false;
         this.compositionEnded = -Infinity;
@@ -675,6 +851,7 @@ export class PanelState {
         this.searchStarting = false;
         this.searchStartFailed = false;
         this.mode = payload.mode;
+        this.previewOpen = false;
         await tick();
         if (disposed || !this.visible || payload.session !== this.session || !this.inputSurface || this.mode !== "search") return;
         if (!activated) this.input?.focus({ preventScroll: true });
@@ -693,6 +870,9 @@ export class PanelState {
         if (payload.session !== this.session) return;
         this.searchRequest += 1;
         this.visible = false;
+        this.previewOpen = false;
+        this.imeActive = false;
+        this.clearFeedback();
         this.mode = "quick";
         this.composing = false;
         this.firstInput = null;
@@ -712,18 +892,38 @@ export class PanelState {
           && (this.interaction !== "close_only" || payload.close_only === true)) {
           if (payload.close_only) this.setInteraction("close_only");
           this.message = payload.message; this.busy = false;
+          if (!payload.close_only && ["这条记录已不在历史里", "读取历史失败", "写入剪贴板失败"].some((text) => payload.message.includes(text))) {
+            this.showFailure(payload.message);
+          }
         }
       });
       await subscribe(ipc.onPasteResult, (payload) => {
-        if (!this.visible || payload.session !== this.session || this.interaction === "close_only") return;
+        if (payload.session !== this.session || this.interaction === "close_only") return;
+        // 通用路径先收起再回执：只保留下次呼出的一次性结论，不把“发键”推断成“已粘贴”。
+        if (payload.paste_result === "confirmed" || payload.paste_result === "sent" || payload.paste_result === "copied") {
+          this.lastResult = payload.paste_result;
+        } else if (payload.paste_result === "copied_only" && !payload.hint_dwell_ms) {
+          this.lastResult = "copied";
+        }
+        if (!this.visible) return;
         if (payload.paste_result === "native_submission_unknown") {
+          this.clearFeedback();
           this.setInteraction("passive");
           this.message = "粘贴结果未确认，请先检查目标，避免重复粘贴";
           return;
         }
         // 被动提示已归还前台，不承诺按键送达；只展示后端确认的提示，留明确鼠标关闭入口。
         if (payload.hint_dwell_ms) {
+          const administrator = payload.paste_result === "copied_only" && payload.reason === "target_may_be_elevated";
+          const detail = administrator
+            ? "目标程序以管理员身份运行。请切到它按 Ctrl+V。"
+            : payload.hint_message || "粘贴前前台窗口变了，为免粘错，只复制到剪贴板。请按 Ctrl+V。";
+          this.clearFeedback();
           this.setInteraction("passive");
+          this.feedback = {
+            kind: "copied", title: "已复制，未粘贴", detail,
+            duration: payload.hint_dwell_ms, startedAt: Date.now(),
+          };
           this.message = payload.hint_message || COPIED_HINT;
           return;
         }
@@ -750,12 +950,14 @@ export class PanelState {
         evidence.push(`${payload.selected_to_result_ms.toFixed(0)} ms`);
         this.message = evidence.join(" · ");
       });
+      if (!disposed) await settingsReady;
       if (!disposed) await this.command(() => ipc.frontendReady());
     };
     void initialize().catch(() => { this.message = "初始化失败，请重启样机并查看日志。"; });
     return () => {
       disposed = true; this.searchRequest += 1; this.foregroundSnapshot = null;
       this.clearDomChoice(true); this.cancelDomFocus(); this.clearSearchTimer();
+      this.dismissLastResult(); this.clearFeedback();
       unlisten.forEach((stop) => stop()); frames.forEach(cancelAnimationFrame);
     };
   };

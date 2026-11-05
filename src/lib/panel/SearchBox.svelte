@@ -1,35 +1,48 @@
 <script lang="ts">
-  // 普通 Quick 只读且走钩子；Activated 先挂载同一可编辑输入框，真实焦点就绪后开放取用。
-  // 数字等命令键由 PanelState 阻止默认输入，普通首字和输入法自然保留在此框中。
+  // 同一真实输入框继续承载 G0 首键、IME 与焦点握手；这里只增加 v7 的搜索态呈现。
   import type { PanelState } from "../state.svelte";
 
   let { panel }: { panel: PanelState } = $props();
 </script>
 
-<input
-  bind:this={panel.input}
-  bind:value={panel.query}
-  type="search"
-  aria-label="搜索全文和文件名"
-  placeholder={panel.mode === "quick" ? "直接打字或按 / 搜索" : "搜索全文和文件名"}
-  readonly={panel.locked}
-  tabindex={panel.locked ? -1 : 0}
-  class:quiet={panel.searchBoxFocus && panel.mode === "quick"}
-  spellcheck="false"
-  autocomplete="off"
-  onpointerdown={panel.searchPointer}
-  onbeforeinput={panel.beforeInput}
-  onblur={panel.inputBlur}
-  oncompositionstart={panel.startComposition}
-  oncompositionend={panel.endComposition}
-/>
+<div class="search-box" class:active={panel.mode === "search"}>
+  <svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.5" stroke="currentColor" stroke-width="1.4"/><path d="m13 13 4 4" stroke="currentColor" stroke-width="1.4"/></svg>
+  <input
+    bind:this={panel.input}
+    bind:value={panel.query}
+    type="search"
+    aria-label="搜索全文和文件名"
+    placeholder={panel.mode === "quick" ? "打字搜索；数字直接取用" : "搜索全文和文件名"}
+    readonly={panel.locked}
+    tabindex={panel.locked ? -1 : 0}
+    class:quiet={panel.searchBoxFocus && panel.mode === "quick"}
+    spellcheck="false"
+    autocomplete="off"
+    onpointerdown={panel.searchPointer}
+    onbeforeinput={panel.beforeInput}
+    onblur={panel.inputBlur}
+    oncompositionstart={panel.startComposition}
+    oncompositionend={panel.endComposition}
+  />
+  <span class="search-count">{panel.mode === "search" ? `${panel.visibleItems.length} 条结果` : `${panel.history.total} 条`}</span>
+</div>
 
 <style>
-  input { width: 100%; height: 38px; padding: var(--space-2) var(--space-search-field-padding-x); border: 1px solid var(--color-border-control); border-radius: var(--radius-search-field); background: var(--color-bg-layer); outline: none; }
-  input:focus { border-color: var(--color-accent); }
-  input::placeholder { color: var(--color-text-tertiary); }
+  .search-box { min-width: 0; height: 100%; display: flex; align-items: center; gap: 10px; padding: 0 16px; }
+  .search-box.active { background: var(--field); box-shadow: inset 0 -2px 0 var(--accent); }
+  svg { width: 16px; height: 16px; flex: none; color: var(--faint); }
+  .active svg { color: var(--accent); }
+  input { width: 100%; min-width: 0; height: 100%; padding: 0; border: 0; outline: 0; background: transparent; color: var(--text); caret-color: transparent; font-size: 13px; }
+  .active input { caret-color: var(--accent); }
+  input::placeholder { color: var(--faint); opacity: 1; }
   input::-webkit-search-cancel-button { display: none; }
-  /* 实验 NIANLAI_G0_SEARCHBOX_FOCUS：快速模式下搜索框持有焦点但不该像在编辑，藏掉光标和焦点色，不改布局。 */
+  .search-count { color: var(--faint); font: 10px var(--font-mono); white-space: nowrap; }
+  /* NIANLAI_G0_SEARCHBOX_FOCUS 实验仍藏掉 quick 焦点外观。 */
   input.quiet { caret-color: transparent; }
-  input.quiet:focus { border-color: var(--color-border-control); }
+  @media (max-width: 599px) {
+    .search-box { gap: 6px; padding: 0 8px; }
+    .search-count { font-size: 8px; }
+    input { font-size: 11px; }
+    svg { width: 14px; height: 14px; }
+  }
 </style>

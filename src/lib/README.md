@@ -7,15 +7,20 @@ M0-7 把原来一个文件的 `src/App.svelte` 拆成下面这些文件，外观
 | 文件 | 作用 |
 |---|---|
 | `../main.ts`、`../app.css` | 面板入口（`index.html`）；`app.css` 只放全局基础样式 |
-| `theme.css` | 主题变量（颜色、间距、圆角、字号、阴影），深浅两套；面板和设置窗口共用 |
+| `theme.css` | v7 主题 tokens（A/B/C 材质、共享状态色、动效时长），深浅两套；面板和设置窗口共用 |
+| `preferences.ts` | 布局、主题、动效、密度的类型、默认值与设置页应用逻辑；alpha.2 有效布局固定 A |
 | `ipc.ts` | 和后端的全部往来：命令（invoke）、事件（listen）、载荷类型。命令名、事件名只在这里出现 |
-| `state.svelte.ts` | `PanelState`：面板状态（会话、模式、列表、选中项、搜索词、粘贴结果）和交互逻辑，用 Svelte 5 runes |
-| `panel/Panel.svelte` | 根组件：创建 `PanelState`；摆放顶部（标题、条数、记录状态、存储状态、搜索框、按键提示）、列表、页脚 |
-| `panel/SearchBox.svelte` | 搜索框 |
-| `panel/HistoryList.svelte`、`panel/HistoryItem.svelte` | 列表、单条（槽位号、类型、三行摘要和高亮、来源 · 时间） |
-| `panel/Footer.svelte` | 页脚：粘贴结果和提示（含管理员提示）、模式、呼出耗时、退出键、版本号 |
-| `panel/Preview.svelte` | 预览区占位（F04），现在不挂载 |
-| `../settings/`、`/settings.html` | 设置窗口的入口和占位页；窗口由 `src-tauri/src/settings_window.rs` 按需创建 |
+| `state.svelte.ts` | `PanelState`：会话、模式、收藏顺序、可见/可操作序列、选中项、搜索词、预览与粘贴反馈 |
+| `panel/Panel.svelte` | A 布局根组件：品牌/搜索顶栏、记录横幅、分栏工作区、页脚和预览浮层 |
+| `panel/SplitPreview.svelte` | A 的索引 + 常驻预览与工具栏 |
+| `panel/SearchBox.svelte` | 搜索框、搜索态与结果计数 |
+| `panel/HistoryList.svelte`、`panel/HistoryItem.svelte` | 收藏/最近分区、双行索引项、来源图标、星标和搜索高亮 |
+| `panel/Preview.svelte` | 文本/长文/代码/链接/图片元信息/颜色/文件预览；图片资源 URL 尚未由后端提供 |
+| `panel/PreviewOverlay.svelte` | 原窗口内的完整预览浮层 |
+| `panel/RecordBanner.svelte`、`panel/Footer.svelte` | J01 记录状态、上次结果、仅复制/失败结果条 |
+| `panel/SourceIcon.svelte` | `convertFileSrc` 图标与首字形降级 |
+| `panel/motion.ts`、`panel/SelectionRail.svelte` | 共用 SpringValue 与选中指示轨 |
+| `../settings/`、`/settings.html` | 设置窗口：通用页的布局、主题、动效、紧凑密度；其余分区占位 |
 
 ## 状态流向
 
@@ -28,7 +33,7 @@ M0-7 把原来一个文件的 `src/App.svelte` 拆成下面这些文件，外观
 - `Panel.svelte` 初始化时先 `panel.watch()`（登记搜索、选中项两个副作用，顺序不要换），再 `onMount(panel.connect)`（订阅事件、发 `frontend_ready`，卸载时清理）。
 - 普通 `quick` 不激活，数字由键盘钩子经 `panel:key` 转给 `navigate()`；其原有搜索首键缓冲、两帧就绪和补发路径保留。权限较高或无法确认的目标先进入 `activation_pending`，取得面板前台后进入 `activated`，初始 `mode` 仍是 `quick`。
 - `activated` 只用真实 DOM `keydown` / `keyup`，忽略 `panel:key` 防双发。后端放行新键，只保留历史吞键配对。确认键按下时固定会话、条目和模式；匹配可信抬起且已观察按键/修饰键全部松开后，才取用或关闭。方向、翻页键允许重复导航。搜索选择也在按下时固定原 `selection`，松键期间 revision 变化就取消，不刷新后重发。
-- `interaction` 和本地 DOM 焦点共同控制能否操作。`activated` 先挂载同一个可编辑搜索框，确认 `document.hasFocus()` 且 `activeElement` 为该框后才展示列表和快捷键；准备超过 500 ms 或焦点失败时提供本地鼠标重试，不调用仅适用于 `activation_failed` 的后端重试。原生 `activation_pending` / `activation_failed` 无列表和搜索入口，失败重试仍走后端。`passive` 只显示复制提示和鼠标关闭入口。
+- `interaction` 和本地 DOM 焦点共同控制能否操作。`activated` 先挂载同一个可编辑搜索框，确认 `document.hasFocus()` 且 `activeElement` 为该框后才展示列表和快捷键；准备超过 500 ms 或焦点失败时提供本地鼠标重试，不调用仅适用于 `activation_failed` 的后端重试。原生 `activation_pending` / `activation_failed` 无列表和搜索入口，失败重试仍走后端。`passive` 保留只读历史与预览，但 `filtered` 为空，组件展示的 `visibleItems` 不能用于取用；页脚显示后端提示和明确鼠标关闭入口。
 - 原生提交等待采集访问失败且未写入时进入 `close_only`，显示未提交及重新呼出的说明，只保留关闭按钮和可信 Esc 配对关闭。旧会话的监听已结束，迟到的激活、模式、结果与错误不能重新开放取用；下一次 `panel:shown` 才初始化新会话。等待期间已请求关闭的取消，在 worker 完成后静默收起，不抢回目标焦点。
 - Activated 的普通首字和输入法由浏览器在原框自然编辑；`beforeinput` / `compositionstart` 请求进入搜索，`searchStarting` 期间不处理 Quick 数字取用，后续字符继续留在原框。`/`、Ctrl+F 以空查询进入搜索。后端切换不重新激活、MoveFocus 或补发首字，前端也不二次聚焦；切换失败或 1 秒没有模式回执时显示重新呼出提示，不能永久停在准备态。
 - 根内容只在本会话 `visible` 时渲染，`interactive` 同样依赖可见性；隐藏后不保留搜索、编号列表和快捷键提示，避免窗口先于下一次 `panel:shown` 显示时露出旧会话的就绪承诺。
@@ -37,15 +42,14 @@ M0-7 把原来一个文件的 `src/App.svelte` 拆成下面这些文件，外观
 
 ## 设置窗口壳
 
-- `settings.html` 与 `index.html` 是 Vite 的两个构建入口，设置页目前只有“设置”和“开发中”。
+- `settings.html` 与 `index.html` 是 Vite 的两个构建入口。通用页通过 `get_settings` / `set_settings` 持久化 `panel.layout`、`panel.density`、`theme`、`feedback.motion`；保存后由前端广播 `settings:changed`，面板无需后端新增事件即可同步。B/C 与舒适密度只禁用占位。
 - 窗口定义集中在 `settings_window.rs`，不在启动配置中创建第二个 WebView；调用异步命令 `open_settings` 才创建。重复打开会显示并聚焦已有窗口，关闭后销毁，下次重新创建。
 - `lib.rs` 按 `settings` 标签放行关闭请求，关闭设置窗口不会走面板的退出分支。托盘入口由后续任务接入；从菜单或托盘回调调用 `settings_window::open()` 时须先用异步运行时切离主线程，避免 Windows WebView2 创建窗口时死锁。
 
 ## 主题变量
 
-- 名字对齐设计稿 `tokens.css` 的规则（`--color-<用途>-<角色>`、`--space-<n>` 即 n × 4px、`--radius-*`、`--font-*`、`--shadow-*`），值是 G0 现状。M1 换成设计稿的值时只改 `theme.css`；标着“M0 现状专用”的名字在 M1 改完样式后删掉。
-- 深色默认跟随系统；`<html data-theme="dark">` / `"light"` 可以手动覆盖，现在没有代码设置它。
-- 没有变量化的：行高、字重、固定尺寸（搜索框高 38px、槽位号宽 20px、模式圆点 6px、页脚状态行 24px）、1px 边框宽、圆点的 50% 圆角。
+- v7 的 A/B/C 材质、状态色、设置页和动效常量统一放在 `theme.css`；组件不另建调色板。`data-theme="system|light|dark"` 控制主题，系统 reduce 优先于动效设置。
+- alpha.2 有效布局与密度分别为 A 和紧凑。A 行高 64px；后端窗口尚未接入 M1-P 的 680px 几何算法时，CSS 在 600px 以下使用 184px 索引列。
 
 ## 不能动的细节（都是 G0 踩过的坑）
 
@@ -65,3 +69,5 @@ M0-7 把原来一个文件的 `src/App.svelte` 拆成下面这些文件，外观
 14. DOM 待发选择在失焦、隐藏、会话/模式变化时取消，每个 held code/修饰标记记录按下时刻，迟到的旧 keyup 不能清新证据。非组合的新 Esc 优先把待发选择替换成关闭，匹配 Esc 和其它已观察键全部抬起后收起；已 busy 的请求也允许关闭交后端取消。重复或组合中的 Esc 不关闭。没有按键释放的超时放行。
 
 离线回归使用 `node tools/test-panel-key-repeat.mjs` 编译真实 `PanelState`；实机仍需覆盖呼出、激活成功/失败、打字搜索、中文输入、数字键、Enter、Ctrl+Enter、Esc 和被动提示。离线测试不能替代输入法和焦点实机验收。
+
+M1-U alpha.2 的展示限制：普通 quick 的 Rust 钩子目前不投递 Space，并在投递 Esc 后直接收起窗口，因此完整“Space 开浮层、再次 Space / Esc 仅关浮层”还需要后续后端键位转发配合；前端 `navigate("Space")`、浮层和 activated 路径已就位。本任务按约束未改 Rust。
