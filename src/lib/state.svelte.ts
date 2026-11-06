@@ -28,6 +28,7 @@ export class PanelState {
   favoritePending = $state<number | null>(null);
   preferences = $state<Preferences>({ ...DEFAULT_PREFERENCES });
   motion = $derived(this.preferences.motion);
+  ctrlDown = $state(false);
   previewOpen = $state(false);
   imeActive = $state(false);
   lastResult = $state<LastPasteResult | null>(null);
@@ -126,16 +127,17 @@ export class PanelState {
   }
 
   applySettings = (settings: import("./ipc").AppSettings) => {
+    const layout = settings.panel?.layout;
     const motion = settings.feedback?.motion;
     const density = settings.panel?.density;
     this.preferences = {
-      layout: "a",
+      layout: layout === "a" || layout === "b" || layout === "c" ? layout : "a",
       theme: settings.theme === "light" || settings.theme === "dark" || settings.theme === "system" ? settings.theme : "system",
       motion: motion === "none" || motion === "spring" || motion === "soft" ? motion : "soft",
       density: density === "comfortable" || density === "compact" ? density : "compact",
     };
     // 与 preferences.ts 保持同一映射；本地实现让 G0 的单文件 Node 回归无需打包器。
-    document.documentElement.dataset.layout = "a";
+    document.documentElement.dataset.layout = this.preferences.layout;
     document.documentElement.dataset.theme = this.preferences.theme;
     document.documentElement.dataset.motion = this.preferences.motion;
     document.documentElement.dataset.density = "compact";
@@ -388,7 +390,7 @@ export class PanelState {
     if (this.composing) { this.composing = false; this.imeActive = false; this.compositionEnded = performance.now(); this.searchRevision += 1; }
   };
 
-  windowBlur = () => this.inputBlur();
+  windowBlur = () => { this.ctrlDown = false; this.inputBlur(); };
 
   private domCode(event: KeyboardEvent) {
     return event.code || `${event.key}:${event.location}`;
@@ -428,6 +430,7 @@ export class PanelState {
   }
 
   keyup = (event: KeyboardEvent) => {
+    this.ctrlDown = event.ctrlKey;
     if (this.interaction === "close_only") {
       const downAt = this.closeOnlyEscape;
       this.closeOnlyEscape = null;
@@ -579,8 +582,10 @@ export class PanelState {
       case "Space": this.togglePreview(); break;
       case "ArrowUp": this.move(-1); break;
       case "ArrowDown": this.move(1); break;
-      case "PageUp": this.move(-7); break;
-      case "PageDown": this.move(7); break;
+      case "ArrowLeft": if (this.preferences.layout === "c" && this.mode === "quick") this.move(-1); break;
+      case "ArrowRight": if (this.preferences.layout === "c" && this.mode === "quick") this.move(1); break;
+      case "PageUp": this.move(this.preferences.layout === "c" ? -3 : -7); break;
+      case "PageDown": this.move(this.preferences.layout === "c" ? 3 : 7); break;
       case "Home": this.selected = 0; break;
       case "End": this.selected = Math.max(0, this.filtered.length - 1); break;
       case "Enter": void this.choose(this.selected, "paste", event); break;
@@ -598,6 +603,7 @@ export class PanelState {
 
   // 普通 Quick 走钩子；Activated 在同一真实输入框中处理快速键和自然搜索输入。
   keydown = (event: KeyboardEvent) => {
+    this.ctrlDown = event.ctrlKey;
     if (this.interaction === "close_only") {
       if (this.visible && event.isTrusted === true && event.type === "keydown" && event.key === "Escape"
         && !event.repeat && !event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey
@@ -638,12 +644,13 @@ export class PanelState {
           return;
         }
         const unmodified = !event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey;
+        const horizontal = this.preferences.layout === "c" && (event.key === "ArrowLeft" || event.key === "ArrowRight");
         const action = event.key === "Enter" && !event.altKey && !event.metaKey && !(event.ctrlKey && event.shiftKey)
           ? event.ctrlKey ? "Ctrl+Enter" : event.shiftKey ? "Shift+Enter" : "Enter"
-          : unmodified && (/^[1-9]$/.test(event.key) || event.key === " " || ["Escape", "ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End"].includes(event.key)) ? event.key === " " ? "Space" : event.key : null;
+          : unmodified && (horizontal || /^[1-9]$/.test(event.key) || event.key === " " || ["Escape", "ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End"].includes(event.key)) ? event.key === " " ? "Space" : event.key : null;
         if (action) {
           event.preventDefault();
-          const navigation = ["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End"].includes(action);
+          const navigation = ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "PageUp", "PageDown", "Home", "End"].includes(action);
           if (performance.now() - this.compositionEnded < 50 || event.timeStamp - this.compositionEnded < 50 || (!navigation && event.repeat)) return;
           this.navigate(action, event);
         } else if ((event.ctrlKey && ["p", "r", "+", "-", "=", "0"].includes(event.key.toLowerCase())) || ["F5", "F7"].includes(event.key)) event.preventDefault();
@@ -798,6 +805,7 @@ export class PanelState {
         this.message = "";
         this.clearFeedback();
         this.previewOpen = false;
+        this.ctrlDown = false;
         this.imeActive = false;
         this.favoritePending = null;
         if (this.lastResult) this.showLastResult();
@@ -871,6 +879,7 @@ export class PanelState {
         this.searchRequest += 1;
         this.visible = false;
         this.previewOpen = false;
+        this.ctrlDown = false;
         this.imeActive = false;
         this.clearFeedback();
         this.mode = "quick";

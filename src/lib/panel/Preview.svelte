@@ -5,7 +5,7 @@
   import { colorValue, linkParts, relativeTime, sourceName, visualKind } from "./content";
   import { SpringValue } from "./motion";
 
-  let { panel, item, expanded = false }: { panel: PanelState; item: HistoryItem | null; expanded?: boolean } = $props();
+  let { panel, item, expanded = false, compact = false }: { panel: PanelState; item: HistoryItem | null; expanded?: boolean; compact?: boolean } = $props();
   let root: HTMLDivElement;
   let previousId: number | null | undefined;
   const kind = $derived(item ? visualKind(item) : "short");
@@ -33,7 +33,7 @@
   onDestroy(() => { y.destroy(); opacity.destroy(); });
 </script>
 
-<div bind:this={root} class="preview-swap" class:expanded>
+<div bind:this={root} class="preview-swap" class:expanded class:compact>
   {#if !item}
     <div class="empty-preview">
       <strong>{panel.query ? "没有可预览的匹配项" : "还没有记录"}</strong>
@@ -113,6 +113,24 @@
   .empty-preview p { margin: var(--space-2) 0 0; font-size: 12px; }
   .expanded .preview-title { font-size: 25px; }
   .expanded .preview-text { font-size: 15px; }
+  .compact .preview-eyebrow { display: none; }
+  .compact .preview-title { margin-bottom: 8px; font-size: 17px; }
+  .compact .preview-text { font-size: 13px; line-height: 1.72; }
+  .compact .preview-note { margin-top: 8px; font-size: 11px; }
+  .compact .code-sheet { padding: 9px 11px; font-size: 11px; line-height: 1.65; }
+  .compact .link-host { margin: 0 0 6px; font-size: 20px; }
+  .compact .link-url { font-size: 11px; }
+  .compact .link-rule { margin: 10px 0; }
+  .compact .image-placeholder { min-height: 82px; padding: 10px; gap: 6px; }
+  .compact .image-placeholder svg { width: 30px; height: 30px; }
+  .compact .image-placeholder span { max-width: none; font-size: 10px; }
+  .compact .image-meta { margin-top: 6px; font-size: 9px; }
+  .compact .color-block { height: 52px; }
+  .compact .color-value { margin-top: 8px; font-size: 19px; }
+  .compact .color-channels { margin-top: 3px; font-size: 10px; }
+  .compact .file-list li { padding: 6px 0; }
+  .compact .empty-preview { padding: 8px 0; }
+  .compact .partial { margin-top: 8px; }
   @media (max-width: 599px) {
     .preview-eyebrow span:last-child { display: none; }
     .preview-title { font-size: 18px; }

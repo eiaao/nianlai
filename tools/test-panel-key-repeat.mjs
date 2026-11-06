@@ -1100,3 +1100,43 @@ test("搜索选择快照与受限激活交互的反例", async (suite) => {
     assert.equal(panel.message, "当前会话");
   });
 });
+
+test("普通 Quick 的 Space 与 Esc 浮层分层键位", async (suite) => {
+  const { PanelState, ipc, cleanup } = await compilePanel();
+  suite.after(cleanup);
+
+  await suite.test("Space 开合，Esc 先关浮层、再次 Esc 才请求收起", async (context) => {
+    const { panel } = await createPanel(context, PanelState, ipc);
+    panel.mode = "quick";
+    assert.equal(panel.previewOpen, false);
+    ipc.emit("key", { session: 37, key: "Space" });
+    assert.equal(panel.previewOpen, true);
+    ipc.emit("key", { session: 37, key: "Space" });
+    assert.equal(panel.previewOpen, false);
+    ipc.emit("key", { session: 37, key: "Space" });
+    assert.equal(panel.previewOpen, true);
+    ipc.emit("key", { session: 37, key: "Escape" });
+    assert.equal(panel.previewOpen, false);
+    assert.equal(panel.visible, true);
+    assert.deepEqual(ipc.calls, []);
+    ipc.emit("key", { session: 37, key: "Escape" });
+    assert.deepEqual(ipc.calls, [{ command: "hidePanel", session: 37 }]);
+  });
+
+  await suite.test("搜索模式 Space 仍交给输入框，C 的左右键不改变其它布局", async (context) => {
+    const { panel } = await createPanel(context, PanelState, ipc);
+    const before = panel.selected;
+    const event = keydown(panel, { key: " ", code: "Space" });
+    assert.equal(event.defaultPrevented, false);
+    assert.deepEqual(ipc.calls, []);
+    panel.mode = "quick";
+    panel.preferences = { ...panel.preferences, layout: "a" };
+    ipc.emit("key", { session: 37, key: "ArrowRight" });
+    assert.equal(panel.selected, before);
+    panel.preferences = { ...panel.preferences, layout: "c" };
+    ipc.emit("key", { session: 37, key: "ArrowRight" });
+    assert.equal(panel.selected, before + 1);
+    ipc.emit("key", { session: 37, key: "ArrowLeft" });
+    assert.equal(panel.selected, before);
+  });
+});

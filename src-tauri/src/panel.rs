@@ -1380,12 +1380,9 @@ impl Panel {
                     && self.mode == Mode::Quick
                     && self.interaction == Interaction::Quick =>
             {
+                // Space / Esc 都先交给前端：有浮层时 Esc 只关浮层；无浮层时前端沿用 hide_panel 关闭。
+                // 不在这里按 Esc 直接收起，否则后端会抢在分层键位处理之前结束会话。
                 self.emit("panel:key", json!({"key":key}));
-                if key == "Escape" {
-                    self.log(logger, "hide_source", json!({"source":"escape_key"}));
-                    self.end_hint("escape");
-                    self.hide(logger)?;
-                }
             }
             Action::Search { session, started }
                 if self.current(session)

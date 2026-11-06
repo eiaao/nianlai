@@ -871,7 +871,9 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
         }
         let navigation = if mods.is_empty() {
             match vk {
+                0x25 => Some("ArrowLeft"),
                 0x26 => Some("ArrowUp"),
+                0x27 => Some("ArrowRight"),
                 0x28 => Some("ArrowDown"),
                 0x21 => Some("PageUp"),
                 0x22 => Some("PageDown"),
@@ -879,6 +881,7 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
                 0x23 => Some("End"),
                 0x0D => Some("Enter"),
                 0x1B => Some("Escape"),
+                0x20 => Some("Space"),
                 0x31 | 0x61 => Some("1"),
                 0x32 | 0x62 => Some("2"),
                 0x33 | 0x63 => Some("3"),
@@ -898,13 +901,14 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
             None
         };
         if let Some(name) = navigation {
-            // 确认与关闭等到抬起再投递，避免卸钩后把 Enter 抬起漏给目标控件。
+            // 确认、关闭与预览开合等到抬起再投递，避免卸钩后把配对抬起漏给目标控件，也避免长按 Space 反复切换。
             if matches!(
                 name,
                 "Enter"
                     | "Shift+Enter"
                     | "Ctrl+Enter"
                     | "Escape"
+                    | "Space"
                     | "1"
                     | "2"
                     | "3"

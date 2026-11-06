@@ -22,12 +22,12 @@ export const DEFAULT_PREFERENCES: Readonly<Preferences> = {
 };
 
 export function normalizePreferences(settings: AppSettings | null | undefined): Preferences {
+  const layout = settings?.panel?.layout;
   const theme = settings?.theme;
   const motion = settings?.feedback?.motion;
   const density = settings?.panel?.density;
   return {
-    // alpha.2 只有 A 渲染器。即使手工写入 B/C，也只退回 A，不做假切换。
-    layout: "a",
+    layout: layout === "a" || layout === "b" || layout === "c" ? layout : "a",
     theme: theme === "light" || theme === "dark" || theme === "system" ? theme : "system",
     motion: motion === "none" || motion === "spring" || motion === "soft" ? motion : "soft",
     density: density === "comfortable" || density === "compact" ? density : "compact",
@@ -35,7 +35,7 @@ export function normalizePreferences(settings: AppSettings | null | undefined): 
 }
 
 export function applyPreferences(preferences: Preferences, root: HTMLElement = document.documentElement) {
-  root.dataset.layout = "a";
+  root.dataset.layout = preferences.layout;
   root.dataset.theme = preferences.theme;
   root.dataset.motion = preferences.motion;
   // v0.1 只开放 compact；保留数据值，未来无需迁移设置。

@@ -2,8 +2,8 @@
 :root {
   font-family: var(--font-ui);
   font-size: var(--font-size-body);
-  color: var(--a-text);
-  background: var(--a-bg);
+  color: var(--text);
+  background: var(--panel);
 }
 
 * { box-sizing: border-box; }
@@ -15,6 +15,6 @@ button:disabled { cursor: default; }
 :focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
 
 @media (forced-colors: active) {
-  .history-row.selected { outline: 2px solid Highlight; outline-offset: -2px; }
-  kbd, .section-heading { border-color: CanvasText; }
+  .history-row.selected, .command-row.selected, .flow-card.selected { outline: 2px solid Highlight; outline-offset: -2px; }
+  kbd, .section-heading, .track-divider { border-color: CanvasText; }
 }

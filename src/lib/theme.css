@@ -1,4 +1,4 @@
-/* 拈来 v0.1 · v7 tokens。A 的材质、共享状态色、动效和设置窗口变量统一在这里维护。 */
+/* 拈来 v0.1 · v7 tokens。A/B/C 材质、共享状态色、动效和设置窗口变量统一在这里维护。 */
 :root {
   color-scheme: light;
   --font-ui: "Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", sans-serif;
@@ -11,8 +11,10 @@
   --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px;
   --space-5: 20px; --space-6: 24px; --space-8: 32px;
   --radius-none: 0; --radius-xs: 1px; --radius-sm: 2px; --radius-md: 3px;
-  --size-a-width: 680px; --size-panel-height: 520px;
+  --size-a-width: 680px; --size-b-width: 560px; --size-c-width: 760px; --size-panel-height: 520px;
   --size-a-index: 264px; --size-a-index-narrow: 184px; --size-row-a: 64px;
+  --size-row-b: 56px; --size-card-width: 238px; --size-card-height: 266px; --size-card-step: 218px;
+  --size-preview-b: 190px; --size-detail-c: 154px;
 
   --duration-instant: 0ms; --duration-reduce: 90ms; --duration-fade: 110ms;
   --duration-feedback: 220ms; --duration-response: 300ms;
@@ -111,5 +113,21 @@
 }
 
 html[data-motion="none"] { --fade-duration: 0ms; }
-:root[data-density="compact"] { --size-row-a: 64px; }
+:root[data-density="compact"] { --size-row-a: 64px; --size-row-b: 56px; }
+
+/* 三套布局共用组件时，只切换材质别名；主题、动效和密度不与布局联动。 */
+:root[data-layout="b"] {
+  --focus: var(--b-focus); --panel: var(--b-bg); --panel-raised: var(--b-bg); --preview: var(--b-bg);
+  --text: var(--b-text); --muted: var(--b-muted); --faint: var(--b-faint);
+  --line: var(--b-line); --line-soft: var(--b-hairline); --accent: var(--b-accent);
+  --accent-ink: var(--b-bg); --selected: var(--b-selected); --field: var(--b-bg);
+  --star: var(--b-star); --danger: var(--state-critical);
+}
+:root[data-layout="c"] {
+  --focus: var(--c-focus); --panel: var(--c-bg); --panel-raised: var(--c-raised); --preview: var(--c-raised);
+  --text: var(--c-text); --muted: var(--c-muted); --faint: var(--c-faint);
+  --line: var(--c-line); --line-soft: var(--c-hairline); --accent: var(--c-accent);
+  --accent-ink: var(--c-accent-ink); --selected: var(--c-hairline); --field: var(--c-raised);
+  --star: var(--c-star); --danger: var(--c-danger);
+}
 @media (prefers-reduced-motion: reduce) { :root { --fade-duration: var(--duration-reduce); } }

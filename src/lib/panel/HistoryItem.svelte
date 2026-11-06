@@ -1,17 +1,17 @@
 <script lang="ts">
-  // A 布局双行索引项。主按钮保留 G0 的鼠标取用；星标是独立按钮，不冒泡成粘贴。
+  // A/B 共用条目语义与鼠标取用；B 只改排印、行高和槽位显隐，不复制数据或选中状态。
   import { formatTime, type PanelState } from "../state.svelte";
   import type { HistoryItem } from "../ipc";
   import { linkParts, relativeTime, sourceName, typeLabel, visualKind } from "./content";
   import SourceIcon from "./SourceIcon.svelte";
 
-  let { panel, item, index }: { panel: PanelState; item: HistoryItem; index: number } = $props();
+  let { panel, item, index, layout = "a" }: { panel: PanelState; item: HistoryItem; index: number; layout?: "a" | "b" } = $props();
   const selected = $derived(index === panel.selected);
   const kind = $derived(visualKind(item));
   const link = $derived(linkParts(item));
 </script>
 
-<li class="history-row" class:selected data-history-index={index}>
+<li class:history-row={layout === "a"} class:command-row={layout === "b"} class:selected data-history-index={index}>
   <button
     id={`history-option-${item.id}`}
     class="row-select"
@@ -54,8 +54,9 @@
 </li>
 
 <style>
-  .history-row { width: 100%; height: var(--size-row-a); display: grid; grid-template-columns: minmax(0, 1fr) 20px 34px; align-items: center; gap: 7px; margin: 0; padding: 0 9px 0 0; border-bottom: 1px solid var(--line-soft); background: transparent; color: var(--muted); }
-  .history-row.selected { background: var(--selected); color: var(--text); }
+  .history-row, .command-row { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) 20px 34px; align-items: center; gap: 7px; margin: 0; padding: 0 9px 0 0; border-bottom: 1px solid var(--line-soft); background: transparent; color: var(--muted); }
+  .history-row { height: var(--size-row-a); }
+  .history-row.selected, .command-row.selected { background: var(--selected); color: var(--text); }
   .row-select { min-width: 0; height: 100%; display: grid; grid-template-columns: 22px 30px minmax(0, 1fr); align-items: center; gap: 7px; padding: 0 0 0 10px; border: 0; border-radius: 0; background: transparent; color: inherit; text-align: left; cursor: default; }
   .slot { color: var(--faint); font: 11px var(--font-mono); }
   .selected .slot { color: var(--accent); }
@@ -67,17 +68,39 @@
   .selected .row-sub, .selected .row-time { color: var(--muted); }
   .row-star { width: 20px; height: 24px; display: grid; place-items: center; padding: 0; border: 0; background: transparent; color: var(--star); opacity: 0; }
   .row-star svg { width: 18px; height: 18px; }
-  .row-star.favorite, .history-row:hover .row-star, .history-row.selected .row-star, .row-star:focus-visible { opacity: 1; }
+  .row-star.favorite, .history-row:hover .row-star, .history-row.selected .row-star, .command-row:hover .row-star, .command-row.selected .row-star, .row-star:focus-visible { opacity: 1; }
   .row-star:disabled { cursor: default; }
   .row-time { align-self: start; padding-top: 14px; overflow: hidden; color: var(--faint); font: 9px var(--font-mono); text-align: right; white-space: nowrap; }
   mark { background: transparent; color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
+
+  .command-row { height: var(--size-row-b); grid-template-columns: minmax(0, 1fr) 18px 38px; gap: 8px; padding: 0 18px 0 15px; }
+  .command-row .row-select { grid-template-columns: 29px 24px minmax(0, 1fr); gap: 8px; padding: 0; }
+  .command-row .row-select :global(.source-icon) { width: 24px; height: 24px; }
+  .command-row .slot { color: var(--accent); opacity: 0; transform: translateX(-4px); transition: opacity var(--fade-duration) linear, transform var(--fade-duration) linear; }
+  .command-row.selected .slot, :global(.panel-b.ctrl-down) .command-row .slot { opacity: 1; transform: translateX(0); }
+  .command-row .row-main { color: inherit; font-size: 14px; line-height: 1.3; letter-spacing: .005em; }
+  .command-row.selected .row-main { font-weight: 650; letter-spacing: -.005em; }
+  .command-row .row-main.code { font-size: 12px; }
+  .command-row .row-main .domain { color: var(--text); }
+  .command-row .row-star { width: 18px; height: 20px; }
+  .command-row .row-star svg { width: 16px; height: 16px; }
+  .command-row .row-time { padding-top: 10px; font-size: 9px; }
+
   @media (max-width: 599px) {
     .history-row { grid-template-columns: minmax(0, 1fr) 18px; gap: 4px; padding-right: 5px; }
-    .row-select { grid-template-columns: 17px 25px minmax(0, 1fr); gap: 5px; padding-left: 6px; }
-    .row-select :global(.source-icon) { width: 25px; height: 25px; }
-    .row-time { display: none; }
-    .row-main { font-size: 11px; }
-    .row-sub { font-size: 8px; }
-    .slot { font-size: 9px; }
+    .history-row .row-select { grid-template-columns: 17px 25px minmax(0, 1fr); gap: 5px; padding-left: 6px; }
+    .history-row .row-select :global(.source-icon) { width: 25px; height: 25px; }
+    .history-row .row-time { display: none; }
+    .history-row .row-main { font-size: 11px; }
+    .history-row .row-sub { font-size: 8px; }
+    .history-row .slot { font-size: 9px; }
+    .command-row { grid-template-columns: minmax(0, 1fr) 18px 31px; gap: 5px; padding-right: 10px; padding-left: 10px; }
+    .command-row .row-select { grid-template-columns: 23px 22px minmax(0, 1fr); gap: 6px; }
+    .command-row .row-select :global(.source-icon) { width: 22px; height: 22px; }
+    .command-row .row-main { font-size: 12px; }
+    .command-row .row-time { font-size: 8px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .command-row .slot { transition: opacity var(--duration-reduce) linear; transform: none; }
   }
 </style>

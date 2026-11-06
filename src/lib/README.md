@@ -8,11 +8,13 @@ M0-7 把原来一个文件的 `src/App.svelte` 拆成下面这些文件，外观
 |---|---|
 | `../main.ts`、`../app.css` | 面板入口（`index.html`）；`app.css` 只放全局基础样式 |
 | `theme.css` | v7 主题 tokens（A/B/C 材质、共享状态色、动效时长），深浅两套；面板和设置窗口共用 |
-| `preferences.ts` | 布局、主题、动效、密度的类型、默认值与设置页应用逻辑；alpha.2 有效布局固定 A |
+| `preferences.ts` | 布局、主题、动效、密度的类型、默认值与设置页应用逻辑；alpha.3 有效布局为 A/B/C |
 | `ipc.ts` | 和后端的全部往来：命令（invoke）、事件（listen）、载荷类型。命令名、事件名只在这里出现 |
 | `state.svelte.ts` | `PanelState`：会话、模式、收藏顺序、可见/可操作序列、选中项、搜索词、预览与粘贴反馈 |
-| `panel/Panel.svelte` | A 布局根组件：品牌/搜索顶栏、记录横幅、分栏工作区、页脚和预览浮层 |
+| `panel/Panel.svelte` | 三布局根组件：共享搜索输入框、记录横幅、布局宿主和页脚；grid 行显式绑定 |
 | `panel/SplitPreview.svelte` | A 的索引 + 常驻预览与工具栏 |
+| `panel/CommandList.svelte` | B 的排印列表 + 渐进槽位 + 底部预览抽屉 |
+| `panel/CardFlow.svelte`、`panel/FlowCard.svelte` | C 的弹簧轨道、附近卡片、RECENT 分隔线、信息条和细节浮层 |
 | `panel/SearchBox.svelte` | 搜索框、搜索态与结果计数 |
 | `panel/HistoryList.svelte`、`panel/HistoryItem.svelte` | 收藏/最近分区、双行索引项、来源图标、星标和搜索高亮 |
 | `panel/Preview.svelte` | 文本/长文/代码/链接/图片元信息/颜色/文件预览；图片资源 URL 尚未由后端提供 |
@@ -42,14 +44,14 @@ M0-7 把原来一个文件的 `src/App.svelte` 拆成下面这些文件，外观
 
 ## 设置窗口壳
 
-- `settings.html` 与 `index.html` 是 Vite 的两个构建入口。通用页通过 `get_settings` / `set_settings` 持久化 `panel.layout`、`panel.density`、`theme`、`feedback.motion`；保存后由前端广播 `settings:changed`，面板无需后端新增事件即可同步。B/C 与舒适密度只禁用占位。
+- `settings.html` 与 `index.html` 是 Vite 的两个构建入口。通用页通过 `get_settings` / `set_settings` 持久化 `panel.layout`、`panel.density`、`theme`、`feedback.motion`；保存后由前端广播 `settings:changed`，面板无需后端新增事件即可同步。A/B/C 均可切换，舒适密度仍是禁用占位。
 - 窗口定义集中在 `settings_window.rs`，不在启动配置中创建第二个 WebView；调用异步命令 `open_settings` 才创建。重复打开会显示并聚焦已有窗口，关闭后销毁，下次重新创建。
 - `lib.rs` 按 `settings` 标签放行关闭请求，关闭设置窗口不会走面板的退出分支。托盘入口由后续任务接入；从菜单或托盘回调调用 `settings_window::open()` 时须先用异步运行时切离主线程，避免 Windows WebView2 创建窗口时死锁。
 
 ## 主题变量
 
 - v7 的 A/B/C 材质、状态色、设置页和动效常量统一放在 `theme.css`；组件不另建调色板。`data-theme="system|light|dark"` 控制主题，系统 reduce 优先于动效设置。
-- alpha.2 有效布局与密度分别为 A 和紧凑。A 行高 64px；后端窗口尚未接入 M1-P 的 680px 几何算法时，CSS 在 600px 以下使用 184px 索引列。
+- alpha.3 有效布局为 A/B/C，密度仍为紧凑。A 行高 64px、B 行高 56px；后端窗口尚未接入 M1-P 的按布局几何算法时，窄窗口使用响应式收缩，不自动切布局。
 
 ## 不能动的细节（都是 G0 踩过的坑）
 
@@ -70,4 +72,4 @@ M0-7 把原来一个文件的 `src/App.svelte` 拆成下面这些文件，外观
 
 离线回归使用 `node tools/test-panel-key-repeat.mjs` 编译真实 `PanelState`；实机仍需覆盖呼出、激活成功/失败、打字搜索、中文输入、数字键、Enter、Ctrl+Enter、Esc 和被动提示。离线测试不能替代输入法和焦点实机验收。
 
-M1-U alpha.2 的展示限制：普通 quick 的 Rust 钩子目前不投递 Space，并在投递 Esc 后直接收起窗口，因此完整“Space 开浮层、再次 Space / Esc 仅关浮层”还需要后续后端键位转发配合；前端 `navigate("Space")`、浮层和 activated 路径已就位。本任务按约束未改 Rust。
+M1-U alpha.3 的普通 quick 钩子补投 Space 与 C 的左右键；Space 在抬起时投递，避免长按反复开合。Esc 不再由 Rust 转发后无条件收起，而是交给前端 `navigate("Escape")` 分层：有浮层只关浮层，无浮层仍走 `hide_panel`。因此普通 quick 无浮层 Esc 的 `hide_source` 日志来源现在是 `frontend`；搜索模式、粘贴、焦点与首键补发路径不变。

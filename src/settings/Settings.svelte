@@ -72,7 +72,7 @@
     <div class="content">
       {#if page === "general"}
         <section class="page">
-          <div><h2>面板与呼出</h2><p class="page-intro">布局、主题和动效是独立维度。alpha.2 先提供分栏预览。</p></div>
+          <div><h2>面板与呼出</h2><p class="page-intro">布局、主题和动效是独立维度。A/B/C 共用历史、收藏、搜索与选中项。</p></div>
           <div class="group">
             <span class="group-title">面板布局</span>
             <div class="layout-options" role="radiogroup" aria-label="面板布局">
@@ -81,13 +81,15 @@
                 <svg class="mini" viewBox="0 0 180 62" aria-hidden="true"><rect x="66" y="19" width="102" height="34" fill="currentColor" opacity=".12"/><path d="M62 0v62M0 16h180M74 25h92M74 35h74M74 45h58M10 27h40M10 39h40M10 51h40" stroke="currentColor" fill="none"/></svg>
                 <strong>分栏预览</strong><small>默认。窄列表与常驻大预览，适合核对内容。</small>
               </button>
-              <button class="layout-option future" type="button" role="radio" aria-checked="false" disabled title="后续版本提供">
+              <button class="layout-option" type="button" role="radio" aria-checked={preferences.layout === "b"} disabled={loading || saving} onclick={() => save({ panel: { layout: "b" } }, "已使用极简列表")}>
+                <span class="layout-check">{preferences.layout === "b" ? "✓" : ""}</span>
                 <svg class="mini" viewBox="0 0 180 62" aria-hidden="true"><path d="M0 19h180" stroke="currentColor" stroke-width="3"/><path d="M12 9h130M12 30h150M12 42h138M12 54h120" stroke="currentColor" fill="none"/><path d="M4 25v34" stroke="currentColor" stroke-width="3"/></svg>
-                <strong>极简列表 <em>后续版本</em></strong><small>大搜索行与纯文本列表，当前不可切换。</small>
+                <strong>极简列表</strong><small>大搜索行、排印列表与底部预览抽屉。</small>
               </button>
-              <button class="layout-option future" type="button" role="radio" aria-checked="false" disabled title="后续版本提供">
+              <button class="layout-option" type="button" role="radio" aria-checked={preferences.layout === "c"} disabled={loading || saving} onclick={() => save({ panel: { layout: "c" } }, "已使用卡片流")}>
+                <span class="layout-check">{preferences.layout === "c" ? "✓" : ""}</span>
                 <svg class="mini" viewBox="0 0 180 62" aria-hidden="true"><path d="M0 15h180M0 51h180" stroke="currentColor" fill="none"/><path d="M18 17h34v34H18zM128 17h34v34h-34z" fill="currentColor" opacity=".16"/><path d="M66 7h48v48H66z" fill="currentColor" opacity=".28" stroke="currentColor" stroke-width="2"/></svg>
-                <strong>卡片流 <em>后续版本</em></strong><small>视觉缩略卡横向移动，当前不可切换。</small>
+                <strong>卡片流</strong><small>视觉缩略卡横向移动，Space 查看完整细节。</small>
               </button>
             </div>
           </div>
@@ -135,13 +137,10 @@
   .layout-options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
   .layout-option { position: relative; display: grid; align-content: start; gap: 9px; padding: 12px; border: 1px solid var(--settings-line); border-radius: var(--radius-sm); background: transparent; color: var(--settings-text); text-align: left; }
   .layout-option[aria-checked="true"] { border-color: var(--settings-accent); background: var(--settings-selected); box-shadow: inset 3px 0 0 var(--settings-accent); }
-  .layout-option.future { opacity: .58; }
   .layout-option strong { font-size: 12px; }
-  .layout-option strong em { display: block; margin-top: 3px; color: var(--settings-muted); font-size: 9px; font-style: normal; font-weight: 400; }
   .layout-option small { color: var(--settings-muted); font-size: 10px; line-height: 1.5; }
   .layout-check { position: absolute; right: 9px; top: 8px; color: var(--settings-accent); font: 11px var(--font-mono); }
   .mini { width: 100%; height: 62px; border: 1px solid currentColor; color: var(--settings-accent); background: var(--a-preview); }
-  .future .mini { color: var(--settings-muted); background: var(--settings-nav); }
   .card { border: 1px solid var(--settings-line); border-radius: var(--radius-md); background: var(--settings-card); }
   .setting { min-height: 64px; display: flex; align-items: center; gap: 18px; padding: 13px 16px; border-bottom: 1px solid var(--settings-line); }
   .setting:last-child { border-bottom: 0; }

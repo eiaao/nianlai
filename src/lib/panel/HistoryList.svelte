@@ -4,10 +4,11 @@
   import HistoryItem from "./HistoryItem.svelte";
   import SelectionRail from "./SelectionRail.svelte";
 
-  let { panel }: { panel: PanelState } = $props();
+  let { panel, layout = "a" }: { panel: PanelState; layout?: "a" | "b" } = $props();
 </script>
 
 <ul
+  class:command-list={layout === "b"}
   bind:this={panel.list}
   role="listbox"
   tabindex="-1"
@@ -15,7 +16,7 @@
   aria-busy={panel.busy || panel.favoritePending !== null}
   aria-activedescendant={panel.currentItem ? `history-option-${panel.currentItem.id}` : undefined}
 >
-  <SelectionRail {panel} />
+  <SelectionRail {panel} {layout} />
   {#if panel.favoriteCount > 0 && panel.visibleItems.length > 0}
     <li class="section-heading" role="presentation"><svg viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path d="m10 2.8 2.15 4.35 4.8.7-3.47 3.38.82 4.77L10 13.74 5.7 16l.82-4.77L3.05 7.85l4.8-.7L10 2.8Z"/></svg><span>收藏 {panel.favoriteCount} / PINNED</span></li>
   {/if}
@@ -23,7 +24,7 @@
     {#if panel.favoriteCount > 0 && index === panel.favoriteCount}
       <li class="section-heading" role="presentation"><span>最近 {panel.visibleItems.length - panel.favoriteCount} / RECENT</span></li>
     {/if}
-    <HistoryItem {panel} {item} {index} />
+    <HistoryItem {panel} {item} {index} {layout} />
   {:else}
     <li class="empty">
       <strong>{panel.query ? `没有找到“${panel.query}”` : "还没有记录"}</strong>
@@ -38,4 +39,7 @@
   .section-heading svg { width: 14px; height: 14px; color: var(--star); }
   .empty { display: grid; gap: var(--space-2); margin: 0; padding: 38px 18px; color: var(--muted); font-size: 12px; line-height: 1.8; }
   .empty strong { color: var(--text); font-weight: 600; overflow-wrap: anywhere; }
+  .command-list { padding: 4px 0; scrollbar-color: var(--line) transparent; }
+  .command-list .section-heading { height: 28px; padding: 0 21px; }
+  .command-list .empty { padding: 45px 22px; font-size: 13px; }
 </style>
