@@ -591,6 +591,7 @@ export class PanelState {
       case "Enter": void this.choose(this.selected, "paste", event); break;
       case "Shift+Enter": void this.choose(this.selected, "copy", event); break;
       case "Ctrl+Enter": void this.choose(this.selected, "text", event); break;
+      case "Ctrl+D": if (this.currentItem) void this.toggleFavorite(this.currentItem.id); break;
       case "Escape":
         if (this.previewOpen) { this.previewOpen = false; break; }
         if (this.interaction === "activated" && event) this.armDomChoice({ session: this.session, panelMode: this.mode,
@@ -645,7 +646,9 @@ export class PanelState {
         }
         const unmodified = !event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey;
         const horizontal = this.preferences.layout === "c" && (event.key === "ArrowLeft" || event.key === "ArrowRight");
-        const action = event.key === "Enter" && !event.altKey && !event.metaKey && !(event.ctrlKey && event.shiftKey)
+        const action = event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey && event.key.toLowerCase() === "d"
+          ? "Ctrl+D"
+          : event.key === "Enter" && !event.altKey && !event.metaKey && !(event.ctrlKey && event.shiftKey)
           ? event.ctrlKey ? "Ctrl+Enter" : event.shiftKey ? "Shift+Enter" : "Enter"
           : unmodified && (horizontal || /^[1-9]$/.test(event.key) || event.key === " " || ["Escape", "ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End"].includes(event.key)) ? event.key === " " ? "Space" : event.key : null;
         if (action) {
@@ -846,7 +849,10 @@ export class PanelState {
         if (this.visible && payload.session === this.session) this.receiveForegroundRevision(payload.revision, receivedAt);
       });
       await subscribe(ipc.onPanelKey, (payload) => {
-        if (this.visible && payload.session === this.session && this.interaction === "quick" && this.mode === "quick") this.navigate(payload.key);
+        if (!this.visible || payload.session !== this.session) return;
+        if (this.interaction === "quick" && this.mode === "quick") this.navigate(payload.key);
+        // 搜索模式不导航，但收藏键全局可用（钩子已吞键，必须经 panel:key 送达）。
+        else if (payload.key === "Ctrl+D" && this.currentItem) void this.toggleFavorite(this.currentItem.id);
       });
       await subscribe(ipc.onHistoryChanged, (payload) => {
         if (this.visible && payload.session === this.session) void refreshHistory();

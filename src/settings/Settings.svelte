@@ -22,6 +22,16 @@
   let saving = $state(false);
   let status = $state("正在读取设置…");
   let failed = $state(false);
+  // 系统“减少动画效果”状态：生效且用户选了非“关闭”时给出醒目提示，避免“设置了却没反应”的困惑。
+  let reducedMotion = $state(false);
+
+  onMount(() => {
+    const media = matchMedia("(prefers-reduced-motion: reduce)");
+    reducedMotion = media.matches;
+    const onMedia = () => { reducedMotion = media.matches; };
+    media.addEventListener("change", onMedia);
+    return () => media.removeEventListener("change", onMedia);
+  });
 
   function apply(settingsValue: AppSettings) {
     hotkey = settingsValue.hotkey ?? "Ctrl+`";
@@ -102,6 +112,9 @@
           <div class="group"><span class="group-title">外观与反馈</span><div class="card">
             <label class="setting"><span class="setting-copy"><strong>主题</strong><small>跟随系统，或独立固定为浅色 / 深色；切换布局不会覆盖它。</small></span><select value={preferences.theme} disabled={loading || saving} onchange={(event) => save({ theme: event.currentTarget.value as ThemePreference }, "主题已保存并应用")}><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></label>
             <label class="setting"><span class="setting-copy"><strong>动效强度</strong><small>系统“减少动态效果”始终优先；关闭后直接落位。</small></span><select value={preferences.motion} disabled={loading || saving} onchange={(event) => save({ feedback: { motion: event.currentTarget.value as MotionPreference } }, "动效强度已保存并应用")}><option value="soft">柔和</option><option value="spring">弹簧</option><option value="none">关闭</option></select></label>
+            {#if reducedMotion && preferences.motion !== "none"}
+              <p class="motion-warning" role="status">系统当前开启了“减少动画效果”，动效设置未生效。如需动画：Windows 设置 → 辅助功能 → 视觉效果 → 打开“动画效果”。</p>
+            {/if}
             <label class="setting"><span class="setting-copy"><strong>列表密度</strong><small>v0.1 提供紧凑密度；舒适档将在后续版本开放。</small></span><select value={preferences.density} disabled={loading || saving} onchange={(event) => save({ panel: { density: event.currentTarget.value as DensityPreference } }, "列表密度已保存")}><option value="compact">紧凑</option><option value="comfortable" disabled>舒适（后续版本）</option></select></label>
           </div></div>
         </section>

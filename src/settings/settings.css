@@ -14,3 +14,15 @@ button { cursor: pointer; }
 button:disabled { cursor: default; }
 [hidden] { display: none !important; }
 :focus-visible { outline: 2px solid var(--settings-accent); outline-offset: 3px; }
+
+/* 系统“减少动画效果”压过应用动效设置时的醒目提示 */
+.motion-warning {
+  margin: 2px 0 0;
+  padding: 8px 11px;
+  border: 1px solid var(--settings-caution, #a6791c);
+  border-radius: var(--settings-radius, 4px);
+  background: color-mix(in srgb, var(--settings-caution, #a6791c) 10%, transparent);
+  color: var(--settings-caution, #8a6410);
+  font-size: 11px;
+  line-height: 1.6;
+}

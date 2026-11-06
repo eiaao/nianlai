@@ -908,16 +908,20 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
             Some("Shift+Enter")
         } else if mods == Modifiers::CONTROL && vk == 0x0D {
             Some("Ctrl+Enter")
+        } else if mods == Modifiers::CONTROL && vk == 0x44 {
+            Some("Ctrl+D")
         } else {
             None
         };
         if let Some(name) = navigation {
-            // 确认、关闭与预览开合等到抬起再投递，避免卸钩后把配对抬起漏给目标控件，也避免长按 Space 反复切换。
+            // 确认、关闭、预览开合与收藏等到抬起再投递：避免卸钩后把配对抬起漏给目标控件，
+            // 也避免长按 Space 反复开合、长按 Ctrl+D 反复收藏/取消。
             if matches!(
                 name,
                 "Enter"
                     | "Shift+Enter"
                     | "Ctrl+Enter"
+                    | "Ctrl+D"
                     | "Escape"
                     | "Space"
                     | "1"
