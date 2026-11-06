@@ -13,13 +13,16 @@ impl Hooks {
     pub fn install(
         _: usize,
         _: &Target,
-        _: Shortcut,
+        _: Option<Shortcut>,
         _: Logger,
         _: u64,
         _: crate::platform::HookOptions,
         _: impl Fn(HookEvent) + Send + 'static,
     ) -> Result<Self> {
         Err("G0 仅支持 Windows".into())
+    }
+    pub fn set_hotkey(&self, _: Option<Shortcut>) -> Result<()> {
+        Ok(())
     }
     pub fn begin_search(&self, started: Instant) -> Result<Instant> {
         Ok(started)

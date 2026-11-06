@@ -3,9 +3,9 @@
 // NIANLAI_HOTKEY：矩阵工具指定呼出键。
 // NIANLAI_G0_AUTOCYCLE、NIANLAI_G0_SAMPLES：自动循环和示例数据，仍由原模块读取。
 // NIANLAI_G0_RESUSPEND_MIN：覆盖 memory.resuspend_minutes，支持小数分钟及 0（关闭）。
-// 设置命令只更新持久化配置；本次所有运行配置在启动时读取，重启后生效。
+// 呼出键保存后即时重新注册；其余运行配置仍按各自的生效策略读取。
 
-use crate::{log::Logger, platform};
+use crate::{hotkey, log::Logger};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::{
@@ -106,16 +106,7 @@ impl Issue {
 }
 
 pub fn parse_hotkey(value: &str) -> Result<Shortcut, String> {
-    let shortcut: Shortcut = value.parse().map_err(|_| "快捷键格式无效")?;
-    if shortcut == "Ctrl+Alt+Shift+Q".parse::<Shortcut>().unwrap()
-        || shortcut == "Ctrl+Alt+Shift+L".parse::<Shortcut>().unwrap()
-    {
-        return Err("呼出键不能占用退出键或采集调试键".into());
-    }
-    if !platform::hook::supported(&shortcut) {
-        return Err("此呼出键不受钩子支持".into());
-    }
-    Ok(shortcut)
+    hotkey::parse(value)
 }
 
 fn valid_path(value: &str) -> bool {
@@ -324,6 +315,10 @@ impl Store {
     pub fn set(&self, update: Value) -> Result<(Settings, Vec<Issue>), String> {
         if !update.is_object() {
             return Err("设置必须是 JSON 对象".into());
+        }
+        if let Some(value) = update.get("hotkey") {
+            // 加载旧文件仍逐字段降级；主动保存非法组合则拒绝整个更新，不能静默改回默认键。
+            parse_hotkey(value.as_str().ok_or("呼出快捷键必须是字符串")?)?;
         }
         let mut current = self.settings.lock().unwrap();
         let mut value = serde_json::to_value(&*current).unwrap();

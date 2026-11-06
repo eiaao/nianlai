@@ -22,7 +22,7 @@ M0-7 把原来一个文件的 `src/App.svelte` 拆成下面这些文件，外观
 | `panel/RecordBanner.svelte`、`panel/Footer.svelte` | J01 记录状态、上次结果、仅复制/失败结果条 |
 | `panel/SourceIcon.svelte` | `convertFileSrc` 图标与首字形降级 |
 | `panel/motion.ts`、`panel/SelectionRail.svelte` | 共用 SpringValue 与选中指示轨 |
-| `../settings/`、`/settings.html` | 设置窗口：通用页的布局、主题、动效、紧凑密度；其余分区占位 |
+| `../settings/`、`/settings.html` | 设置窗口：通用页的布局、呼出快捷键、主题、动效、紧凑密度；其余分区占位 |
 
 ## 状态流向
 
@@ -44,9 +44,11 @@ M0-7 把原来一个文件的 `src/App.svelte` 拆成下面这些文件，外观
 
 ## 设置窗口壳
 
-- `settings.html` 与 `index.html` 是 Vite 的两个构建入口。通用页通过 `get_settings` / `set_settings` 持久化 `panel.layout`、`panel.density`、`theme`、`feedback.motion`；保存后由前端广播 `settings:changed`，面板无需后端新增事件即可同步。A/B/C 均可切换，舒适密度仍是禁用占位。
+- `settings.html` 与 `index.html` 是 Vite 的两个构建入口。通用页通过 `get_settings` / `set_settings` 持久化 `panel.layout`、`panel.density`、`theme`、`feedback.motion` 和 `hotkey`；写盘及运行时换键完成后由后端统一广播 `settings:changed`。A/B/C 均可切换，舒适密度仍是禁用占位。
+- `HotkeyEditor.svelte` 用修饰键复选框与主键选择器编辑组合；`validate_hotkey` 是校验规则的唯一来源，异步旧回执不得覆盖当前草稿。外观自动保存，快捷键需校验通过后确认保存。`get_hotkey_status` 独立展示期望值、实际生效键及非致命注册错误，保存成功不等同于注册成功。
+- 后端换键先注销旧键再注册新键，失败不使用隐藏备用键；面板允许没有注册键，现有钩子只就地更新放行组合，不重置会话、吞键配对或焦点。离线及占用场景手测见 `tools/test-hotkey.md`。
 - 窗口定义集中在 `settings_window.rs`，不在启动配置中创建第二个 WebView；调用异步命令 `open_settings` 才创建。重复打开会显示并聚焦已有窗口，关闭后销毁，下次重新创建。
-- `lib.rs` 按 `settings` 标签放行关闭请求，关闭设置窗口不会走面板的退出分支。托盘入口由后续任务接入；从菜单或托盘回调调用 `settings_window::open()` 时须先用异步运行时切离主线程，避免 Windows WebView2 创建窗口时死锁。
+- `lib.rs` 按 `settings` 标签放行关闭请求，关闭设置窗口不会走面板的退出分支。托盘已提供“设置…”入口；从菜单或托盘回调调用 `settings_window::open()` 时先用异步运行时切离主线程，避免 Windows WebView2 创建窗口时死锁。
 
 ## 主题变量
 

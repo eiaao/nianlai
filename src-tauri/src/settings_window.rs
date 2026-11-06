@@ -28,7 +28,7 @@ pub fn open(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-/// 打开设置窗口的命令。异步命令跑在 Tauri 的异步线程上，避开上面说的死锁；面板前端现在不调用它。
+/// 打开设置窗口的命令。异步命令跑在 Tauri 的异步线程上，避开上面说的死锁。
 #[tauri::command]
 pub async fn open_settings(app: AppHandle) -> Result<(), String> {
     open(&app).map_err(|error| error.to_string())

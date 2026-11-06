@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import * as ipc from "../lib/ipc";
+  import HotkeyEditor from "./HotkeyEditor.svelte";
   import type { AppSettings, SettingsUpdate } from "../lib/ipc";
   import {
     applyPreferences, DEFAULT_PREFERENCES, normalizePreferences,
@@ -16,28 +17,30 @@
   ];
   let page = $state("general");
   let preferences = $state<Preferences>({ ...DEFAULT_PREFERENCES });
+  let hotkey = $state("Ctrl+`");
   let loading = $state(true);
   let saving = $state(false);
   let status = $state("正在读取设置…");
   let failed = $state(false);
 
   function apply(settingsValue: AppSettings) {
+    hotkey = settingsValue.hotkey ?? "Ctrl+`";
     preferences = normalizePreferences(settingsValue);
     applyPreferences(preferences);
   }
 
-  async function save(update: SettingsUpdate, message: string) {
-    if (saving || loading) return;
+  async function save(update: SettingsUpdate, message: string): Promise<AppSettings | null> {
+    if (saving || loading) return null;
     saving = true; failed = false; status = "正在保存…";
     try {
       const saved = await ipc.setSettings(update);
       apply(saved);
       status = message;
-      try { await ipc.publishSettings(saved); }
-      catch { status = `${message}；已打开面板将在下次启动时同步`; }
+      return saved;
     } catch (error) {
       failed = true;
-      status = error instanceof Error ? error.message : "设置未保存，原设置已保留";
+      status = error instanceof Error ? error.message : typeof error === "string" ? error : "设置未保存，原设置已保留";
+      return null;
     } finally {
       saving = false;
     }
@@ -46,7 +49,7 @@
   onMount(async () => {
     try {
       apply(await ipc.getSettings());
-      status = "改动自动保存，并同步到已打开的面板";
+      status = "外观改动自动保存；呼出快捷键校验通过后需确认保存，并即时应用";
     } catch {
       failed = true;
       status = "设置读取失败，当前显示默认值；请关闭窗口后重试";
@@ -64,7 +67,7 @@
     {#each pages as entry}
       <button type="button" class:active={page === entry.id} aria-current={page === entry.id ? "page" : undefined} onclick={() => { page = entry.id; }}>{entry.label}</button>
     {/each}
-    <div class="nav-foot">本地设置<br>无需手动保存</div>
+    <div class="nav-foot">本地设置<br>外观自动保存 · 快捷键确认保存</div>
   </nav>
 
   <main class="main">
@@ -94,6 +97,8 @@
             </div>
           </div>
 
+          <HotkeyEditor {hotkey} disabled={loading || saving} onsave={save} />
+
           <div class="group"><span class="group-title">外观与反馈</span><div class="card">
             <label class="setting"><span class="setting-copy"><strong>主题</strong><small>跟随系统，或独立固定为浅色 / 深色；切换布局不会覆盖它。</small></span><select value={preferences.theme} disabled={loading || saving} onchange={(event) => save({ theme: event.currentTarget.value as ThemePreference }, "主题已保存并应用")}><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></label>
             <label class="setting"><span class="setting-copy"><strong>动效强度</strong><small>系统“减少动态效果”始终优先；关闭后直接落位。</small></span><select value={preferences.motion} disabled={loading || saving} onchange={(event) => save({ feedback: { motion: event.currentTarget.value as MotionPreference } }, "动效强度已保存并应用")}><option value="soft">柔和</option><option value="spring">弹簧</option><option value="none">关闭</option></select></label>
@@ -103,7 +108,7 @@
       {:else}
         <section class="page placeholder">
           <h2>{pages.find((entry) => entry.id === page)?.label}</h2>
-          <p>此分区将在后续版本开放。本次只实现面板布局、主题、动效与紧凑密度，不展示未接线的假控件。</p>
+          <p>此分区将在后续版本开放。面板布局、呼出快捷键、主题、动效与紧凑密度位于“通用”，不展示未接线的假控件。</p>
         </section>
       {/if}
     </div>

@@ -1,6 +1,7 @@
 mod autocycle;
 mod capture;
 mod history;
+mod hotkey;
 mod log;
 mod panel;
 mod paste;
@@ -16,7 +17,6 @@ use panel::{Action, Controller};
 use serde_json::json;
 use std::time::Instant;
 use tauri::{AppHandle, Manager};
-use tauri_plugin_global_shortcut::{GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
 #[tauri::command]
 fn get_settings(app: AppHandle) -> settings::Settings {
@@ -24,16 +24,16 @@ fn get_settings(app: AppHandle) -> settings::Settings {
 }
 
 #[tauri::command]
-fn set_settings(app: AppHandle, settings: serde_json::Value) -> Result<settings::Settings, String> {
-    let (settings, issues) = app.state::<settings::Store>().set(settings)?;
-    let controller = app.state::<Controller>();
-    for issue in issues {
-        issue.record(&controller.logger);
-    }
-    controller
-        .logger
-        .event("settings_saved", json!({"reason":"设置已保存，重启后生效"}));
-    Ok(settings)
+async fn set_settings(
+    app: AppHandle,
+    settings: serde_json::Value,
+) -> Result<settings::Settings, String> {
+    // 注册/注销由插件派回主线程；不能在主线程持锁等待它们完成。
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<hotkey::Runtime>().save(&app, settings)
+    })
+    .await
+    .map_err(|_| "设置保存任务未完成，请重试".to_owned())?
 }
 
 #[tauri::command]
@@ -151,70 +151,6 @@ fn quit_prototype(app: AppHandle) -> Result<(), String> {
     panel::dispatch(&app, Action::QuitFrontend)
 }
 
-fn register_hotkeys(
-    app: &AppHandle,
-    logger: &log::Logger,
-    automatic: bool,
-    requested: &str,
-) -> Result<(), String> {
-    let exit: Shortcut = "Ctrl+Alt+Shift+Q".parse().map_err(|e| format!("{e}"))?;
-    if let Err(error) = app.global_shortcut().on_shortcut(exit, |app, _, event| {
-        if event.state == ShortcutState::Pressed {
-            app.state::<Controller>()
-                .logger
-                .event("quit_source", json!({"source":"hotkey"}));
-            let _ = panel::dispatch(app, Action::Quit);
-        }
-    }) {
-        logger.event("exit_hotkey_failed", json!({"error":error.to_string()}));
-        return Err(error.to_string());
-    }
-    logger.event(
-        "hotkey_registered",
-        json!({"purpose":"quit","shortcut":exit.to_string()}),
-    );
-    if automatic {
-        return Ok(());
-    }
-    for (index, accelerator) in [requested, "Ctrl+Shift+F12"].into_iter().enumerate() {
-        let attempt = (|| -> Result<Shortcut, String> {
-            let shortcut = settings::parse_hotkey(accelerator)?;
-            app.global_shortcut()
-                .on_shortcut(shortcut, |app, shortcut, event| {
-                    let started = Instant::now();
-                    if event.state == ShortcutState::Pressed {
-                        let target = platform::window::capture();
-                        let _ = panel::dispatch(
-                            app,
-                            Action::Toggle {
-                                started,
-                                target,
-                                alt: shortcut.mods.contains(Modifiers::ALT),
-                            },
-                        );
-                    }
-                })
-                .map_err(|e| e.to_string())?;
-            Ok(shortcut)
-        })();
-        match attempt {
-            Ok(shortcut) => {
-                app.state::<Controller>().set_hotkey(shortcut);
-                logger.event(
-                    "hotkey_registered",
-                    json!({"purpose":"panel","shortcut":shortcut.to_string(),"fallback":index==1}),
-                );
-                return Ok(());
-            }
-            Err(error) => logger.event(
-                "hotkey_registration_failed",
-                json!({"fallback":index==1,"error":error}),
-            ),
-        }
-    }
-    Err("呼出键和备用键均注册失败，请查看日志目录中的 panel 日志".into())
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // 守护者在这里就结束，不初始化 Tauri；真正的应用（--child）继续往下走。
@@ -228,6 +164,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_settings,
             set_settings,
+            hotkey::validate_hotkey,
+            hotkey::get_hotkey_status,
             get_history,
             search_history,
             get_favorites,
@@ -305,12 +243,13 @@ pub fn run() {
                         capture_logger.event("capture_start_failed", json!({"error":error}));
                     }
                 })?;
-            if let Err(error) =
-                register_hotkeys(app.handle(), &logger, automatic, &resolved.settings.hotkey)
-            {
-                logger.flush();
-                return Err(error.into());
-            }
+            hotkey::setup(
+                app.handle(),
+                &logger,
+                automatic,
+                &resolved.settings.hotkey,
+                std::env::var_os("NIANLAI_HOTKEY").is_some(),
+            );
             Ok(())
         })
         .on_window_event(|window, event| {

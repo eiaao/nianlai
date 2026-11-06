@@ -2,7 +2,7 @@
 // 这些函数直接返回 Tauri 的 Promise，不吞错误、不碰界面状态；出错怎么提示由 state.svelte.ts 决定。
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
-import { emit, listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 export type { UnlistenFn };
 
@@ -13,12 +13,21 @@ export type HistoryItem = {
 };
 export type HistorySnapshot = { items: HistoryItem[]; total: number; recording: boolean; last_recorded_ms: number | null; store_status: string | null };
 export type AppSettings = {
+  hotkey?: string;
   theme?: "system" | "light" | "dark";
   panel?: { layout?: "a" | "b" | "c"; density?: "compact" | "comfortable" };
   feedback?: { motion?: "none" | "soft" | "spring" };
   [key: string]: unknown;
 };
 export type SettingsUpdate = AppSettings;
+export type HotkeyValidation = {
+  hotkey: string; key: string; control: boolean; alt: boolean; shift: boolean; win: boolean;
+  warning: string | null;
+};
+export type HotkeyStatus = {
+  requested: string; active: string | null; error: string | null; detail: string | null;
+  warning: string | null; overridden: boolean; disabled: boolean;
+};
 export type SearchReply = { request_id: number; items: HistoryItem[] };
 export type SessionEvent = { session: number };
 export type Experiments = { searchBoxFocus?: boolean };
@@ -52,7 +61,8 @@ export const getFavorites = () => invoke<HistoryItem[]>("get_favorites");
 export const setFavorite = (id: number, favorite: boolean) => invoke<HistoryItem | null>("set_favorite", { id, favorite });
 export const getSettings = () => invoke<AppSettings>("get_settings");
 export const setSettings = (settings: SettingsUpdate) => invoke<AppSettings>("set_settings", { settings });
-export const publishSettings = (settings: AppSettings) => emit("settings:changed", settings);
+export const validateHotkey = (value: string) => invoke<HotkeyValidation>("validate_hotkey", { value });
+export const getHotkeyStatus = () => invoke<HotkeyStatus>("get_hotkey_status");
 export const openSettings = () => invoke("open_settings");
 export const frontendReady = () => invoke("frontend_ready");
 export const startSearch = (session: number) => invoke("start_search", { session });

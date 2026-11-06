@@ -447,8 +447,16 @@ impl Controller {
             }),
         })
     }
-    pub fn set_hotkey(&self, hotkey: Shortcut) {
-        self.inner.lock().unwrap().hotkey = Some(hotkey);
+    pub fn set_hotkey(&self, hotkey: Option<Shortcut>) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.hotkey = hotkey;
+        // 就地更新放行组合，不重建钩子、不改焦点，也不丢弃已吞按键的抬起配对。
+        if let Some(hooks) = &inner.hooks
+            && let Err(error) = hooks.set_hotkey(hotkey)
+        {
+            self.logger
+                .event("hotkey_hook_update_failed", json!({"error":error}));
+        }
     }
     pub fn start_capture(&self, app: &AppHandle, automatic: bool) -> platform::Result<()> {
         self.history.initialize();
@@ -683,7 +691,7 @@ impl Panel {
             self.hooks = Some(Hooks::install(
                 window::handle(&self.window)?,
                 &self.target,
-                self.hotkey.ok_or("呼出键尚未注册")?,
+                self.hotkey,
                 logger.clone(),
                 session,
                 platform::HookOptions {

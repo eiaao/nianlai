@@ -1,7 +1,7 @@
 use crate::{
     log::Logger,
     panel::{self, Action, Controller},
-    platform,
+    platform, settings_window,
 };
 use serde_json::json;
 use std::time::Instant;
@@ -14,6 +14,7 @@ use tauri::{
 use tauri_plugin_autostart::ManagerExt;
 
 const OPEN_PANEL: &str = "tray_open_panel";
+const SETTINGS: &str = "tray_settings";
 const AUTOSTART: &str = "tray_autostart";
 const QUIT: &str = "tray_quit";
 
@@ -33,6 +34,7 @@ pub fn autostart() -> TauriPlugin<Wry> {
 pub fn setup(app: &AppHandle, logger: &Logger) -> Result<(), Box<dyn std::error::Error>> {
     logger.event("单实例：主实例", json!({}));
     let open = MenuItem::with_id(app, OPEN_PANEL, "打开面板", true, None::<&str>)?;
+    let settings = MenuItem::with_id(app, SETTINGS, "设置…", true, None::<&str>)?;
     let query = app.autolaunch().is_enabled();
     let state = autostart_menu_state(app, &query);
     let autostart = CheckMenuItem::with_id(
@@ -44,7 +46,7 @@ pub fn setup(app: &AppHandle, logger: &Logger) -> Result<(), Box<dyn std::error:
         None::<&str>,
     )?;
     let quit = MenuItem::with_id(app, QUIT, "退出", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&open, &autostart, &quit])?;
+    let menu = Menu::with_items(app, &[&open, &settings, &autostart, &quit])?;
     let menu_autostart = autostart.clone();
     let icon = app.default_window_icon().cloned().ok_or("托盘图标不存在")?;
 
@@ -55,6 +57,14 @@ pub fn setup(app: &AppHandle, logger: &Logger) -> Result<(), Box<dyn std::error:
         .show_menu_on_left_click(false)
         .on_menu_event(move |app, event| match event.id().as_ref() {
             OPEN_PANEL => open_panel(app),
+            SETTINGS => {
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    if settings_window::open(&app).is_err() {
+                        record(&app, "设置：窗口打开失败");
+                    }
+                });
+            }
             AUTOSTART => {
                 let manager = app.autolaunch();
                 let (update, query) = update_autostart(

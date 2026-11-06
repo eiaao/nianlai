@@ -278,6 +278,10 @@ fn report_trace(logger: &Logger, session: u64, stage: &str, source: &str, handle
 }
 
 enum Command {
+    Hotkey {
+        shortcut: Option<Shortcut>,
+        reply: mpsc::SyncSender<()>,
+    },
     Activation {
         ready: bool,
         reply: mpsc::SyncSender<()>,
@@ -416,10 +420,10 @@ fn is_modifier(vk: u16) -> bool {
 
 // 下面两个合起来和 keyboard() 原逻辑里放行的组合一致（停留规则单独用，原逻辑那段没动，测试钉住一致）。
 // 样机自己的全局快捷键：呼出键，以及原逻辑里的 exit（退出键 Ctrl+Alt+Shift+Q、采集调试键 Ctrl+Alt+Shift+L）。
-fn app_shortcut(vk: u16, mods: Modifiers, hotkey: (u16, Modifiers)) -> bool {
+fn app_shortcut(vk: u16, mods: Modifiers, hotkey: Option<(u16, Modifiers)>) -> bool {
     let exit = matches!(vk, 0x51 | 0x4c)
         && mods == (Modifiers::CONTROL | Modifiers::ALT | Modifiers::SHIFT);
-    (vk == hotkey.0 && mods == hotkey.1) || exit
+    hotkey.is_some_and(|hotkey| vk == hotkey.0 && mods == hotkey.1) || exit
 }
 // 系统组合：Win 组合、Alt+Tab。
 fn system_combo(vk: u16, mods: Modifiers) -> bool {
@@ -525,7 +529,7 @@ struct Context {
     drain_rechecked_presses: usize,
     foreground_trace: Option<foreground::Trace>,
     bounds: RECT,
-    hotkey: (u16, Modifiers),
+    hotkey: Option<(u16, Modifiers)>,
     replay: mpsc::SyncSender<ReplayKey>,
     dropped: Arc<AtomicUsize>,
     pending: Option<Instant>,
@@ -537,6 +541,11 @@ struct Context {
     hint_state: HintState,
 }
 impl Context {
+    fn set_hotkey(&mut self, shortcut: Option<Shortcut>) {
+        self.hotkey =
+            shortcut.and_then(|shortcut| shortcut_vk(&shortcut).map(|vk| (vk, shortcut.mods)));
+    }
+
     fn original_hint_keys_held(&self) -> bool {
         // 搜索首键已补发后的旧 swallowed 数组不代表仍按住；只有钩子一直在位时才看它。
         ((self.hint.is_some() && self.hint != Some(HintMode::Search)) || self.pending.is_some())
@@ -689,7 +698,7 @@ unsafe extern "system" fn original_destroyed(
     });
 }
 
-// 覆盖全局快捷键插件可注册的常用键；未知键在注册前回退，避免钩子阻断呼出键。
+// 覆盖全局快捷键插件可注册的常用键；未知键在保存前拒绝，避免钩子阻断呼出键。
 pub fn shortcut_vk(shortcut: &Shortcut) -> Option<u16> {
     let key = shortcut.key.to_string();
     if let Some(key) = key.strip_prefix("Key").filter(|key| key.len() == 1) {
@@ -852,7 +861,9 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
             && mods == (Modifiers::CONTROL | Modifiers::ALT | Modifiers::SHIFT);
         if mods.contains(Modifiers::SUPER)
             || (vk == 0x09 && mods.contains(Modifiers::ALT))
-            || (vk == context.hotkey.0 && mods == context.hotkey.1)
+            || context
+                .hotkey
+                .is_some_and(|hotkey| vk == hotkey.0 && mods == hotkey.1)
             || exit
         {
             if pressed {
@@ -1152,7 +1163,7 @@ impl Hooks {
     pub fn install(
         window: usize,
         target: &Target,
-        shortcut: Shortcut,
+        shortcut: Option<Shortcut>,
         logger: Logger,
         session: u64,
         options: HookOptions,
@@ -1163,7 +1174,13 @@ impl Hooks {
         let monitor = options.monitor;
         let restricted = options.restricted;
         let bounds = super::window::rect(window)?;
-        let vk = shortcut_vk(&shortcut).ok_or("不支持此快捷键")?;
+        let hotkey = shortcut
+            .map(|shortcut| {
+                shortcut_vk(&shortcut)
+                    .map(|vk| (vk, shortcut.mods))
+                    .ok_or("不支持此快捷键")
+            })
+            .transpose()?;
         let (sender, receiver) = mpsc::sync_channel(128);
         let relay = thread::Builder::new()
             .name("panel-hook-events".into())
@@ -1192,7 +1209,7 @@ impl Hooks {
                 drain_snapshot_counts:key_state::Counts::default(), drain_ignored_callbacks:key_state::Counts::default(),
                 drain_requires_recheck:false, drain_recheck_available:false, drain_recheck_samples:0,
                 drain_rechecked_releases:0, drain_rechecked_presses:0,
-                bounds, hotkey: (vk, shortcut.mods), replay: replay_sender,
+                bounds, hotkey, replay: replay_sender,
                 foreground_trace: foreground::Trace::from_env(&logger, session, window, target),
                 dropped: overflow, pending: None, swallowed: [false; 256], release_action: [None; 256],
                 hint: None, hint_state: HintState::new(),
@@ -1221,6 +1238,14 @@ impl Hooks {
                     if message.message == HOOK_COMMAND {
                         while let Ok(command) = commands.try_recv() {
                             match command {
+                                Command::Hotkey { shortcut, reply } => {
+                                    CONTEXT.with(|context| {
+                                        if let Some(context) = context.borrow_mut().as_mut() {
+                                            context.set_hotkey(shortcut);
+                                        }
+                                    });
+                                    let _ = reply.send(());
+                                }
                                 Command::Activation { ready, reply } => {
                                     CONTEXT.with(|context| {
                                         if let Some(context) = context.borrow_mut().as_mut() {
@@ -1381,6 +1406,14 @@ impl Hooks {
         self.switched.load(Ordering::Acquire)
     }
 
+    pub fn set_hotkey(&self, shortcut: Option<Shortcut>) -> Result<()> {
+        let (reply, receiver) = mpsc::sync_channel(1);
+        self.command(Command::Hotkey { shortcut, reply })?;
+        receiver
+            .recv_timeout(REPLAY_WAIT)
+            .map_err(|e| e.to_string())
+    }
+
     pub fn activation(&self, ready: bool) -> Result<()> {
         let (reply, receiver) = mpsc::sync_channel(1);
         self.command(Command::Activation { ready, reply })?;
@@ -1496,7 +1529,7 @@ mod tests {
             drain_rechecked_presses: 0,
             foreground_trace: None,
             bounds: RECT::default(),
-            hotkey: (V, Modifiers::CONTROL),
+            hotkey: Some((V, Modifiers::CONTROL)),
             replay,
             dropped: Arc::new(AtomicUsize::new(0)),
             pending: None,
@@ -1505,6 +1538,25 @@ mod tests {
             hint: None,
             hint_state: HintState::new(),
         }
+    }
+
+    #[test]
+    fn unavailable_or_replaced_hotkey_keeps_navigation_and_existing_key_pairs() {
+        let (sender, _) = mpsc::sync_channel(1);
+        let mut context = test_context(sender, Arc::new(Monitor::new(0, 0)));
+        context.swallowed[V as usize] = true;
+        context.release_action[V as usize] = Some("Space");
+        context.set_hotkey(Some("Alt+V".parse().unwrap()));
+        assert!(app_shortcut(V, Modifiers::ALT, context.hotkey));
+        assert!(!app_shortcut(V, Modifiers::CONTROL, context.hotkey));
+        context.set_hotkey(None);
+        assert_eq!(context.hotkey, None);
+        assert!(!app_shortcut(V, Modifiers::ALT, context.hotkey));
+        let exit = Modifiers::CONTROL | Modifiers::ALT | Modifiers::SHIFT;
+        assert!(app_shortcut(0x51, exit, context.hotkey));
+        assert!(context.swallowed[V as usize]);
+        assert_eq!(context.release_action[V as usize], Some("Space"));
+        assert_eq!(activation_route(None, false, false, false), None);
     }
 
     #[test]
@@ -2308,14 +2360,14 @@ mod tests {
             for vk in 0..=255u16 {
                 for mods in all_mods() {
                     assert_eq!(
-                        app_shortcut(vk, mods, hotkey) || system_combo(vk, mods),
+                        app_shortcut(vk, mods, Some(hotkey)) || system_combo(vk, mods),
                         original_passthrough(vk, mods, hotkey),
                         "{vk:#x} {mods:?} {hotkey:?}"
                     );
                 }
             }
         }
-        let alt_v = (V, Modifiers::ALT);
+        let alt_v = Some((V, Modifiers::ALT));
         let exit = Modifiers::CONTROL | Modifiers::ALT | Modifiers::SHIFT;
         assert!(app_shortcut(V, Modifiers::ALT, alt_v), "呼出键");
         assert!(
