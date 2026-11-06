@@ -26,6 +26,81 @@ use windows::{
     core::PWSTR,
 };
 
+/// 面板设计尺寸（96 DPI 逻辑像素）：v7 面板自然宽 680、高 520。
+/// `show`（光标附近）与 `show_auto`（右下角 fallback）共用，避免两处各写一遍。
+const PANEL_WIDTH: f64 = 680.0;
+const PANEL_HEIGHT: f64 = 520.0;
+/// 面板与光标/工作区边缘的间距（96 DPI 逻辑像素）。
+const PANEL_GAP: i32 = 6;
+/// 右下角 fallback 距工作区边缘的留白（96 DPI 逻辑像素）。
+const PANEL_AUTO_MARGIN: f64 = 12.0;
+
+/// 面板尺寸按显示器 DPI 缩放（保持原 `(值 * dpi / 96).round()` 语义），
+/// 工作区放不下时按工作区自适应，至少 1px 防退化。
+fn panel_size(work: &RECT, dpi_x: u32, dpi_y: u32) -> (i32, i32) {
+    let width = scale_dpi(PANEL_WIDTH, dpi_x)
+        .min(work.right - work.left)
+        .max(1);
+    let height = scale_dpi(PANEL_HEIGHT, dpi_y)
+        .min(work.bottom - work.top)
+        .max(1);
+    (width, height)
+}
+
+fn scale_dpi(value: f64, dpi: u32) -> i32 {
+    (value * dpi as f64 / 96.0).round() as i32
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Placement {
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+}
+
+impl Placement {
+    /// 面板矩形任何情况下不超出工作区。（仅测试断言使用）
+    #[cfg(test)]
+    fn within_work(&self, work: &RECT) -> bool {
+        self.x >= work.left
+            && self.y >= work.top
+            && self.x + self.width <= work.right
+            && self.y + self.height <= work.bottom
+    }
+}
+
+/// 光标附近的摆放位置（纯函数，便于测试）：垂直方向光标下方优先，放不下放上方，
+/// 上下都不够时贴工作区顶部（保证面板顶栏与列表可见）；水平方向贴光标并夹紧在工作区内。
+/// `anchor_top`/`anchor_bottom` 为光标矩形（无光标目标时传光标点，两者相等）。
+fn place_near_anchor(
+    work: &RECT,
+    anchor_x: i32,
+    anchor_top: i32,
+    anchor_bottom: i32,
+    gap: i32,
+    width: i32,
+    height: i32,
+) -> Placement {
+    let below = anchor_bottom + gap;
+    let above = anchor_top - gap - height;
+    let y = if below + height <= work.bottom {
+        below
+    } else if above >= work.top {
+        above
+    } else {
+        work.top
+    };
+    // panel_size 保证 width <= 工作区宽，max 再防退化输入导致 clamp 区间倒置。
+    let x = anchor_x.clamp(work.left, (work.right - width).max(work.left));
+    Placement {
+        x,
+        y,
+        width,
+        height,
+    }
+}
+
 pub fn hwnd(value: usize) -> HWND {
     HWND(value as *mut _)
 }
@@ -178,16 +253,22 @@ pub fn no_activate(panel: &WebviewWindow, enabled: bool) -> Result<()> {
 pub fn show(panel: &WebviewWindow, target: &Target) -> Result<()> {
     no_activate(panel, true)?;
     unsafe {
-        let mut point = POINT::default();
-        if let Some(caret) = target.caret {
-            point = POINT {
-                x: caret.left,
-                y: caret.top,
-            };
-        } else {
-            GetCursorPos(&mut point).map_err(|e| e.to_string())?;
-        }
-        let monitor = MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST);
+        // 无光标目标时以光标点为零高度锚点，走同一套下方优先 → 上方 → 贴顶规则。
+        let (anchor_x, anchor_top, anchor_bottom) = match target.caret {
+            Some(caret) => (caret.left, caret.top, caret.bottom),
+            None => {
+                let mut point = POINT::default();
+                GetCursorPos(&mut point).map_err(|e| e.to_string())?;
+                (point.x, point.y, point.y)
+            }
+        };
+        let monitor = MonitorFromPoint(
+            POINT {
+                x: anchor_x,
+                y: anchor_top,
+            },
+            MONITOR_DEFAULTTONEAREST,
+        );
         let mut info = MONITORINFO {
             cbSize: size_of::<MONITORINFO>() as u32,
             ..Default::default()
@@ -198,22 +279,25 @@ pub fn show(panel: &WebviewWindow, target: &Target) -> Result<()> {
         let (mut dpi_x, mut dpi_y) = (96, 96);
         let _ = GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y);
         let work = info.rcWork;
-        let width = ((420.0 * dpi_x as f64 / 96.0).round() as i32).min(work.right - work.left);
-        let height = ((520.0 * dpi_y as f64 / 96.0).round() as i32).min(work.bottom - work.top);
-        let x = point.x.clamp(work.left, work.right - width);
-        let gap = (6 * dpi_y / 96) as i32;
-        let y = if let Some(caret) = target.caret {
-            let below = caret.bottom + gap;
-            if below + height <= work.bottom {
-                below
-            } else {
-                caret.top - gap - height
-            }
-        } else {
-            point.y + gap
-        }
-        .clamp(work.top, work.bottom - height);
-        present(panel, x, y, width, height)
+        let (width, height) = panel_size(&work, dpi_x, dpi_y);
+        // 保持原整数截断语义（125% 缩放下 gap 与旧行为一致）。
+        let gap = PANEL_GAP * (dpi_y as i32) / 96;
+        let placement = place_near_anchor(
+            &work,
+            anchor_x,
+            anchor_top,
+            anchor_bottom,
+            gap,
+            width,
+            height,
+        );
+        present(
+            panel,
+            placement.x,
+            placement.y,
+            placement.width,
+            placement.height,
+        )
     }
 }
 
@@ -231,12 +315,13 @@ pub fn show_auto(panel: &WebviewWindow) -> Result<()> {
         let (mut dpi_x, mut dpi_y) = (96, 96);
         let _ = GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y);
         let work = info.rcWork;
-        let margin_x = (12.0 * dpi_x as f64 / 96.0).round() as i32;
-        let margin_y = (12.0 * dpi_y as f64 / 96.0).round() as i32;
-        let width = ((420.0 * dpi_x as f64 / 96.0).round() as i32)
-            .min((work.right - work.left - 2 * margin_x).max(1));
-        let height = ((520.0 * dpi_y as f64 / 96.0).round() as i32)
-            .min((work.bottom - work.top - 2 * margin_y).max(1));
+        let margin_x = scale_dpi(PANEL_AUTO_MARGIN, dpi_x);
+        let margin_y = scale_dpi(PANEL_AUTO_MARGIN, dpi_y);
+        // 右下角 fallback 与光标附近呼出共用同一尺寸来源（680×520，DPI 缩放一致）。
+        let width =
+            scale_dpi(PANEL_WIDTH, dpi_x).min((work.right - work.left - 2 * margin_x).max(1));
+        let height =
+            scale_dpi(PANEL_HEIGHT, dpi_y).min((work.bottom - work.top - 2 * margin_y).max(1));
         present(
             panel,
             work.right - margin_x - width,
@@ -540,4 +625,126 @@ pub fn rect(window: usize) -> Result<RECT> {
         GetWindowRect(hwnd(window), &mut rect).map_err(|e| e.to_string())?;
     }
     Ok(rect)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn work(left: i32, top: i32, right: i32, bottom: i32) -> RECT {
+        RECT {
+            left,
+            top,
+            right,
+            bottom,
+        }
+    }
+
+    #[test]
+    fn panel_size_scales_with_dpi_and_caps_to_work_area() {
+        // 100% DPI：680×520 原样。
+        assert_eq!(panel_size(&work(0, 0, 1920, 1080), 96, 96), (680, 520));
+        // 150% DPI：1020×780。
+        assert_eq!(panel_size(&work(0, 0, 3000, 2000), 144, 144), (1020, 780));
+        // 宽度不足：按工作区宽自适应；高度不足：按工作区高自适应。
+        assert_eq!(panel_size(&work(0, 0, 500, 1080), 96, 96), (500, 520));
+        assert_eq!(panel_size(&work(0, 0, 1920, 400), 96, 96), (680, 400));
+        // 高 DPI 下工作区比缩放后尺寸小：同样自适应。
+        assert_eq!(panel_size(&work(0, 0, 900, 700), 144, 144), (900, 700));
+    }
+
+    #[test]
+    fn places_below_caret_when_space_allows() {
+        let work_area = work(0, 0, 1920, 1080);
+        let p = place_near_anchor(&work_area, 400, 300, 316, 6, 680, 520);
+        assert_eq!(p.y, 322); // caret_bottom + gap
+        assert_eq!(p.x, 400);
+        assert!(p.within_work(&work_area));
+    }
+
+    #[test]
+    fn places_above_caret_when_below_insufficient() {
+        // 光标在屏幕底部，下方放不下 → 放上方。
+        let work_area = work(0, 0, 1920, 1080);
+        let p = place_near_anchor(&work_area, 400, 1000, 1016, 6, 680, 520);
+        assert_eq!(p.y, 1000 - 6 - 520);
+        assert!(p.within_work(&work_area));
+    }
+
+    #[test]
+    fn sticks_to_work_top_when_neither_side_fits() {
+        // 矮屏幕（可用高度 < 面板高度）：上下都不够 → 贴工作区顶，顶栏与列表可见。
+        let work_area = work(0, 0, 1920, 400);
+        let p = place_near_anchor(&work_area, 400, 180, 196, 6, 680, 400);
+        assert_eq!(p.y, 0);
+        assert!(p.within_work(&work_area));
+        // 光标贴屏幕顶：上方同样不够 → 贴顶。
+        let p = place_near_anchor(&work_area, 400, 0, 16, 6, 680, 400);
+        assert_eq!(p.y, 0);
+        // 任务栏在顶部（work.top = 40）的矮屏幕：贴的是工作区顶而不是屏幕顶。
+        let work_area = work(0, 40, 1920, 440);
+        let p = place_near_anchor(&work_area, 400, 220, 236, 6, 680, 400);
+        assert_eq!(p.y, 40);
+        assert!(p.within_work(&work_area));
+    }
+
+    #[test]
+    fn adapts_width_and_clamps_x_when_work_area_narrow() {
+        // 工作区比 680 窄：宽度自适应后贴右缘，不越界。
+        let work_area = work(0, 0, 500, 1080);
+        let p = place_near_anchor(&work_area, 480, 300, 316, 6, 500, 520);
+        assert_eq!(p.width, 500);
+        assert_eq!(p.x + p.width, 500);
+        assert!(p.within_work(&work_area));
+        // 锚点在工作区左缘外（多显示器边缘 case）→ 夹回左缘。
+        let p = place_near_anchor(&work_area, -200, 300, 316, 6, 500, 520);
+        assert_eq!(p.x, 0);
+        assert!(p.within_work(&work_area));
+    }
+
+    #[test]
+    fn never_escapes_work_area_at_edges() {
+        // 光标在工作区四角与中心：任何情况下面板不超出工作区。
+        let work_area = work(0, 0, 1920, 1080);
+        for (x, top, bottom) in [(0, 0, 16), (1919, 0, 16), (0, 1079, 1080)] {
+            let p = place_near_anchor(&work_area, x, top, bottom, 6, 680, 520);
+            assert!(
+                p.within_work(&work_area),
+                "anchor=({x},{top},{bottom}) placement={p:?}"
+            );
+        }
+        for (x, top, bottom) in [(1919, 1079, 1080), (960, 540, 556)] {
+            let p = place_near_anchor(&work_area, x, top, bottom, 6, 680, 520);
+            assert!(
+                p.within_work(&work_area),
+                "anchor=({x},{top},{bottom}) placement={p:?}"
+            );
+        }
+        // 150% 缩放 + 任务栏占底部（工作区 2560×1040）：缩放尺寸经 panel_size 后仍不越界。
+        let work_area = work(0, 0, 2560, 1040);
+        for (x, top, bottom) in [(0, 0, 20), (2559, 1020, 1040), (1000, 500, 520)] {
+            let (w, h) = panel_size(&work_area, 144, 144);
+            let gap = PANEL_GAP * 144 / 96;
+            let p = place_near_anchor(&work_area, x, top, bottom, gap, w, h);
+            assert_eq!((w, h), (1020, 780));
+            assert!(
+                p.within_work(&work_area),
+                "anchor=({x},{top},{bottom}) placement={p:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_caret_uses_cursor_point_as_zero_height_anchor() {
+        // 无光标目标：以光标点为零高度锚点，下方优先 → 上方 → 贴顶同样生效。
+        let work_area = work(0, 0, 1920, 1080);
+        let p = place_near_anchor(&work_area, 800, 300, 300, 6, 680, 520);
+        assert_eq!(p.y, 306); // 下方优先
+        let p = place_near_anchor(&work_area, 800, 1000, 1000, 6, 680, 520);
+        assert_eq!(p.y, 1000 - 6 - 520); // 底部放不下 → 上方
+        let p = place_near_anchor(&work_area, 800, 1079, 1079, 6, 680, 520);
+        assert_eq!(p.y, 1079 - 6 - 520); // 上方刚好放下
+        let p = place_near_anchor(&work_area, 800, 1050, 1050, 6, 680, 520);
+        assert_eq!(p.y, 1050 - 6 - 520); // 较矮锚点同样放上方
+    }
 }
