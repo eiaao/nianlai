@@ -1,6 +1,6 @@
 [package]
 name = "nianlai"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 description = "拈来：开源剪贴板工具"
 authors = ["Nianlai contributors"]
 license = "MIT"
