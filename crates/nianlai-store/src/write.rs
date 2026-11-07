@@ -321,6 +321,27 @@ impl Store {
             Ok(Some(item))
         })
     }
+    // 删除一条历史（PRD 6.7 Delete；撤销窗口由调用方在提交前把握）。被收藏的内容不删（B03），返回 Ok(false)。
+    // formats、copy_events 随外键级联删除，搜索索引由 content_delete 触发器同步。
+    pub fn delete(&self, id: usize) -> Result<bool> {
+        self.call(move |w| {
+            let tx = w.connection.transaction()?;
+            if !schema::deletable(&tx, id)? {
+                return Ok(false);
+            }
+            let removed = tx.execute("DELETE FROM contents WHERE id=?1", [id as i64])? > 0;
+            tx.commit()?;
+            if removed {
+                if w.last.as_ref().is_some_and(|(last, _)| *last == id) {
+                    w.last = None;
+                }
+                let mut cache = w.cache.write().unwrap();
+                cache.items.retain(|item| item.id != id);
+                cache.total = cache.total.saturating_sub(1);
+            }
+            Ok(removed)
+        })
+    }
     // 后台刷新来源应用（A06）：更新显示名和图标缓存引用。图标文件由调用方先写好。
     pub fn refresh_source_app(
         &self,

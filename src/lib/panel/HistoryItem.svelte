@@ -20,11 +20,10 @@
     aria-selected={selected}
     tabindex="-1"
     disabled={panel.busy || panel.awaitingRelease || !panel.interactive}
-    onpointerenter={() => { if (panel.interactive && !panel.busy && !panel.awaitingRelease) panel.selected = index; }}
     onpointerdown={(event) => event.preventDefault()}
     onclick={(event) => panel.choose(index, "paste", event)}
   >
-    <span class="slot" aria-hidden="true">{index < 9 ? String(index + 1).padStart(2, "0") : "·"}</span>
+    <span class="slot" aria-hidden="true">{panel.slotLabel(index) ?? (index < panel.favoriteCount ? "" : "·")}</span>
     <SourceIcon {item} />
     <span class="row-copy">
       <span class="row-main" class:code={kind === "code"}>
@@ -57,6 +56,8 @@
   .history-row, .command-row { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) 20px 34px; align-items: center; gap: 7px; margin: 0; padding: 0 9px 0 0; border-bottom: 1px solid var(--line-soft); background: transparent; color: var(--muted); }
   .history-row { height: var(--size-row-a); }
   .history-row.selected, .command-row.selected { background: var(--selected); color: var(--text); }
+  /* 悬停只给视觉提示，不改选中项：Enter 永远作用在键盘选中的那一条。 */
+  .history-row:not(.selected):hover, .command-row:not(.selected):hover { background: color-mix(in srgb, var(--selected) 45%, transparent); }
   .row-select { min-width: 0; height: 100%; display: grid; grid-template-columns: 22px 30px minmax(0, 1fr); align-items: center; gap: 7px; padding: 0 0 0 10px; border: 0; border-radius: 0; background: transparent; color: inherit; text-align: left; cursor: default; }
   .slot { color: var(--faint); font: 11px var(--font-mono); }
   .selected .slot { color: var(--accent); }

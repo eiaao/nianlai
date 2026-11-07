@@ -33,7 +33,8 @@ let rejectNext = false;
 let rejectSearch = false;
 let pendingPaste = null;
 const handlers = new Map();
-export function reset() { calls.length = 0; rejectNext = false; rejectSearch = false; pendingPaste = null; handlers.clear(); }
+export function reset() { calls.length = 0; rejectNext = false; rejectSearch = false; pendingPaste = null; handlers.clear();
+  store.history = null; store.favorites = []; store.deletable = true; store.undoable = true; }
 export function rejectNextPaste() { rejectNext = true; }
 export function rejectNextSearch() { rejectSearch = true; }
 export function deferNextPaste() {
@@ -55,6 +56,17 @@ export async function startSearch(session) {
   calls.push({ command: "startSearch", session });
   if (rejectSearch) { rejectSearch = false; throw new Error("模拟搜索切换失败"); }
 }
+// 交互优化（收藏、删除、撤销）用的可控替身；默认 getHistory 返回 null，启动预热直接跳过，不影响旧用例。
+export const store = { history: null, favorites: [], deletable: true, undoable: true };
+export async function getHistory() { return store.history; }
+export async function getFavorites() { return store.favorites; }
+export async function setFavorite(id, favorite) {
+  calls.push({ command: "setFavorite", id, favorite });
+  return { id, kind: "文本", preview: "合成条目", file_names: [], source: "合成来源", copied_ms: 0, copy_count: 1, partial: false,
+    favorite, favorite_position: favorite ? 9 : null };
+}
+export async function deleteItem(id) { calls.push({ command: "deleteItem", id }); return store.deletable; }
+export async function undoDelete(id) { calls.push({ command: "undoDelete", id }); return store.undoable; }
 export async function frontendReady() {}
 export async function reportPainted() {}
 export async function searchReady() {}
@@ -1138,5 +1150,128 @@ test("普通 Quick 的 Space 与 Esc 浮层分层键位", async (suite) => {
     assert.equal(panel.selected, before + 1);
     ipc.emit("key", { session: 37, key: "ArrowLeft" });
     assert.equal(panel.selected, before);
+  });
+});
+
+test("交互优化：收藏不占槽位、本次呼出不挪位置、删除可撤销、修饰键提示与静默成功", async (suite) => {
+  const { PanelState, ipc, cleanup } = await compilePanel();
+  suite.after(cleanup);
+  const favorite = (item, position) => ({ ...item, favorite: true, favorite_position: position });
+  const pinnedHistory = () => {
+    const list = items().map((item) => ({ ...item, favorite: false, favorite_position: null }));
+    list[7] = favorite(list[7], 1);
+    list[8] = favorite(list[8], 2);
+    return { items: list, total: list.length, recording: true, last_recorded_ms: null, store_status: null };
+  };
+  const quick = async (context, history = pinnedHistory()) => {
+    const harness = await createPanel(context, PanelState, ipc, { history });
+    harness.panel.mode = "quick";
+    await flush();
+    return harness;
+  };
+
+  await suite.test("收藏排在前面但不占 1–9，数字从最近区第一条开始", async (context) => {
+    const { panel } = await quick(context);
+    assert.deepEqual(panel.filtered.slice(0, 3).map((item) => item.id), [108, 109, 101]);
+    assert.equal(panel.favoriteCount, 2);
+    assert.equal(panel.slotLabel(0), null);
+    assert.equal(panel.slotLabel(2), "01");
+    assert.equal(panel.slotLabel(10), "09");
+    ipc.emit("key", { session: 37, key: "1" });
+    assert.deepEqual(ipc.calls, [{ command: "pasteItem", session: 37, id: 101, mode: "paste" }]);
+  });
+
+  await suite.test("面板开着时收藏/取消只换星标不挪位置，下次呼出才重排", async (context) => {
+    const { panel } = await quick(context);
+    panel.selected = 4;
+    const before = panel.filtered.map((item) => item.id);
+    ipc.emit("key", { session: 37, key: "Ctrl+D" });
+    await flush();
+    assert.deepEqual(ipc.calls, [{ command: "setFavorite", id: 103, favorite: true }]);
+    assert.deepEqual(panel.filtered.map((item) => item.id), before, "收藏后顺序不变");
+    assert.equal(panel.currentItem.id, 103);
+    assert.equal(panel.currentItem.favorite, true);
+    assert.equal(panel.slotLabel(4), "03", "槽位也不变");
+    ipc.emit("key", { session: 37, key: "ArrowDown" });
+    assert.equal(panel.currentItem.id, 104, "紧接着的方向键落在原来的下一条");
+    panel.selected = 0;
+    ipc.emit("key", { session: 37, key: "Ctrl+D" });
+    await flush();
+    assert.equal(panel.filtered[0].id, 108, "取消收藏也留在原位");
+    assert.equal(panel.filtered[0].favorite, false);
+    const next = pinnedHistory();
+    next.items[2] = favorite(next.items[2], 3);
+    ipc.emit("shown", shown({ session: 38, history: next }));
+    assert.deepEqual(panel.filtered.slice(0, 3).map((item) => item.id), [108, 109, 103], "下次呼出按新收藏排");
+  });
+
+  await suite.test("Delete 删掉当前条并停在原位置，Ctrl+Z 撤销回来；收藏的拒删", async (context) => {
+    const { panel } = await quick(context);
+    const full = pinnedHistory();
+    panel.selected = 3;
+    ipc.emit("key", { session: 37, key: "Delete" });
+    await flush();
+    assert.deepEqual(ipc.calls, [{ command: "deleteItem", id: 102 }]);
+    assert.ok(panel.filtered.every((item) => item.id !== 102));
+    assert.equal(panel.currentItem.id, 103);
+    assert.equal(panel.undo.id, 102);
+    assert.equal(panel.undo.session, 37);
+    assert.equal(panel.undo.label, "合成条目");
+    assert.equal(panel.undo.duration, 3500);
+    ipc.store.history = full;
+    ipc.emit("key", { session: 37, key: "Ctrl+Z" });
+    await flush(); await flush();
+    assert.deepEqual(ipc.calls.at(-1), { command: "undoDelete", id: 102 });
+    assert.equal(panel.undo, null);
+    assert.equal(panel.currentItem.id, 102);
+    ipc.calls.length = 0;
+    panel.selected = 0;
+    ipc.emit("key", { session: 37, key: "Delete" });
+    await flush();
+    assert.deepEqual(ipc.calls, [], "收藏的不发删除");
+    assert.match(panel.message, /取消收藏/);
+    panel.mode = "search";
+    panel.selected = 3;
+    ipc.emit("key", { session: 37, key: "Delete" });
+    await flush();
+    assert.deepEqual(ipc.calls, [], "搜索模式的 Delete 留给输入框");
+  });
+
+  await suite.test("新一次呼出清掉上一会话的撤销入口", async (context) => {
+    const { panel } = await quick(context);
+    panel.selected = 3;
+    ipc.emit("key", { session: 37, key: "Delete" });
+    await flush();
+    assert.ok(panel.undo);
+    ipc.emit("shown", shown({ session: 38, history: pinnedHistory() }));
+    assert.equal(panel.undo, null);
+  });
+
+  await suite.test("按住 Ctrl/Shift 超过 300 ms 才换页脚提示，快速组合键不闪", async (context) => {
+    const { panel } = await quick(context);
+    ipc.emit("key", { session: 37, key: "Mod:Ctrl" });
+    assert.equal(panel.heldModifier, "");
+    ipc.emit("key", { session: 37, key: "Mod:" });
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    assert.equal(panel.heldModifier, "", "快速松开不出提示");
+    ipc.emit("key", { session: 37, key: "Mod:Shift" });
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    assert.equal(panel.heldModifier, "shift");
+    ipc.emit("key", { session: 37, key: "Mod:Ctrl+Shift" });
+    assert.equal(panel.heldModifier, "", "两个都按着不显示单键提示");
+    ipc.emit("key", { session: 37, key: "Mod:" });
+    assert.equal(panel.heldModifier, "");
+    assert.deepEqual(ipc.calls, [], "修饰键事件不触发任何取用");
+  });
+
+  await suite.test("粘贴成功不出声，只说需要用户知道的偏差", async (context) => {
+    const { panel } = await quick(context);
+    panel.message = "旧消息";
+    ipc.emit("paste-result", pasteResult({ paste_result: "confirmed", reason: null, layer3: { conclusion: "confirmed" } }));
+    assert.equal(panel.message, "");
+    ipc.emit("paste-result", pasteResult({ paste_result: "sent", reason: null, layer2: { timed_out: true } }));
+    assert.match(panel.message, /可能没收到/);
+    ipc.emit("paste-result", pasteResult({ paste_result: "confirmed", reason: null, as_text: { error: "x" } }));
+    assert.match(panel.message, /转文字失败/);
   });
 });

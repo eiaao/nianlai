@@ -51,7 +51,7 @@
       <span class="card-excerpt" class:long={kind === "long" || kind === "rich"} class:code={kind === "code"}>{excerpt}</span>
     {/if}
 
-    <span class="card-index">{index < 9 ? String(index + 1).padStart(2, "0") : "—"} / FRAME</span>
+    <span class="card-index">{panel.slotLabel(index) ?? (index < panel.favoriteCount ? "PIN" : "—")} / FRAME</span>
     <span class="card-source"><SourceIcon {item} /><span>{sourceName(item)} · {relativeTime(item.copied_ms)}</span></span>
   </span>
 </button>

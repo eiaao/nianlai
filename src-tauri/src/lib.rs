@@ -66,6 +66,18 @@ fn set_favorite(id: usize, favorite: bool) -> Result<Option<history::Preview>, S
         .set_favorite(id, favorite)
 }
 #[tauri::command]
+fn delete_item(id: usize) -> Result<bool, String> {
+    history::active()
+        .ok_or_else(|| "历史服务未就绪".to_owned())?
+        .delete(id)
+}
+#[tauri::command]
+fn undo_delete(id: usize) -> Result<bool, String> {
+    Ok(history::active()
+        .ok_or_else(|| "历史服务未就绪".to_owned())?
+        .undo_delete(id))
+}
+#[tauri::command]
 fn frontend_ready(app: AppHandle) -> Result<(), String> {
     panel::dispatch(&app, Action::FrontendReady)
 }
@@ -166,10 +178,13 @@ pub fn run() {
             set_settings,
             hotkey::validate_hotkey,
             hotkey::get_hotkey_status,
+            hotkey::pause_hotkey,
             get_history,
             search_history,
             get_favorites,
             set_favorite,
+            delete_item,
+            undo_delete,
             frontend_ready,
             start_search,
             search_ready,

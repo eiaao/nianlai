@@ -227,7 +227,7 @@ impl Engine {
         }
         self.panel = observe::windows()?
             .into_iter()
-            .find(|w| w.pid == pid && observe::owned_title(w.raw) == "拈来 · G0")
+            .find(|w| w.pid == pid && observe::owned_title(w.raw) == "拈来")
             .map(|w| w.raw)
             .ok_or("未找到已启动样机的可见面板")?;
         self.input.own(self.panel, pid);

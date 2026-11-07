@@ -254,6 +254,9 @@ struct State {
     status: Status,
     override_hotkey: Option<String>,
     automatic: bool,
+    // 设置页正在录制新快捷键时暂时注销的呼出键；录完（或超时）再注册回来。
+    paused: Option<Shortcut>,
+    pause_generation: u64,
 }
 
 impl State {
@@ -309,6 +312,40 @@ impl State {
                 self.status.detail = Some(error);
             }
         }
+    }
+
+    // 录制期间注销呼出键，否则按下当前组合会被系统拦走去呼出面板，录不到。
+    // 录制中保存了新键时 apply 已注册新键，恢复时不再动它。
+    fn pause(&mut self, paused: bool, backend: &impl Backend) -> Result<(), String> {
+        if paused {
+            if self.paused.is_some() {
+                return Ok(());
+            }
+            if let Some(active) = self.active {
+                backend.unregister(active)?;
+                self.active = None;
+                backend.sync_panel(None);
+                self.paused = Some(active);
+            }
+        } else if let Some(paused) = self.paused.take()
+            && self.active.is_none()
+        {
+            match backend.register(paused) {
+                Ok(()) => {
+                    self.active = Some(paused);
+                    self.status.active = Some(paused.to_string());
+                    backend.sync_panel(Some(paused));
+                }
+                Err(error) => {
+                    self.status.active = None;
+                    self.status.error =
+                        Some("呼出键恢复注册失败，请重新保存；仍可从托盘打开面板。".into());
+                    self.status.detail = Some(error.clone());
+                    return Err(error);
+                }
+            }
+        }
+        Ok(())
     }
 
     fn save(
@@ -440,6 +477,42 @@ impl Runtime {
         );
         Ok(saved)
     }
+}
+
+/// 录制最长时长：设置页异常关闭、没来得及恢复时，到点自动把呼出键注册回来。
+const PAUSE_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+#[tauri::command]
+pub async fn pause_hotkey(app: AppHandle, paused: bool) -> Result<(), String> {
+    // 注册/注销由插件派回主线程；不能在主线程持锁等待它们完成（同 set_settings）。
+    tauri::async_runtime::spawn_blocking(move || {
+        let generation = {
+            let runtime = app.state::<Runtime>();
+            let mut state = runtime.state.lock().unwrap();
+            state.pause_generation += 1;
+            state.pause(paused, &SystemBackend(&app))?;
+            state.pause_generation
+        };
+        app.state::<Controller>()
+            .logger
+            .event("hotkey_paused", json!({"paused":paused}));
+        if paused {
+            let app = app.clone();
+            let _ = std::thread::Builder::new()
+                .name("hotkey-pause".into())
+                .spawn(move || {
+                    std::thread::sleep(PAUSE_LIMIT);
+                    let runtime = app.state::<Runtime>();
+                    let mut state = runtime.state.lock().unwrap();
+                    if state.pause_generation == generation && state.paused.is_some() {
+                        let _ = state.pause(false, &SystemBackend(&app));
+                    }
+                });
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -607,6 +680,41 @@ mod tests {
         backend.calls.borrow_mut().clear();
         state.apply("control+shift+F11", &backend);
         assert!(backend.calls.borrow().is_empty(), "等价组合不重复注册");
+    }
+
+    #[test]
+    fn recording_pause_unregisters_then_restores_unless_a_new_key_was_saved_meanwhile() {
+        let mut state = State::default();
+        let backend = Fake::default();
+        state.apply("Ctrl+`", &backend);
+        backend.calls.borrow_mut().clear();
+        // 暂停 → 恢复：同一个键注销再注册回来；重复暂停不重复注销。
+        state.pause(true, &backend).unwrap();
+        state.pause(true, &backend).unwrap();
+        assert_eq!(state.active, None);
+        state.pause(false, &backend).unwrap();
+        assert_eq!(
+            *backend.calls.borrow(),
+            [
+                format!("unregister:{}", key("Ctrl+`")),
+                "panel:none".into(),
+                format!("register:{}", key("Ctrl+`")),
+                format!("panel:{}", key("Ctrl+`")),
+            ]
+        );
+        assert_eq!(state.active, Some(key("Ctrl+`")));
+        // 录制中保存了新键：apply 直接注册新键，恢复时不再把旧键注册回来。
+        state.pause(true, &backend).unwrap();
+        state.apply("Alt+V", &backend);
+        backend.calls.borrow_mut().clear();
+        state.pause(false, &backend).unwrap();
+        assert!(backend.calls.borrow().is_empty());
+        assert_eq!(state.active, Some(key("Alt+V")));
+        // 没有生效键时暂停/恢复什么都不做。
+        let mut empty = State::default();
+        empty.pause(true, &backend).unwrap();
+        empty.pause(false, &backend).unwrap();
+        assert!(backend.calls.borrow().is_empty());
     }
 
     #[test]

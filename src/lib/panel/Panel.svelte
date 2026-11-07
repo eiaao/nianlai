@@ -16,9 +16,9 @@
 
 <svelte:window onkeydown={panel.keydown} onkeyup={panel.keyup} onblur={panel.windowBlur} oncontextmenu={(event) => event.preventDefault()} />
 
-<div class="panel-shell" class:panel-a={panel.preferences.layout === "a"} class:panel-b={panel.preferences.layout === "b"} class:panel-c={panel.preferences.layout === "c"} class:ctrl-down={panel.ctrlDown} data-layout={panel.preferences.layout} data-mode={panel.mode} role="dialog" tabindex="-1" aria-label="拈来剪贴板历史">
-  {#if !panel.visible}
-    <!-- 隐藏期不保留旧会话列表。 -->
+<div class="panel-shell" class:panel-a={panel.preferences.layout === "a"} class:panel-b={panel.preferences.layout === "b"} class:panel-c={panel.preferences.layout === "c"} class:ctrl-down={panel.heldModifier === "ctrl"} class:warming={panel.warming && !panel.visible} data-layout={panel.preferences.layout} data-mode={panel.mode} role="dialog" tabindex="-1" aria-label="拈来剪贴板历史">
+  {#if !panel.visible && !panel.warming}
+    <!-- 隐藏期不保留旧会话列表（启动预热那一下除外，见 PanelState.prewarm）。 -->
   {:else if panel.interaction === "close_only"}
     <section class="terminal-feedback">
       <span class="terminal-mark" aria-hidden="true">△</span>
@@ -52,7 +52,7 @@
 
     <RecordBanner {panel} />
 
-    {#if panel.interactive || panel.interaction === "passive"}
+    {#if panel.interactive || panel.interaction === "passive" || (panel.warming && !panel.visible)}
       {#if panel.preferences.layout === "a"}
         <SplitPreview {panel} />
       {:else if panel.preferences.layout === "b"}
@@ -83,6 +83,7 @@
 
 <style>
   .panel-shell { position: relative; width: 100%; height: 100%; overflow: hidden; }
+  .panel-shell.warming { visibility: hidden; }
   .panel-a { display: grid; grid-template-rows: 56px auto minmax(0, 1fr) auto; border: 1px solid var(--line); border-radius: var(--radius-md); background: var(--panel); color: var(--text); }
   .topline { min-height: 0; display: grid; grid-template-columns: var(--size-a-index) minmax(0, 1fr); border-bottom: 1px solid var(--line); }
   .mode-readout { min-width: 0; display: flex; align-items: center; gap: 11px; padding: 0 15px; border-right: 1px solid var(--line); }

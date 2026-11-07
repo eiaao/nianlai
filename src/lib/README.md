@@ -45,7 +45,7 @@ M0-7 把原来一个文件的 `src/App.svelte` 拆成下面这些文件，外观
 ## 设置窗口壳
 
 - `settings.html` 与 `index.html` 是 Vite 的两个构建入口。通用页通过 `get_settings` / `set_settings` 持久化 `panel.layout`、`panel.density`、`theme`、`feedback.motion` 和 `hotkey`；写盘及运行时换键完成后由后端统一广播 `settings:changed`。A/B/C 均可切换，舒适密度仍是禁用占位。
-- `HotkeyEditor.svelte` 用修饰键复选框与主键选择器编辑组合；`validate_hotkey` 是校验规则的唯一来源，异步旧回执不得覆盖当前草稿。外观自动保存，快捷键需校验通过后确认保存。`get_hotkey_status` 独立展示期望值、实际生效键及非致命注册错误，保存成功不等同于注册成功。
+- `HotkeyEditor.svelte` 是按键录制框：点击后直接按组合键，`validate_hotkey`（校验规则的唯一来源）通过即保存并即时生效，Esc 或窗口失焦取消。录制期间调 `pause_hotkey(true)` 暂时注销当前呼出键（否则按到同一组合会被系统拦走），结束时恢复；后端 30 秒兜底自动恢复。`event.code` 为空（远程桌面、改键工具）时按 `keyCode` 补出键名。`get_hotkey_status` 只在出错、测试覆盖或暂停注册时展示。
 - 后端换键先注销旧键再注册新键，失败不使用隐藏备用键；面板允许没有注册键，现有钩子只就地更新放行组合，不重置会话、吞键配对或焦点。离线及占用场景手测见 `tools/test-hotkey.md`。
 - 窗口定义集中在 `settings_window.rs`，不在启动配置中创建第二个 WebView；调用异步命令 `open_settings` 才创建。重复打开会显示并聚焦已有窗口，关闭后销毁，下次重新创建。
 - `lib.rs` 按 `settings` 标签放行关闭请求，关闭设置窗口不会走面板的退出分支。托盘已提供“设置…”入口；从菜单或托盘回调调用 `settings_window::open()` 时先用异步运行时切离主线程，避免 Windows WebView2 创建窗口时死锁。
@@ -54,6 +54,15 @@ M0-7 把原来一个文件的 `src/App.svelte` 拆成下面这些文件，外观
 
 - v7 的 A/B/C 材质、状态色、设置页和动效常量统一放在 `theme.css`；组件不另建调色板。`data-theme="system|light|dark"` 控制主题，系统 reduce 优先于动效设置。
 - alpha.3 有效布局为 A/B/C，密度仍为紧凑。A 行高 64px、B 行高 56px；后端窗口尚未接入 M1-P 的按布局几何算法时，窄窗口使用响应式收缩，不自动切布局。
+
+## 交互规则（11-07 交互优化）
+
+- **槽位只编最近区。** 收藏区排在最前但不编号，1–9 / Ctrl+1–9 从最近区第一条数起（`slotLabel` / `slotIndex`）。
+- **本次呼出内收藏不挪位置。** 第一次动收藏时冻结 `pinnedIds`，之后只换星标；`panel:shown` 清空冻结。收藏顺序以 `favorite_position` 为准。
+- **悬停不改选中。** 只有键盘移动选中项；鼠标点击取用被点的那条。
+- **页脚安静。** 粘贴成功不出声；只在需要用户知道时写 `message`（只复制、可能没收到、转文字失败、删除失败等）。按住 Ctrl / Shift 超过 300 ms（`heldModifier`）才换成对应键位；普通 quick 的修饰键状态来自钩子的 `panel:key` `Mod:*`。
+- **Delete 可撤销。** 只在快速模式；`delete_item` 由后端挂起 4 秒（期间快照和搜索都不含该条），`undo_delete` 恢复，挂起期间再次复制同一内容自动取消，退出时提交。收藏的拒删。前端撤销入口在页脚左侧，只在本次呼出内、3.5 秒有效（带倒计时条）。
+- **启动预热。** `frontend_ready` 之前用真实历史隐藏渲染一次（`warming`），首帧不再付冷启动开销；呼出时 `visible` 优先。
 
 ## 不能动的细节（都是 G0 踩过的坑）
 

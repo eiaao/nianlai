@@ -732,3 +732,44 @@ fn refresh_source_app_updates_display_and_icon_reference_only() {
     let counts = check(&temp.0).unwrap();
     assert_eq!((counts.events, counts.source_apps), (1, 1));
 }
+
+// 面板 Delete：删除历史连带格式、复制事件和搜索索引；收藏的内容拒删（B03）；删除后再复制同样内容会新建记录。
+#[test]
+fn delete_removes_record_events_and_index_but_refuses_favorites() {
+    let temp = Temp::new();
+    let store = temp.store();
+    let at = Instant::now();
+    for i in 1..=3 {
+        ingest(&store, text(&format!("删除测试{i}")), i, at);
+    }
+    store.set_favorite(3, true).unwrap().unwrap();
+    assert!(!store.delete(3).unwrap());
+    assert!(store.delete(2).unwrap());
+    assert!(!store.delete(2).unwrap());
+    let cache = store.cache();
+    assert_eq!(cache.total, 2);
+    assert!(cache.items.iter().all(|item| item.id != 2));
+    let reader = store.reader().unwrap();
+    assert!(reader.content(2).unwrap().is_none());
+    let found: Vec<usize> = reader
+        .search("删除测试")
+        .unwrap()
+        .items
+        .into_iter()
+        .map(|item| item.id)
+        .collect();
+    assert_eq!(found.len(), 2);
+    assert!(!found.contains(&2));
+    let c = writable(&temp.0.join("history.db")).unwrap();
+    let orphans: usize = c
+        .query_row(
+            "SELECT (SELECT count(*) FROM copy_events WHERE content_id=2)+(SELECT count(*) FROM formats WHERE content_id=2)",
+            [],
+            |r| schema::number(r, 0),
+        )
+        .unwrap();
+    assert_eq!(orphans, 0);
+    let again = ingest(&store, text("删除测试2"), 4, at);
+    assert_eq!(again.outcome, "saved");
+    check(&temp.0).unwrap();
+}

@@ -539,11 +539,52 @@ struct Context {
     hint: Option<HintMode>,
     // 停留规则的逐键处置和待发的收起请求，抬起时照此配对。
     hint_state: HintState,
+    // 钩子装上之后看到的修饰键按住状态（按左右键分位）；只用来给面板页脚报“按住 Ctrl/Shift”。
+    held_modifiers: u8,
+    reported_modifiers: u8,
 }
 impl Context {
     fn set_hotkey(&mut self, shortcut: Option<Shortcut>) {
         self.hotkey =
             shortcut.and_then(|shortcut| shortcut_vk(&shortcut).map(|vk| (vk, shortcut.mods)));
+    }
+
+    // 修饰键照常放行给目标，只把“只按着 Ctrl / 只按着 Shift / 都按着”的变化报给面板。
+    // 钩子装上前就按住的键（例如呼出用的 Ctrl）看不到按下，松开时不会误报。
+    fn report_modifier(&mut self, vk: u16, pressed: bool) {
+        let bit = match vk {
+            0xA2 => 1,
+            0xA3 => 2,
+            0xA0 => 4,
+            0xA1 => 8,
+            0xA4 => 16,
+            0xA5 => 32,
+            0x5B => 64,
+            0x5C => 128,
+            _ => return,
+        };
+        if pressed {
+            self.held_modifiers |= bit;
+        } else {
+            self.held_modifiers &= !bit;
+        }
+        let held = self.held_modifiers;
+        let state = if held & 0xF0 != 0 {
+            0
+        } else {
+            u8::from(held & 3 != 0) | (u8::from(held & 12 != 0) << 1)
+        };
+        if state == self.reported_modifiers {
+            return;
+        }
+        self.reported_modifiers = state;
+        let name = match state {
+            1 => "Mod:Ctrl",
+            2 => "Mod:Shift",
+            3 => "Mod:Ctrl+Shift",
+            _ => "Mod:",
+        };
+        let _ = self.sender.try_send(HookEvent::Key(name));
     }
 
     fn original_hint_keys_held(&self) -> bool {
@@ -832,6 +873,7 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
             return swallow;
         }
         if matches!(vk, 0x10..=0x12 | 0x5B | 0x5C | 0xA0..=0xA5) {
+            context.report_modifier(vk, pressed);
             return false;
         }
         if vk > 255 {
@@ -893,6 +935,7 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
                 0x0D => Some("Enter"),
                 0x1B => Some("Escape"),
                 0x20 => Some("Space"),
+                0x2E => Some("Delete"),
                 0x31 | 0x61 => Some("1"),
                 0x32 | 0x62 => Some("2"),
                 0x33 | 0x63 => Some("3"),
@@ -910,6 +953,8 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
             Some("Ctrl+Enter")
         } else if mods == Modifiers::CONTROL && vk == 0x44 {
             Some("Ctrl+D")
+        } else if mods == Modifiers::CONTROL && vk == 0x5A {
+            Some("Ctrl+Z")
         } else {
             None
         };
@@ -922,6 +967,8 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
                     | "Shift+Enter"
                     | "Ctrl+Enter"
                     | "Ctrl+D"
+                    | "Ctrl+Z"
+                    | "Delete"
                     | "Escape"
                     | "Space"
                     | "1"
@@ -1216,7 +1263,7 @@ impl Hooks {
                 bounds, hotkey, replay: replay_sender,
                 foreground_trace: foreground::Trace::from_env(&logger, session, window, target),
                 dropped: overflow, pending: None, swallowed: [false; 256], release_action: [None; 256],
-                hint: None, hint_state: HintState::new(),
+                hint: None, hint_state: HintState::new(), held_modifiers: 0, reported_modifiers: 0,
             }));
             let mut message = MSG::default();
             let mut drain_trace = DrainTrace::default();
@@ -1541,7 +1588,39 @@ mod tests {
             release_action: [None; 256],
             hint: None,
             hint_state: HintState::new(),
+            held_modifiers: 0,
+            reported_modifiers: 0,
         }
+    }
+
+    #[test]
+    fn modifier_hold_reports_only_state_changes_and_ignores_keys_held_before_install() {
+        let (sender, events) = mpsc::sync_channel(16);
+        let mut context = test_context(sender, Arc::new(Monitor::new(0, 0)));
+        let drain = || {
+            let mut names = Vec::new();
+            while let Ok(HookEvent::Key(name)) = events.try_recv() {
+                names.push(name);
+            }
+            names
+        };
+        // 呼出时就按着的 Ctrl：钩子没看到按下，松开不报。
+        context.report_modifier(0xA2, false);
+        assert!(drain().is_empty());
+        context.report_modifier(0xA2, true);
+        context.report_modifier(0xA2, true);
+        context.report_modifier(0xA0, true);
+        context.report_modifier(0xA2, false);
+        context.report_modifier(0xA0, false);
+        assert_eq!(drain(), ["Mod:Ctrl", "Mod:Ctrl+Shift", "Mod:Shift", "Mod:"]);
+        // 左右 Ctrl 都按着时松开一个仍算按着；Alt 加入时不算“只按 Ctrl”。
+        context.report_modifier(0xA2, true);
+        context.report_modifier(0xA3, true);
+        context.report_modifier(0xA2, false);
+        context.report_modifier(0xA4, true);
+        context.report_modifier(0xA4, false);
+        context.report_modifier(0xA3, false);
+        assert_eq!(drain(), ["Mod:Ctrl", "Mod:", "Mod:Ctrl", "Mod:"]);
     }
 
     #[test]

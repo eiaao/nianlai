@@ -59,10 +59,15 @@ export const getHistory = () => invoke<HistorySnapshot>("get_history");
 export const searchHistory = (query: string, requestId: number) => invoke<SearchReply>("search_history", { query, requestId });
 export const getFavorites = () => invoke<HistoryItem[]>("get_favorites");
 export const setFavorite = (id: number, favorite: boolean) => invoke<HistoryItem | null>("set_favorite", { id, favorite });
+// Delete 先挂起、撤销窗口（后端 UNDO_WINDOW，4 秒）后才真删；收藏的返回 false。
+export const deleteItem = (id: number) => invoke<boolean>("delete_item", { id });
+export const undoDelete = (id: number) => invoke<boolean>("undo_delete", { id });
 export const getSettings = () => invoke<AppSettings>("get_settings");
 export const setSettings = (settings: SettingsUpdate) => invoke<AppSettings>("set_settings", { settings });
 export const validateHotkey = (value: string) => invoke<HotkeyValidation>("validate_hotkey", { value });
 export const getHotkeyStatus = () => invoke<HotkeyStatus>("get_hotkey_status");
+// 设置页录制新组合键期间暂时注销呼出键（后端 30 秒后自动恢复兜底）。
+export const pauseHotkey = (paused: boolean) => invoke<void>("pause_hotkey", { paused });
 export const openSettings = () => invoke("open_settings");
 export const frontendReady = () => invoke("frontend_ready");
 export const startSearch = (session: number) => invoke("start_search", { session });

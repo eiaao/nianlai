@@ -59,7 +59,7 @@
   onMount(async () => {
     try {
       apply(await ipc.getSettings());
-      status = "外观改动自动保存；呼出快捷键校验通过后需确认保存，并即时应用";
+      status = "改动自动保存，即时生效";
     } catch {
       failed = true;
       status = "设置读取失败，当前显示默认值；请关闭窗口后重试";

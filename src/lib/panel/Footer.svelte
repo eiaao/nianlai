@@ -1,38 +1,34 @@
 <script lang="ts">
-  import { formatTime, type PanelState } from "../state.svelte";
+  import type { PanelState } from "../state.svelte";
 
   let { panel }: { panel: PanelState } = $props();
-  let remaining = $state(0);
-
-  $effect(() => {
-    const feedback = panel.feedback;
-    if (!feedback) { remaining = 0; return; }
-    const update = () => { remaining = Math.max(0, feedback.duration - (Date.now() - feedback.startedAt)); };
-    update();
-    const timer = setInterval(update, 250);
-    return () => clearInterval(timer);
-  });
-
-  const recordText = $derived(panel.history.store_status && panel.history.store_status !== "正在加载历史"
-    ? panel.history.recording ? "记录中（仅内存）" : "未在记录 · 仅内存"
-    : panel.history.recording
-      ? `记录中${panel.history.last_recorded_ms ? ` · 上次 ${formatTime(panel.history.last_recorded_ms)}` : ""}`
-      : "未在记录");
-  const lastLabel = $derived(panel.lastResult === "confirmed" ? "已粘贴" : panel.lastResult === "sent" ? "已发出粘贴" : "已复制");
 </script>
 
 <footer class:has-result={!!panel.feedback} class="statusbar" title={panel.timing ? `呼出 ${panel.timing.hotkeyToShowMs?.toFixed(1) ?? "—"} ms / 首帧 ${panel.timing.showToPaintMs?.toFixed(1) ?? "—"} ms` : undefined}>
+
   {#if panel.feedback}
     {#key panel.feedback}
       <div class="result-footer" class:copied={panel.feedback.kind === "copied"} class:failed={panel.feedback.kind === "failed"} role="status" aria-live="polite">
         <i class="result-line" class:animated={panel.motion !== "none"} style={`animation-duration: ${panel.feedback.duration}ms`}></i>
-        <div class="result-copy"><strong>{panel.feedback.title}</strong><small>{panel.feedback.detail} · {Math.ceil(remaining / 1000)} 秒</small></div>
+        <div class="result-copy"><strong>{panel.feedback.title}</strong><small>{panel.feedback.detail}</small></div>
         {#if panel.interaction === "passive"}<button type="button" tabindex="-1" onpointerdown={(event) => event.preventDefault()} onclick={panel.close}>关闭提示</button>{/if}
       </div>
     {/key}
   {:else}
     <div class="normal-footer">
-      <span class="record-status"><span class="record-square" class:inactive={!panel.history.recording}></span><span>{panel.lastResult ? `上次：${lastLabel} · 刚才` : recordText}</span></span>
+      <!-- 平时左侧留空：记录正常、粘贴成功都不需要说；记录出问题时顶部横幅会出现。 -->
+      <span class="record-status">
+        {#if panel.undo}
+          {#key panel.undo.startedAt}
+            <!-- 删除后的撤销入口：页脚左侧的浅色小标签，倒计时条走完自动消失（与后端撤销窗口对齐）。 -->
+            <span class="undo-chip" role="status" aria-live="polite">
+              <span class="undo-text">已删除<span class="undo-label">「{panel.undo.label}」</span></span>
+              <button type="button" tabindex="-1" onpointerdown={(event) => event.preventDefault()} onclick={() => { void panel.undoDelete(); }}>撤销</button><kbd>Ctrl+Z</kbd>
+              <i class="undo-progress" style={`animation-duration: ${panel.undo.duration}ms`}></i>
+            </span>
+          {/key}
+        {/if}
+      </span>
       <div class="key-help">
         {#if panel.interaction === "passive"}
           <button type="button" tabindex="-1" onpointerdown={(event) => event.preventDefault()} onclick={panel.close}>关闭提示</button>
@@ -40,6 +36,10 @@
           <span>INPUT / WAITING</span>
         {:else if panel.previewOpen}
           <span><kbd>Space</kbd> 返回</span><span><kbd>Esc</kbd> 逐层退出</span>
+        {:else if panel.heldModifier === "ctrl"}
+          <span><kbd>↵</kbd> 纯文本粘贴</span>{#if panel.mode === "search"}<span><kbd>1–9</kbd> 取用</span>{/if}<span><kbd>D</kbd> 收藏</span>{#if panel.undo}<span><kbd>Z</kbd> 撤销删除</span>{/if}
+        {:else if panel.heldModifier === "shift"}
+          <span><kbd>↵</kbd> 只复制，不粘贴</span>
         {:else if panel.mode === "search"}
           <span><kbd>↵</kbd> 粘贴</span><span><kbd>Ctrl+1–9</kbd> 取用</span><span><kbd>Esc</kbd> 返回</span>
         {:else}
@@ -52,13 +52,10 @@
 </footer>
 
 <style>
-  .statusbar { min-height: 36px; flex: none; padding: 0 12px; border-top: 1px solid var(--line); color: var(--muted); font-size: 10px; }
+  .statusbar { position: relative; min-height: 36px; flex: none; padding: 0 12px; border-top: 1px solid var(--line); color: var(--muted); font-size: 10px; }
   .statusbar.has-result { min-height: 54px; padding-top: 8px; padding-bottom: 8px; }
   .normal-footer { min-height: 35px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-  .record-status { min-width: 0; display: flex; align-items: center; gap: 7px; white-space: nowrap; }
-  .record-status > span:last-child { overflow: hidden; text-overflow: ellipsis; }
-  .record-square { width: 6px; height: 6px; flex: none; background: var(--accent); }
-  .record-square.inactive { background: var(--state-critical); }
+  .record-status { min-width: 0; display: flex; align-items: center; gap: 6px; white-space: nowrap; }
   .key-help { display: flex; align-items: center; gap: 12px; white-space: nowrap; }
   .key-help span { display: flex; align-items: center; gap: 4px; }
   kbd { color: var(--text); font: 10px/1.4 var(--font-mono); }
@@ -72,6 +69,12 @@
   .result-line.animated { animation-name: countdown; animation-timing-function: linear; animation-fill-mode: forwards; }
   button { flex: none; margin-left: auto; padding: 3px 0 3px 8px; border: 0; background: transparent; color: inherit; text-decoration: underline; font-size: 10px; }
   .message { max-height: 32px; margin: 0 0 6px; overflow: auto; color: var(--state-critical); font-size: 10px; line-height: 1.5; }
+  .undo-chip { position: relative; min-width: 0; display: inline-flex; align-items: center; gap: 6px; padding: 3px 8px 4px; overflow: hidden; border-radius: var(--radius-sm); background: color-mix(in srgb, var(--accent) 13%, transparent); color: var(--accent); animation: appear var(--fade-duration) linear; }
+  .undo-text { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .undo-label { color: var(--muted); }
+  .undo-chip button { margin-left: 2px; padding: 0; color: inherit; font-weight: 600; }
+  .undo-chip kbd { color: inherit; opacity: .75; }
+  .undo-progress { position: absolute; left: 0; bottom: 0; width: 100%; height: 2px; background: currentColor; opacity: .6; transform-origin: left; animation-name: countdown; animation-timing-function: linear; animation-fill-mode: forwards; }
   @keyframes countdown { from { transform: scaleX(1); } to { transform: scaleX(0); } }
   @keyframes appear { from { opacity: 0; } to { opacity: 1; } }
   @media (max-width: 599px) {
@@ -84,5 +87,7 @@
   @media (prefers-reduced-motion: reduce) {
     .result-footer { animation-duration: var(--duration-reduce); }
     .result-line.animated { display: none; }
+    /* 倒计时条是信息（还剩多久能撤销），减少动画时保留；只缩短出现动画。 */
+    .undo-chip { animation-duration: var(--duration-reduce); }
   }
 </style>

@@ -507,6 +507,7 @@ impl Controller {
             panel.hooks.take();
         }
         self.clipboard.shutdown();
+        self.history.flush_delete();
         self.history.summary();
         self.logger.event("shutdown", json!({}));
         self.logger.flush();

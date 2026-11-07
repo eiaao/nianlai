@@ -1,7 +1,9 @@
 <script lang="ts">
+  // 呼出快捷键：点一下录制框，直接按下想要的组合键；校验通过即保存并即时生效，Esc 取消。
+  // 录制期间请后端暂时注销当前呼出键，否则按到同一组合会被系统拦走去呼出面板。
   import { onMount } from "svelte";
   import * as ipc from "../lib/ipc";
-  import type { AppSettings, HotkeyStatus, HotkeyValidation, SettingsUpdate } from "../lib/ipc";
+  import type { AppSettings, HotkeyStatus, SettingsUpdate } from "../lib/ipc";
 
   let { hotkey, disabled, onsave }: {
     hotkey: string;
@@ -9,183 +11,172 @@
     onsave: (update: SettingsUpdate, message: string) => Promise<AppSettings | null>;
   } = $props();
 
-  const keyGroups = [
-    { label: "字母", keys: Array.from({ length: 26 }, (_, index) => ({ value: `Key${String.fromCharCode(65 + index)}`, label: String.fromCharCode(65 + index) })) },
-    { label: "数字", keys: Array.from({ length: 10 }, (_, index) => ({ value: `Digit${index}`, label: String(index) })) },
-    { label: "功能键", keys: Array.from({ length: 24 }, (_, index) => ({ value: `F${index + 1}`, label: `F${index + 1}` })) },
-    { label: "常用键", keys: [
-      ["Backquote", "反引号 `"], ["Space", "空格"], ["Tab", "Tab"], ["Enter", "Enter"],
-      ["Escape", "Esc"], ["Backspace", "Backspace"], ["Delete", "Delete"], ["Insert", "Insert"],
-      ["Home", "Home"], ["End", "End"], ["PageUp", "PageUp"], ["PageDown", "PageDown"],
-      ["ArrowLeft", "←"], ["ArrowRight", "→"], ["ArrowUp", "↑"], ["ArrowDown", "↓"],
-      ["CapsLock", "CapsLock"], ["NumLock", "NumLock"], ["ScrollLock", "ScrollLock"],
-      ["PrintScreen", "PrintScreen"], ["Pause", "Pause"],
-    ].map(([value, label]) => ({ value, label })) },
-    { label: "符号", keys: [
-      ["Minus", "-"], ["Equal", "="], ["BracketLeft", "["], ["BracketRight", "]"], ["Backslash", "\\"],
-      ["Semicolon", ";"], ["Quote", "'"], ["Comma", ","], ["Period", "."], ["Slash", "/"],
-    ].map(([value, label]) => ({ value, label })) },
-    { label: "数字小键盘", keys: [
-      ...Array.from({ length: 10 }, (_, index) => ({ value: `Numpad${index}`, label: `小键盘 ${index}` })),
-      ...[["NumpadAdd", "+"], ["NumpadSubtract", "-"], ["NumpadMultiply", "*"], ["NumpadDivide", "/"],
-        ["NumpadDecimal", "."], ["NumpadEnter", "Enter"]].map(([value, label]) => ({ value, label: `小键盘 ${label}` })),
-    ] },
-  ];
-
-  let control = $state(false);
-  let alt = $state(false);
-  let shift = $state(false);
-  let win = $state(false);
-  let key = $state("");
-  let loadedHotkey = $state<string | null>(null);
-  let checking = $state(false);
-  let validation = $state<HotkeyValidation | null>(null);
-  let validatedDraft = $state("");
-  let validationError = $state("");
-  let loadError = $state("");
+  let recording = $state(false);
+  let held = $state<string[]>([]);
+  let error = $state("");
+  let warning = $state<string | null>(null);
+  let busy = $state(false);
   let runtime = $state<HotkeyStatus | null>(null);
   let runtimeError = $state("");
   let disposed = false;
   let statusRequest = 0;
-  const draft = $derived([
-    ...(control ? ["Ctrl"] : []), ...(alt ? ["Alt"] : []),
-    ...(shift ? ["Shift"] : []), ...(win ? ["Super"] : []), key,
-  ].join("+"));
-  const draftReason = $derived(!key ? "主键不能为空，请选择一个主键"
-    : !control && !alt && !shift && !win ? "至少选择一个修饰键（Ctrl / Alt / Shift / Win）" : "");
-  const errorMessage = (error: unknown, fallback: string) => error instanceof Error ? error.message : typeof error === "string" ? error : fallback;
-  const display = (value: string) => value.replace(/control/gi, "Ctrl").replace(/super/gi, "Win").replace(/shift/gi, "Shift").replace(/alt/gi, "Alt").replace(/Key([A-Z])/g, "$1").replace(/Digit([0-9])/g, "$1").replace(/Backquote/g, "反引号");
 
-  // 后端是校验规则的唯一来源；别名和旧设置由后端规范化后再填入编辑器。
-  $effect(() => {
-    const saved = hotkey;
-    if (disabled || saved === loadedHotkey) return;
-    let cancelled = false;
-    void ipc.validateHotkey(saved).then((value) => {
-      if (cancelled) return;
-      control = value.control; alt = value.alt; shift = value.shift; win = value.win; key = value.key;
-      loadedHotkey = saved;
-      loadError = "";
-    }).catch((error: unknown) => {
-      if (!cancelled) loadError = errorMessage(error, "呼出键读取失败，请重新打开设置");
-    });
-    return () => { cancelled = true; };
-  });
-
-  $effect(() => {
-    const value = draft;
-    const reason = draftReason;
-    if (loadedHotkey === null) return;
-    validation = null;
-    validationError = reason;
-    checking = !reason;
-    if (reason) return;
-    let cancelled = false;
-    void ipc.validateHotkey(value).then((result) => {
-      if (cancelled) return;
-      validation = result;
-      validatedDraft = value;
-      checking = false;
-    }).catch((error: unknown) => {
-      if (cancelled) return;
-      validationError = errorMessage(error, "快捷键校验失败，请重试");
-      checking = false;
-    });
-    // 较早的校验回执不得放行较新的非法草稿。
-    return () => { cancelled = true; };
-  });
+  const MODIFIER_CODES = /^(Control|Shift|Alt|Meta|OS)(Left|Right)?$/;
+  const MODIFIER_KEYCODES = new Set([16, 17, 18, 91, 92, 93]);
+  const NAMED_KEYCODES: Record<number, string> = {
+    8: "Backspace", 9: "Tab", 13: "Enter", 19: "Pause", 20: "CapsLock", 27: "Escape", 32: "Space",
+    33: "PageUp", 34: "PageDown", 35: "End", 36: "Home", 37: "ArrowLeft", 38: "ArrowUp", 39: "ArrowRight", 40: "ArrowDown",
+    44: "PrintScreen", 45: "Insert", 46: "Delete", 106: "NumpadMultiply", 107: "NumpadAdd", 109: "NumpadSubtract",
+    110: "NumpadDecimal", 111: "NumpadDivide", 144: "NumLock", 145: "ScrollLock", 186: "Semicolon", 187: "Equal",
+    188: "Comma", 189: "Minus", 190: "Period", 191: "Slash", 192: "Backquote", 219: "BracketLeft", 220: "Backslash",
+    221: "BracketRight", 222: "Quote",
+  };
+  // 没有扫描码的输入（远程桌面、改键工具、SendInput 只填虚拟键）code 为空，按 keyCode 补出同名 code。
+  const keyCodeName = (event: KeyboardEvent) => {
+    const code = event.keyCode;
+    if (code >= 65 && code <= 90) return `Key${String.fromCharCode(code)}`;
+    if (code >= 48 && code <= 57) return `Digit${code - 48}`;
+    if (code >= 96 && code <= 105) return `Numpad${code - 96}`;
+    if (code >= 112 && code <= 135) return `F${code - 111}`;
+    return NAMED_KEYCODES[code] ?? "";
+  };
+  const errorMessage = (value: unknown, fallback: string) => value instanceof Error ? value.message : typeof value === "string" ? value : fallback;
+  const MODIFIER_ORDER = ["control", "ctrl", "alt", "shift", "super", "win"];
+  const rank = (part: string) => { const at = MODIFIER_ORDER.indexOf(part.toLowerCase()); return at < 0 ? 99 : at; };
+  // 后端规范化后的顺序是 shift+control+…；显示统一成 Ctrl、Alt、Shift、Win、主键。
+  const display = (value: string) => value.split("+").sort((a, b) => rank(a) - rank(b)).map((part) => part
+    .replace(/^control$/i, "Ctrl").replace(/^super$/i, "Win").replace(/^shift$/i, "Shift").replace(/^alt$/i, "Alt")
+    .replace(/^Key([A-Z])$/, "$1").replace(/^Digit([0-9])$/, "$1").replace(/^Backquote$/, "`")
+    .replace(/^Numpad(.+)$/, "小键盘 $1").replace(/^Arrow(Up|Down|Left|Right)$/, (_, side: string) => ({ Up: "↑", Down: "↓", Left: "←", Right: "→" })[side] ?? side))
+    .join(" + ");
+  const modifiersOf = (event: KeyboardEvent) => [
+    ...(event.ctrlKey ? ["Ctrl"] : []), ...(event.altKey ? ["Alt"] : []),
+    ...(event.shiftKey ? ["Shift"] : []), ...(event.metaKey ? ["Super"] : []),
+  ];
 
   async function refreshRuntime() {
     const request = ++statusRequest;
     try {
       const value = await ipc.getHotkeyStatus();
       if (!disposed && request === statusRequest) { runtime = value; runtimeError = ""; }
-    } catch (error) {
-      if (!disposed && request === statusRequest) runtimeError = errorMessage(error, "注册状态读取失败，请点击刷新状态");
+    } catch (failure) {
+      if (!disposed && request === statusRequest) runtimeError = errorMessage(failure, "注册状态读取失败");
     }
   }
 
-  async function saveHotkey() {
-    if (disabled || checking || draftReason || !validation || validatedDraft !== draft) return;
-    const saved = await onsave({ hotkey: validation.hotkey }, "呼出快捷键已保存；实际注册状态见上方，无需重启");
-    if (saved) await refreshRuntime();
+  async function start() {
+    if (disabled || recording || busy) return;
+    recording = true; held = []; error = ""; warning = null;
+    try { await ipc.pauseHotkey(true); } catch { /* 暂停失败也能录，只是按到当前组合会呼出面板 */ }
+  }
+
+  async function stop() {
+    if (!recording) return;
+    recording = false; held = [];
+    try { await ipc.pauseHotkey(false); } catch { /* 后端 30 秒后会自动恢复 */ }
+    await refreshRuntime();
+  }
+
+  async function capture(event: KeyboardEvent) {
+    if (!recording) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.repeat || busy) return;
+    const modifiers = modifiersOf(event);
+    if (MODIFIER_CODES.test(event.code) || MODIFIER_KEYCODES.has(event.keyCode)) { held = modifiers; return; }
+    const code = event.code || keyCodeName(event);
+    if (!code) { error = "这个键不能用作快捷键"; return; }
+    if (code === "Escape" && !modifiers.length) { error = ""; await stop(); return; }
+    if (!modifiers.length) { error = "需要配合 Ctrl、Alt、Shift 或 Win 中的至少一个"; return; }
+    const value = [...modifiers, code].join("+");
+    busy = true;
+    try {
+      const checked = await ipc.validateHotkey(value);
+      if (disposed) return;
+      error = "";
+      warning = checked.warning ?? null;
+      if (checked.hotkey !== hotkey) await onsave({ hotkey: checked.hotkey }, `呼出快捷键已改为 ${display(checked.hotkey)}`);
+      await stop();
+    } catch (failure) {
+      // 系统保留或无效：留在录制状态，直接再按一个。
+      error = errorMessage(failure, "这个组合不能用，换一个试试");
+      held = [];
+    } finally {
+      busy = false;
+    }
+  }
+
+  function release(event: KeyboardEvent) {
+    if (!recording) return;
+    event.preventDefault();
+    held = modifiersOf(event);
   }
 
   onMount(() => {
     void refreshRuntime();
     let unlisten: ipc.UnlistenFn | undefined;
-    void ipc.onSettingsChanged(() => { void refreshRuntime(); }).then((stop) => {
-      if (disposed) stop(); else unlisten = stop;
-    }).catch(() => { /* 命令保存后仍会主动回读；广播监听失败不伪造成功状态。 */ });
-    return () => { disposed = true; unlisten?.(); };
+    void ipc.onSettingsChanged(() => { void refreshRuntime(); }).then((stopListening) => {
+      if (disposed) stopListening(); else unlisten = stopListening;
+    }).catch(() => {});
+    const onBlur = () => { void stop(); };
+    window.addEventListener("blur", onBlur);
+    return () => {
+      disposed = true; unlisten?.();
+      window.removeEventListener("blur", onBlur);
+      if (recording) void ipc.pauseHotkey(false).catch(() => {});
+    };
   });
 </script>
+
+<svelte:window onkeydown={capture} onkeyup={release} />
 
 <section class="hotkey-group" aria-labelledby="hotkey-title">
   <h3 id="hotkey-title">呼出快捷键</h3>
   <div class="hotkey-card">
-    <p class="intro">选择修饰键与一个主键，再确认保存。即时生效，无需重启；不会改变面板的焦点行为。</p>
-    <p class="current">已保存：<strong>{display(hotkey)}</strong></p>
-    <fieldset disabled={disabled || loadedHotkey === null}>
-      <legend>修饰键（至少一个）</legend>
-      <div class="modifiers">
-        <label><input type="checkbox" bind:checked={control} />Ctrl</label>
-        <label><input type="checkbox" bind:checked={alt} />Alt</label>
-        <label><input type="checkbox" bind:checked={shift} />Shift</label>
-        <label><input type="checkbox" bind:checked={win} />Win</label>
-      </div>
-      <label class="main-key" for="hotkey-main">主键
-        <select id="hotkey-main" bind:value={key} aria-invalid={!!validationError} aria-describedby="hotkey-validation">
-          <option value="">请选择一个主键</option>
-          {#each keyGroups as group}
-            <optgroup label={group.label}>
-              {#each group.keys as entry}<option value={entry.value}>{entry.label}</option>{/each}
-            </optgroup>
-          {/each}
-        </select>
-      </label>
-    </fieldset>
-    <div id="hotkey-validation" class:error={!!validationError || !!loadError} class="validation" role="status" aria-live="polite">
-      {loadError || validationError || (checking ? "正在校验…" : validation ? `待保存：${display(validation.hotkey)}` : "正在读取快捷键…")}
+    <div class="recorder-row">
+      <button
+        type="button"
+        class="recorder"
+        class:recording
+        disabled={disabled && !recording}
+        aria-describedby="hotkey-help"
+        onclick={() => { if (recording) void stop(); else void start(); }}
+      >
+        {#if recording}
+          <span class="live">{held.length ? `${held.map(display).join(" + ")} + …` : "请按下新的组合键"}</span>
+        {:else}
+          <kbd>{display(hotkey)}</kbd>
+        {/if}
+      </button>
+      <span id="hotkey-help" class="help">{recording ? "Esc 取消" : "点击后直接按下组合键"}</span>
     </div>
-    {#if validation?.warning}<p class="hint">提示：{validation.warning}</p>{/if}
-    <div class="actions">
-      <button type="button" disabled={disabled || checking || loadedHotkey === null || !!draftReason || !validation || validatedDraft !== draft} onclick={saveHotkey}>{runtime?.error ? "保存并重试注册" : "保存快捷键"}</button>
-      <button type="button" class="secondary" disabled={disabled} onclick={refreshRuntime}>刷新状态</button>
-    </div>
-    <div class="runtime" class:error={!!runtime?.error || !!runtimeError} role="status" aria-live="polite">
-      {#if runtimeError}<p>{runtimeError}</p>{/if}
-      {#if runtime}
-        <p>当前生效：<strong>{runtime.active ? display(runtime.active) : "无（可从托盘打开面板）"}</strong></p>
-        {#if runtime.error}<p>{runtime.error}</p>{/if}
-        {#if runtime.detail}<p class="detail">系统返回：{runtime.detail}</p>{/if}
-        {#if runtime.overridden}<p>本进程由 NIANLAI_HOTKEY 测试覆盖：{display(runtime.requested)}。保存值已保留，移除覆盖后下次启动使用。</p>{/if}
-        {#if runtime.disabled}<p>自动循环测试已暂停注册呼出键；保存值不受影响。</p>{/if}
-      {:else if !runtimeError}<p>正在读取注册状态…</p>{/if}
-    </div>
-    <p class="hint">已知系统保留组合会阻止保存；常见应用冲突只提示，不强制阻止。Win 键可选，但最终可用性以系统注册结果为准。</p>
+    {#if error}<p class="error" role="alert">{error}</p>{/if}
+    {#if warning && !recording}<p class="hint">{warning}</p>{/if}
+    {#if runtimeError}<p class="error">{runtimeError}</p>{/if}
+    {#if runtime && !recording}
+      {#if runtime.error}
+        <p class="error">{runtime.error}{#if runtime.detail}（{runtime.detail}）{/if}</p>
+      {/if}
+      {#if runtime.overridden}<p class="hint">本进程由 NIANLAI_HOTKEY 测试覆盖为 {display(runtime.requested)}；保存值下次启动使用。</p>{/if}
+      {#if runtime.disabled}<p class="hint">自动循环测试已暂停注册呼出键。</p>{/if}
+    {/if}
   </div>
 </section>
 
 <style>
   .hotkey-group { display: grid; gap: 8px; }
   h3 { margin: 0; color: var(--settings-muted); font-size: 11px; font-weight: 600; letter-spacing: .04em; }
-  .hotkey-card { display: grid; gap: 10px; padding: 16px; border: 1px solid var(--settings-line); border-radius: var(--radius-md); background: var(--settings-card); }
-  p { margin: 0; font-size: 11px; line-height: 1.6; }
-  .intro, .hint, .detail { color: var(--settings-muted); }
-  .current strong, .runtime strong { font-family: var(--font-mono); font-weight: 600; }
-  fieldset { min-width: 0; display: grid; gap: 12px; margin: 0; padding: 0; border: 0; }
-  legend { margin-bottom: 8px; padding: 0; font-size: 11px; }
-  .modifiers { display: flex; flex-wrap: wrap; gap: 8px 16px; }
-  .modifiers label { display: flex; align-items: center; gap: 6px; font-size: 12px; }
-  input { accent-color: var(--settings-accent); }
-  .main-key { display: flex; align-items: center; gap: 16px; font-size: 11px; }
-  select { min-width: 180px; min-height: 33px; padding: 5px 9px; border: 1px solid var(--settings-line); border-radius: var(--radius-sm); background: var(--settings-field); color: var(--settings-text); font-size: 11px; }
-  .validation { min-height: 16px; color: var(--settings-muted); font-size: 11px; }
-  .actions { display: flex; flex-wrap: wrap; gap: 8px; }
-  button { min-height: 33px; padding: 5px 12px; border: 1px solid var(--settings-accent); border-radius: var(--radius-sm); background: var(--settings-selected); color: var(--settings-text); font-size: 11px; }
-  button.secondary { border-color: var(--settings-line); background: transparent; }
-  :disabled { opacity: .65; }
-  .runtime { display: grid; gap: 4px; padding-top: 10px; border-top: 1px solid var(--settings-line); overflow-wrap: anywhere; }
+  .hotkey-card { display: grid; gap: 8px; padding: 16px; border: 1px solid var(--settings-line); border-radius: var(--radius-md); background: var(--settings-card); }
+  .recorder-row { display: flex; align-items: center; gap: 14px; }
+  .recorder { min-width: 220px; min-height: 36px; display: flex; align-items: center; justify-content: center; padding: 5px 14px; border: 1px solid var(--settings-line); border-radius: var(--radius-sm); background: var(--settings-field); color: var(--settings-text); font-size: 12px; cursor: pointer; }
+  .recorder:hover:not(:disabled) { border-color: var(--settings-accent); }
+  .recorder.recording { border-color: var(--settings-accent); background: var(--settings-selected); }
+  .recorder:focus-visible { outline: 2px solid var(--settings-accent); outline-offset: 2px; }
+  .recorder:disabled { opacity: .65; cursor: default; }
+  kbd { font: 600 12px var(--font-mono); }
+  .live { color: var(--settings-muted); font: 12px var(--font-mono); }
+  .help { color: var(--settings-muted); font-size: 11px; }
+  p { margin: 0; font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
+  .hint { color: var(--settings-muted); }
   .error { color: var(--state-critical); }
 </style>

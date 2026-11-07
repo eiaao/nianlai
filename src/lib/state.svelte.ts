@@ -5,12 +5,14 @@ import * as ipc from "./ipc";
 import type { HistoryItem, HistorySnapshot, PanelInteraction, PasteMode, SearchSelection, Timing, UnlistenFn } from "./ipc";
 import type { Preferences } from "./preferences";
 
+const HOLD_HINT_MS = 300;
+// 比后端撤销窗口（4 秒）略短，免得点了撤销却已经提交。
+const UNDO_MS = 3500;
 const DEFAULT_PREFERENCES: Preferences = { layout: "a", theme: "system", motion: "soft", density: "compact" };
 
 export type PasteFeedback = {
   kind: "copied" | "failed"; title: string; detail: string; duration: number; startedAt: number;
 };
-export type LastPasteResult = "confirmed" | "sent" | "copied";
 
 // 缺少后端确认时不猜权限或原输入控件是否恢复。
 export const COPIED_HINT = "已复制，请先点击目标输入位置，再按 Ctrl+V";
@@ -26,17 +28,24 @@ export class PanelState {
   history = $state<HistorySnapshot>({ items: [], total: 0, recording: false, last_recorded_ms: null, store_status: null });
   favorites = $state<HistoryItem[]>([]);
   favoritePending = $state<number | null>(null);
+  // 刚删除、还能撤销的那一条（只在本次呼出内有效）。
+  undo = $state<{ id: number; session: number; label: string; startedAt: number; duration: number } | null>(null);
+  private deleting = false;
+  private undoTimer: ReturnType<typeof setTimeout> | null = null;
   preferences = $state<Preferences>({ ...DEFAULT_PREFERENCES });
   motion = $derived(this.preferences.motion);
   ctrlDown = $state(false);
+  // 按住修饰键超过 HOLD_HINT_MS 才在页脚换成对应提示；快速组合键（Ctrl+D、Ctrl+Enter）不闪。
+  heldModifier = $state<"" | "ctrl" | "shift">("");
   previewOpen = $state(false);
   imeActive = $state(false);
-  lastResult = $state<LastPasteResult | null>(null);
   feedback = $state<PasteFeedback | null>(null);
   query = $state("");
   mode = $state<"quick" | "search">("quick");
   interaction = $state<PanelInteraction>("quick");
   visible = $state(false);
+  // 启动预热：窗口还隐藏时把真实历史按当前布局渲染一遍（不可见），让首次呼出不再付冷启动的脚本、样式与图标解码开销。
+  warming = $state(false);
   busy = $state(false);
   domFocus = $state<"idle" | "pending" | "ready" | "failed">("idle");
   searchStarting = $state(false);
@@ -58,27 +67,47 @@ export class PanelState {
   searchItems = $state<HistoryItem[]>([]);
   searchedQuery = $state("");
   searchRevision = $state(0);
-  private resultItems = $derived(!this.interactive ? [] : this.mode === "search" ? this.searchItems : this.history.items);
+  private resultItems = $derived(this.warming && !this.visible ? this.history.items
+    : !this.interactive ? [] : this.mode === "search" ? this.searchItems : this.history.items);
+  // 本次呼出里冻结的收藏区（条目 ID 顺序）。null 表示还没动过收藏，按当前收藏实时排；
+  // 第一次切换收藏时冻结，之后收藏/取消只改星标、不挪位置，下次呼出再按新收藏重排。
+  pinnedIds = $state<number[] | null>(null);
+  // 收藏顺序以条目上的 favorite_position 为准（后端分配后永不改变）；同位次时按 get_favorites() 的先后。
+  private livePins(items: HistoryItem[]) {
+    const rank = new Map(this.favorites.map((favorite, index) => [favorite.id, index]));
+    const flagged = new Map<number, HistoryItem>();
+    for (const item of items) if (item.favorite && !flagged.has(item.id)) flagged.set(item.id, item);
+    return [...flagged.values()].sort((a, b) =>
+      (a.favorite_position ?? Number.MAX_SAFE_INTEGER) - (b.favorite_position ?? Number.MAX_SAFE_INTEGER)
+      || (rank.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (rank.get(b.id) ?? Number.MAX_SAFE_INTEGER)).map((item) => item.id);
+  }
   private orderItems(items: HistoryItem[]) {
     const byId = new Map(items.map((item) => [item.id, item]));
     const ordered: HistoryItem[] = [];
     const included = new Set<number>();
-    // get_favorites() 是收藏区顺序的唯一来源；后端暂时拿不到时按项目字段降级。
-    for (const favorite of this.favorites) {
-      const item = byId.get(favorite.id);
-      if (item?.favorite && !included.has(item.id)) { ordered.push(item); included.add(item.id); }
+    for (const id of this.pinnedIds ?? this.livePins(items)) {
+      const item = byId.get(id);
+      if (item && !included.has(id)) { ordered.push(item); included.add(id); }
     }
-    const missing = items.filter((item) => item.favorite && !included.has(item.id))
-      .sort((a, b) => (a.favorite_position ?? Number.MAX_SAFE_INTEGER) - (b.favorite_position ?? Number.MAX_SAFE_INTEGER));
-    for (const item of missing) { ordered.push(item); included.add(item.id); }
-    for (const item of items) if (!item.favorite && !included.has(item.id)) { ordered.push(item); included.add(item.id); }
-    return ordered;
+    const pinned = ordered.length;
+    for (const item of items) if (!included.has(item.id)) { ordered.push(item); included.add(item.id); }
+    return { items: ordered, pinned };
   }
-  filtered = $derived.by(() => this.orderItems(this.resultItems));
+  private ordered = $derived.by(() => this.orderItems(this.resultItems));
+  filtered = $derived(this.ordered.items);
   // 被动提示只读展示旧历史，但可操作序列仍为空，继续封锁搜索、数字和鼠标取用。
-  visibleItems = $derived.by(() => this.interaction === "passive" ? this.orderItems(this.history.items) : this.filtered);
-  favoriteCount = $derived(this.visibleItems.reduce((count, item) => count + (item.favorite ? 1 : 0), 0));
+  private visibleOrder = $derived.by(() => this.interaction === "passive" ? this.orderItems(this.history.items) : this.ordered);
+  visibleItems = $derived(this.visibleOrder.items);
+  /** 收藏区条数（列表最前面那一段）。 */
+  favoriteCount = $derived(this.visibleOrder.pinned);
   currentItem = $derived(this.visibleItems[this.selected] ?? null);
+
+  /** 数字槽位只编最近区：收藏不挤占 1–9（PRD 6.5“常用库不靠置顶挤占历史的位置”）。 */
+  slotLabel(index: number) {
+    const slot = index - this.favoriteCount;
+    return slot >= 0 && slot < 9 ? String(slot + 1).padStart(2, "0") : null;
+  }
+  private slotIndex(slot: number) { return this.ordered.pinned + slot - 1; }
 
   // 以下故意不是响应式状态：搜索副作用不能因为它们变化而重跑。
   composing = false;
@@ -106,8 +135,21 @@ export class PanelState {
   private focusFrames = new Set<number>();
   private searchTimer: ReturnType<typeof setTimeout> | null = null;
   private searchAfterFocus = false;
-  private lastResultTimer: ReturnType<typeof setTimeout> | null = null;
   private feedbackTimer: ReturnType<typeof setTimeout> | null = null;
+  private modifierTimer: ReturnType<typeof setTimeout> | null = null;
+  private pendingModifier: "" | "ctrl" | "shift" = "";
+
+  /** 修饰键状态：activated 来自 DOM 事件，普通 quick 来自钩子（panel:key 的 Mod:*）。 */
+  setModifiers = (ctrl: boolean, shift: boolean) => {
+    this.ctrlDown = ctrl;
+    const next = ctrl && !shift ? "ctrl" : shift && !ctrl ? "shift" : "";
+    if (next === this.pendingModifier) return;
+    this.pendingModifier = next;
+    if (this.modifierTimer !== null) clearTimeout(this.modifierTimer);
+    this.modifierTimer = null;
+    if (!next) { this.heldModifier = ""; return; }
+    this.modifierTimer = setTimeout(() => { this.modifierTimer = null; this.heldModifier = this.pendingModifier; }, HOLD_HINT_MS);
+  };
 
   /** 登记面板的两个副作用（搜索、选中项夹紧和滚动）。必须在根组件初始化期间调用，顺序不要换。 */
   watch() {
@@ -144,18 +186,19 @@ export class PanelState {
   };
 
   refreshFavorites = async () => {
-    const selectedId = this.currentItem?.id;
     const session = this.session;
     try {
       const favorites = await ipc.getFavorites?.();
       if (!favorites) return;
+      // 按回来那一刻的选中项追踪：请求期间用户可能已经移动过，不能拉回请求前的位置。
+      const selectedId = this.currentItem?.id;
       this.favorites = favorites;
       if (this.visible && session === this.session && selectedId !== undefined) {
         const index = this.visibleItems.findIndex((item) => item.id === selectedId);
         this.selected = Math.max(0, index);
       }
     } catch {
-      if (this.visible) this.message = "收藏顺序读取失败，已按记录中的收藏标记显示。";
+      // 读不到就按条目上的收藏标记排，结果仍可用，不打扰用户。
     }
   };
 
@@ -180,13 +223,13 @@ export class PanelState {
     if (!item) return;
     const selectedId = this.currentItem?.id;
     const session = this.session;
-    this.dismissLastResult();
+    if (this.pinnedIds === null) this.pinnedIds = this.livePins([...this.favorites, ...this.history.items, ...this.searchItems]);
     this.favoritePending = id;
     try {
       const updated = await ipc.setFavorite(id, !item.favorite);
       if (session !== this.session) return;
       if (!updated) { this.message = "这条记录已不在历史里。"; return; }
-      // 只补丁更新返回项；原始最近/搜索数组不重载、不重新排序，其他收藏的位置不变。
+      // 只补丁更新返回项；收藏区已冻结，这条只换星标、不换位置。
       const patch = (entry: HistoryItem) => entry.id === id ? updated : entry;
       this.history = { ...this.history, items: this.history.items.map(patch) };
       this.searchItems = this.searchItems.map(patch);
@@ -206,23 +249,66 @@ export class PanelState {
     }
   };
 
+  private clearUndo() {
+    this.undo = null;
+    if (this.undoTimer !== null) clearTimeout(this.undoTimer);
+    this.undoTimer = null;
+  }
+
+  /** Delete：删掉当前条目（可撤销）。只在快速模式；搜索框里的 Delete 仍是删字。 */
+  deleteCurrent = async () => {
+    const item = this.currentItem;
+    if (!this.visible || !this.interactive || this.busy || this.mode !== "quick" || !item || this.deleting) return;
+    if (item.favorite) { this.message = "收藏的记录先取消收藏再删除。"; return; }
+    const session = this.session;
+    const index = this.selected;
+    this.deleting = true;
+    try {
+      const removed = await ipc.deleteItem?.(item.id);
+      if (session !== this.session || !this.visible) return;
+      if (!removed) { this.message = "这条记录不能删除。"; return; }
+      this.message = "";
+      this.previewOpen = false;
+      this.history = { ...this.history, items: this.history.items.filter((entry) => entry.id !== item.id), total: Math.max(0, this.history.total - 1) };
+      this.searchItems = this.searchItems.filter((entry) => entry.id !== item.id);
+      // 删除后停在原位置（也就是下一条），没有下一条时退到上一条。
+      this.selected = Math.max(0, Math.min(index, this.visibleItems.length - 1));
+      this.clearUndo();
+      const text = [...(item.preview || item.file_names[0] || "").replace(/\s+/g, " ").trim()];
+      const label = text.length > 16 ? `${text.slice(0, 16).join("")}…` : text.join("") || "1 条记录";
+      this.undo = { id: item.id, session, label, startedAt: Date.now(), duration: UNDO_MS };
+      this.undoTimer = setTimeout(() => { this.undoTimer = null; this.undo = null; }, UNDO_MS);
+    } catch {
+      if (session === this.session && this.visible) this.message = "删除失败，请重试。";
+    } finally {
+      this.deleting = false;
+    }
+  };
+
+  undoDelete = async () => {
+    const undo = this.undo;
+    if (!undo || undo.session !== this.session || !this.visible) return;
+    this.clearUndo();
+    try {
+      const restored = await ipc.undoDelete?.(undo.id);
+      if (undo.session !== this.session || !this.visible) return;
+      if (!restored) { this.message = "已超过撤销时间。"; return; }
+      const snapshot = await ipc.getHistory();
+      if (undo.session !== this.session || !this.visible) return;
+      this.history = snapshot;
+      if (this.mode === "search") this.searchRevision += 1;
+      const index = this.visibleItems.findIndex((entry) => entry.id === undo.id);
+      if (index >= 0) this.selected = index;
+    } catch {
+      if (undo.session === this.session && this.visible) this.message = "撤销失败，请重试。";
+    }
+  };
+
   togglePreview = () => {
     if (!this.visible || !this.interactive || this.busy || this.awaitingRelease || this.mode !== "quick") return;
-    this.dismissLastResult();
     if (this.previewOpen) this.previewOpen = false;
     else if (this.currentItem) this.previewOpen = true;
   };
-
-  dismissLastResult = () => {
-    this.lastResult = null;
-    if (this.lastResultTimer !== null) clearTimeout(this.lastResultTimer);
-    this.lastResultTimer = null;
-  };
-
-  private showLastResult() {
-    if (this.lastResultTimer !== null) clearTimeout(this.lastResultTimer);
-    this.lastResultTimer = setTimeout(() => { this.lastResult = null; this.lastResultTimer = null; }, 4000);
-  }
 
   private clearFeedback() {
     this.feedback = null;
@@ -237,7 +323,6 @@ export class PanelState {
   }
 
   search = async (value: string) => {
-    if (value) this.dismissLastResult();
     const requestId = ++this.searchRequest;
     const currentSession = this.session;
     const reset = value !== this.previousQuery || currentSession !== this.previousSession;
@@ -390,7 +475,7 @@ export class PanelState {
     if (this.composing) { this.composing = false; this.imeActive = false; this.compositionEnded = performance.now(); this.searchRevision += 1; }
   };
 
-  windowBlur = () => { this.ctrlDown = false; this.inputBlur(); };
+  windowBlur = () => { this.setModifiers(false, false); this.inputBlur(); };
 
   private domCode(event: KeyboardEvent) {
     return event.code || `${event.key}:${event.location}`;
@@ -430,7 +515,7 @@ export class PanelState {
   }
 
   keyup = (event: KeyboardEvent) => {
-    this.ctrlDown = event.ctrlKey;
+    this.setModifiers(event.ctrlKey, event.shiftKey);
     if (this.interaction === "close_only") {
       const downAt = this.closeOnlyEscape;
       this.closeOnlyEscape = null;
@@ -534,13 +619,11 @@ export class PanelState {
   }
 
   move = (offset: number) => {
-    this.dismissLastResult();
     this.selected = Math.max(0, Math.min(this.filtered.length - 1, this.selected + offset));
   };
 
   choose = async (index = this.selected, pasteMode: PasteMode = "paste", event?: KeyboardEvent | MouseEvent) => {
     if (!this.visible || !this.interactive || this.busy || this.pendingDom || !this.filtered[index]) return;
-    this.dismissLastResult();
     // 第一次 await 之前固定全部请求字段；绝不在 IPC/读库返回后换用更新的条目或 revision。
     const session = this.session;
     const id = this.filtered[index].id;
@@ -577,7 +660,6 @@ export class PanelState {
 
   navigate = (key: string, event?: KeyboardEvent) => {
     if (!this.visible || !this.interactive) return;
-    this.dismissLastResult();
     switch (key) {
       case "Space": this.togglePreview(); break;
       case "ArrowUp": this.move(-1); break;
@@ -592,19 +674,21 @@ export class PanelState {
       case "Shift+Enter": void this.choose(this.selected, "copy", event); break;
       case "Ctrl+Enter": void this.choose(this.selected, "text", event); break;
       case "Ctrl+D": if (this.currentItem) void this.toggleFavorite(this.currentItem.id); break;
+      case "Delete": void this.deleteCurrent(); break;
+      case "Ctrl+Z": void this.undoDelete(); break;
       case "Escape":
         if (this.previewOpen) { this.previewOpen = false; break; }
         if (this.interaction === "activated" && event) this.armDomChoice({ session: this.session, panelMode: this.mode,
           id: null, mode: "copy", code: this.domCode(event), downAt: event.timeStamp, released: false });
         else this.close();
         break;
-      default: if (/^[1-9]$/.test(key)) void this.choose(Number(key) - 1, "paste", event);
+      default: if (/^[1-9]$/.test(key)) void this.choose(this.slotIndex(Number(key)), "paste", event);
     }
   };
 
   // 普通 Quick 走钩子；Activated 在同一真实输入框中处理快速键和自然搜索输入。
   keydown = (event: KeyboardEvent) => {
-    this.ctrlDown = event.ctrlKey;
+    this.setModifiers(event.ctrlKey, event.shiftKey);
     if (this.interaction === "close_only") {
       if (this.visible && event.isTrusted === true && event.type === "keydown" && event.key === "Escape"
         && !event.repeat && !event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey
@@ -646,8 +730,13 @@ export class PanelState {
         }
         const unmodified = !event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey;
         const horizontal = this.preferences.layout === "c" && (event.key === "ArrowLeft" || event.key === "ArrowRight");
-        const action = event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey && event.key.toLowerCase() === "d"
+        const ctrlOnly = event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey;
+        const action = ctrlOnly && event.key.toLowerCase() === "d"
           ? "Ctrl+D"
+          : ctrlOnly && event.key.toLowerCase() === "z"
+          ? "Ctrl+Z"
+          : unmodified && event.key === "Delete"
+          ? "Delete"
           : event.key === "Enter" && !event.altKey && !event.metaKey && !(event.ctrlKey && event.shiftKey)
           ? event.ctrlKey ? "Ctrl+Enter" : event.shiftKey ? "Shift+Enter" : "Enter"
           : unmodified && (horizontal || /^[1-9]$/.test(event.key) || event.key === " " || ["Escape", "ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End"].includes(event.key)) ? event.key === " " ? "Space" : event.key : null;
@@ -665,7 +754,7 @@ export class PanelState {
     // 提交动作忽略长按重复；保留原 50ms 组合上屏保护和方向键长按导航。
     if (event.ctrlKey && !event.altKey && !event.metaKey && /^[1-9]$/.test(event.key)) {
       event.preventDefault();
-      if (!event.repeat && performance.now() - this.compositionEnded >= 50) void this.choose(Number(event.key) - 1, "paste", event);
+      if (!event.repeat && performance.now() - this.compositionEnded >= 50) void this.choose(this.slotIndex(Number(event.key)), "paste", event);
       return;
     }
     if (event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey && event.key === "Enter") {
@@ -744,6 +833,23 @@ export class PanelState {
 
   endComposition = () => { this.composing = false; this.imeActive = false; this.compositionEnded = performance.now(); this.searchRevision += 1; };
 
+  private async prewarm() {
+    try {
+      const snapshot = await ipc.getHistory?.();
+      if (!snapshot || this.visible) return;
+      this.history = snapshot;
+      this.warming = true;
+      await tick();
+      // 读一次布局尺寸，强制样式计算与排版；隐藏窗口里 requestAnimationFrame 不一定会跑，不能等帧。
+      void document.body?.offsetHeight;
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    } catch {
+      // 预热只是优化，失败不影响就绪。
+    } finally {
+      this.warming = false;
+    }
+  }
+
   /** onMount 时调用：读版本号、订阅后端事件，全部订阅好后再发 frontend_ready；返回卸载时的清理函数。 */
   connect = () => {
     let disposed = false;
@@ -808,11 +914,11 @@ export class PanelState {
         this.message = "";
         this.clearFeedback();
         this.previewOpen = false;
-        this.ctrlDown = false;
+        this.setModifiers(false, false);
         this.imeActive = false;
         this.favoritePending = null;
-        if (this.lastResult) this.showLastResult();
-        else this.dismissLastResult();
+        this.pinnedIds = null;
+        this.clearUndo();
         void this.refreshFavorites();
         this.activationRetrying = false;
         this.composing = false;
@@ -850,6 +956,11 @@ export class PanelState {
       });
       await subscribe(ipc.onPanelKey, (payload) => {
         if (!this.visible || payload.session !== this.session) return;
+        // 钩子放行修饰键给目标程序，同时把按住状态报过来，只用于页脚提示。
+        if (payload.key.startsWith("Mod:")) {
+          if (this.interaction !== "activated") this.setModifiers(payload.key.includes("Ctrl"), payload.key.includes("Shift"));
+          return;
+        }
         if (this.interaction === "quick" && this.mode === "quick") this.navigate(payload.key);
         // 搜索模式不导航，但收藏键全局可用（钩子已吞键，必须经 panel:key 送达）。
         else if (payload.key === "Ctrl+D" && this.currentItem) void this.toggleFavorite(this.currentItem.id);
@@ -885,7 +996,8 @@ export class PanelState {
         this.searchRequest += 1;
         this.visible = false;
         this.previewOpen = false;
-        this.ctrlDown = false;
+        this.setModifiers(false, false);
+        this.clearUndo();
         this.imeActive = false;
         this.clearFeedback();
         this.mode = "quick";
@@ -914,12 +1026,7 @@ export class PanelState {
       });
       await subscribe(ipc.onPasteResult, (payload) => {
         if (payload.session !== this.session || this.interaction === "close_only") return;
-        // 通用路径先收起再回执：只保留下次呼出的一次性结论，不把“发键”推断成“已粘贴”。
-        if (payload.paste_result === "confirmed" || payload.paste_result === "sent" || payload.paste_result === "copied") {
-          this.lastResult = payload.paste_result;
-        } else if (payload.paste_result === "copied_only" && !payload.hint_dwell_ms) {
-          this.lastResult = "copied";
-        }
+        // 粘贴成功不出声：结果就在目标程序里，用户看得到。下面只说需要用户知道的偏差。
         if (!this.visible) return;
         if (payload.paste_result === "native_submission_unknown") {
           this.clearFeedback();
@@ -944,35 +1051,21 @@ export class PanelState {
         }
         if (this.interaction === "passive") return;
         this.busy = false;
-        const labels = {
-          copied: "已复制",
-          sent: payload.layer2?.timed_out ? "已发送粘贴指令，可能没粘进去" : "已发送粘贴指令",
-          confirmed: "确认已粘贴",
-          copied_only: payload.hint_message || COPIED_HINT,
-          native_submission_unknown: "粘贴结果未确认，请先检查目标，避免重复粘贴",
-        };
-        const evidence: string[] = [labels[payload.paste_result]];
-        const conversion = payload.as_text?.conversion;
-        if (payload.as_text?.error) evidence.push("转文字失败，按原样写入");
-        else if (conversion) evidence.push({ paths: "已转为路径", image_path: "已存为 PNG，粘贴路径", plain_text: "已去掉格式" }[conversion]);
-        if (payload.actual_key) {
-          evidence.push(payload.actual_key);
-          const read = payload.layer2?.status;
-          evidence.push(read === "target_read" ? "目标读取 ✓" : read === "other_process_first"
-            ? "其他程序先读" : read === "before_send" ? "发键前已读取" : "目标读取未确认");
-          evidence.push(payload.layer3.conclusion === "confirmed" ? "内容确认 ✓" : "内容未确认");
-        }
-        evidence.push(`${payload.selected_to_result_ms.toFixed(0)} ms`);
-        this.message = evidence.join(" · ");
+        const notes: string[] = [];
+        if (payload.paste_result === "copied_only") notes.push(payload.hint_message || COPIED_HINT);
+        if (payload.paste_result === "sent" && payload.layer2?.timed_out) notes.push("已发出粘贴，目标可能没收到");
+        if (payload.as_text?.error) notes.push("转文字失败，已按原样写入");
+        this.message = notes.join(" · ");
       });
       if (!disposed) await settingsReady;
+      if (!disposed) await this.prewarm();
       if (!disposed) await this.command(() => ipc.frontendReady());
     };
     void initialize().catch(() => { this.message = "初始化失败，请重启样机并查看日志。"; });
     return () => {
       disposed = true; this.searchRequest += 1; this.foregroundSnapshot = null;
       this.clearDomChoice(true); this.cancelDomFocus(); this.clearSearchTimer();
-      this.dismissLastResult(); this.clearFeedback();
+      this.clearFeedback(); this.setModifiers(false, false); this.clearUndo();
       unlisten.forEach((stop) => stop()); frames.forEach(cancelAnimationFrame);
     };
   };

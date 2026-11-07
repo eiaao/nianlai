@@ -204,6 +204,21 @@ impl History {
         self.snapshot().items.into_iter().find(|item| item.id == id)
     }
 
+    // 删除一条历史；收藏的不删（B03）。
+    pub fn delete(&mut self, id: usize) -> bool {
+        let Some(index) = self.records.iter().position(|record| record.id == id) else {
+            return false;
+        };
+        if self.records[index].favorite {
+            return false;
+        }
+        self.records.remove(index);
+        if self.last_observation_id == Some(id) {
+            self.last_observation_id = None;
+        }
+        true
+    }
+
     // 收藏列表按收藏顺序返回（E01）。
     pub fn favorites(&self) -> Vec<Preview> {
         let mut items: Vec<Preview> = self

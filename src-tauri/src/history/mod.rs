@@ -13,8 +13,11 @@ use std::{
         Arc, Mutex, OnceLock, RwLock,
         atomic::{AtomicBool, Ordering},
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
+
+/// 面板里按 Delete 后可撤销的时长。期间条目从列表和搜索里拿掉，到期才真正删除。
+pub const UNDO_WINDOW: Duration = Duration::from_secs(4);
 
 #[derive(Clone, Serialize)]
 pub struct Preview {
@@ -67,6 +70,8 @@ pub struct Shared {
     recording: AtomicBool,
     last_write: Mutex<Option<Instant>>,
     refresh: Mutex<Option<crate::platform::apps::Refresher>>,
+    // 待删除（撤销窗口内）的那一条；同一时间只挂一条，新的删除会先提交上一条。
+    pending_delete: Mutex<Option<(usize, Instant)>>,
     hash: Hash,
     logger: Logger,
 }
@@ -91,6 +96,7 @@ impl History {
             recording: AtomicBool::new(false),
             last_write: Mutex::new(None),
             refresh: Mutex::new(None),
+            pending_delete: Mutex::new(None),
             hash,
             logger,
         });
@@ -144,6 +150,9 @@ impl History {
     }
     pub fn summary(&self) {
         self.0.summary();
+    }
+    pub fn flush_delete(&self) {
+        self.0.flush_delete();
     }
     pub fn maintenance(self: &Arc<Self>, changed: Arc<dyn Fn() + Send + Sync>) {
         let Some(store) = self.0.store() else {
@@ -315,6 +324,13 @@ impl Shared {
         } else {
             self.memory.lock().unwrap().snapshot()
         };
+        if let Some((id, _)) = *self.pending_delete.lock().unwrap() {
+            let before = snapshot.items.len();
+            snapshot.items.retain(|item| item.id != id);
+            if snapshot.items.len() < before {
+                snapshot.total = snapshot.total.saturating_sub(1);
+            }
+        }
         snapshot.recording = self.recording.load(Ordering::Acquire);
         snapshot.store_status = *self.status.lock().unwrap();
         snapshot
@@ -341,7 +357,11 @@ impl Shared {
         };
         self.logger.event("search",json!({"words":query.split_whitespace().count(),"characters":query.chars().count(),"mode":mode,
             "results":result.as_ref().map(Vec::len).ok(),"elapsed_ms":started.elapsed().as_secs_f64()*1000.0,"error_code":result.as_ref().err()}));
-        result.map(|items| SearchReply { request_id, items })
+        let pending = self.pending_delete.lock().unwrap().map(|(id, _)| id);
+        result.map(|mut items: Vec<Preview>| {
+            items.retain(|item| Some(item.id) != pending);
+            SearchReply { request_id, items }
+        })
     }
     pub fn ingest(
         &self,
@@ -350,7 +370,7 @@ impl Shared {
         partial: bool,
         now: Instant,
     ) -> Result<Ingest, String> {
-        if let Some(store) = self.store() {
+        let result = if let Some(store) = self.store() {
             store
                 .ingest(content, event, partial, now)
                 .map_err(|e| e.to_string())
@@ -378,7 +398,19 @@ impl Shared {
                     write_ms: 0.0,
                     transaction_ok: false,
                 })
+        };
+        // 撤销窗口内又复制了同样的内容：这条又是活的，取消挂起的删除。
+        if let Ok(Ingest {
+            record_id: Some(id),
+            ..
+        }) = &result
+        {
+            let mut pending = self.pending_delete.lock().unwrap();
+            if pending.is_some_and(|(pending, _)| pending == *id) {
+                *pending = None;
+            }
         }
+        result
     }
     // 仅在采集、搜索或粘贴工作线程调用；界面用 snapshot，绝不读 BLOB。
     pub fn get(&self, id: usize) -> Result<Option<Arc<Content>>, String> {
@@ -441,6 +473,87 @@ impl Shared {
         } else {
             self.memory.lock().unwrap().skipped_sequence(sequence);
         }
+    }
+    /// 面板 Delete：先挂起，UNDO_WINDOW 后才真正删除。收藏的内容不删（B03），返回 false。
+    pub fn delete(self: &Arc<Self>, id: usize) -> Result<bool, String> {
+        let deletable = if let Some(store) = self.store() {
+            store
+                .reader()
+                .and_then(|r| r.deletable(id))
+                .map_err(|e| e.to_string())?
+        } else {
+            self.memory
+                .lock()
+                .unwrap()
+                .favorites()
+                .iter()
+                .all(|item| item.id != id)
+        };
+        if !deletable {
+            return Ok(false);
+        }
+        let at = Instant::now();
+        let previous = self.pending_delete.lock().unwrap().replace((id, at));
+        if let Some((previous, _)) = previous.filter(|(previous, _)| *previous != id) {
+            self.commit_delete(previous);
+        }
+        let this = self.clone();
+        let spawned = std::thread::Builder::new()
+            .name("history-delete".into())
+            .spawn(move || {
+                std::thread::sleep(UNDO_WINDOW);
+                let due = {
+                    let mut pending = this.pending_delete.lock().unwrap();
+                    let due = *pending == Some((id, at));
+                    if due {
+                        *pending = None;
+                    }
+                    due
+                };
+                if due {
+                    this.commit_delete(id);
+                }
+            });
+        if spawned.is_err() {
+            // 起不了计时线程就不给撤销机会，直接删，不能让条目一直挂着。
+            *self.pending_delete.lock().unwrap() = None;
+            self.commit_delete(id);
+        }
+        self.logger.event(
+            "history_delete_pending",
+            json!({"undo_ms":UNDO_WINDOW.as_millis() as u64}),
+        );
+        Ok(true)
+    }
+    /// 撤销窗口内恢复；已经提交或不是挂起的那条时返回 false。
+    pub fn undo_delete(&self, id: usize) -> bool {
+        let mut pending = self.pending_delete.lock().unwrap();
+        let undone = pending.is_some_and(|(pending, _)| pending == id);
+        if undone {
+            *pending = None;
+        }
+        drop(pending);
+        self.logger
+            .event("history_delete_undo", json!({"success":undone}));
+        undone
+    }
+    /// 退出前提交挂起的删除，撤销窗口不跨进程。
+    pub fn flush_delete(&self) {
+        let pending = self.pending_delete.lock().unwrap().take();
+        if let Some((id, _)) = pending {
+            self.commit_delete(id);
+        }
+    }
+    fn commit_delete(&self, id: usize) {
+        let result = if let Some(store) = self.store() {
+            store.delete(id).map_err(|e| e.to_string())
+        } else {
+            Ok(self.memory.lock().unwrap().delete(id))
+        };
+        self.logger.event(
+            "history_deleted",
+            json!({"removed":result.as_ref().ok(),"error_code":result.as_ref().err()}),
+        );
     }
     pub fn favorites(&self) -> Result<Vec<Preview>, String> {
         if let Some(store) = self.store() {
@@ -650,6 +763,80 @@ mod startup_tests {
             // 列表快照同样带收藏字段。
             let listed = shared.snapshot();
             assert!(listed.items.iter().all(|item| !item.favorite));
+        }
+    }
+
+    // 面板 Delete：撤销窗口内条目从快照和搜索里消失、可撤销；收藏拒删；再次复制取消挂起；退出前提交。
+    #[test]
+    fn pending_delete_hides_undoes_and_commits_for_stored_and_memory_modes() {
+        for persistent in [false, true] {
+            let directory = Directory::new();
+            let directories = directories(&directory);
+            let logger = Logger::with_settings(&directories, 20).unwrap();
+            let history = History::new(nianlai_store::hash::sha256, logger);
+            if persistent {
+                history.initialize();
+            }
+            let shared = &history.0;
+            let now = Instant::now();
+            let save = |text: &str, sequence: u32| {
+                shared
+                    .ingest(
+                        Content::text(text, nianlai_store::hash::sha256).unwrap(),
+                        CopyEvent {
+                            time_ms: now_ms(),
+                            sequence,
+                            source_process: "delete-test.exe".into(),
+                            source_path: String::new(),
+                            owner_process: "delete-test.exe".into(),
+                            owner_pid: 1,
+                            observed: now,
+                        },
+                        false,
+                        now,
+                    )
+                    .unwrap()
+                    .record_id
+                    .unwrap()
+            };
+            let kept = save("删除注册表甲", 1);
+            let removed = save("删除注册表乙", 2);
+            let ids = |shared: &Arc<Shared>| {
+                shared
+                    .snapshot()
+                    .items
+                    .iter()
+                    .map(|item| item.id)
+                    .collect::<Vec<_>>()
+            };
+            shared.set_favorite(kept, true).unwrap().unwrap();
+            assert!(!shared.delete(kept).unwrap(), "收藏的不删");
+            assert!(shared.delete(removed).unwrap());
+            assert!(!ids(shared).contains(&removed));
+            assert_eq!(shared.snapshot().total, 1);
+            assert!(
+                shared
+                    .search("删除注册表", 1)
+                    .unwrap()
+                    .items
+                    .iter()
+                    .all(|item| item.id != removed)
+            );
+            assert!(shared.undo_delete(removed));
+            assert!(!shared.undo_delete(removed));
+            assert!(ids(shared).contains(&removed));
+            // 撤销窗口内再次复制同样内容：取消挂起，不会被到期提交删掉。
+            assert!(shared.delete(removed).unwrap());
+            assert_eq!(save("删除注册表乙", 3), removed);
+            assert!(ids(shared).contains(&removed));
+            shared.flush_delete();
+            assert!(shared.get(removed).unwrap().is_some());
+            // 退出前提交挂起的删除。
+            assert!(shared.delete(removed).unwrap());
+            shared.flush_delete();
+            assert!(shared.get(removed).unwrap().is_none());
+            assert!(!shared.undo_delete(removed));
+            assert!(shared.get(kept).unwrap().is_some());
         }
     }
 }
