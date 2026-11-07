@@ -46,14 +46,22 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 pnpm check
 pnpm build
-python -I tools/check_release_versions.py
-python -I -m unittest discover -s tools -p "test_release*.py" -v
+python -X utf8 -I tools/check_release_versions.py
+python -X utf8 -I -m unittest discover -s tools -p "test_release*.py" -v
 ```
 
-所有 PR、推送到 `main`、推送 `v*` 标签以及手动触发都会运行 CI 检查，包括发布版本核对和发布脚本的隔离集成测试。检查通过后，所有这些事件都会执行 `tools/release.ps1`，真实构建前端与 Windows x64 程序，并上传便携版 ZIP、SHA-256 校验文件和 `build-info.json` 供验收下载，不自动发布 GitHub Release。工作区中的 Windows 专用工具也参与检查，CI 使用 `windows-latest`。
+CI（`.github/workflows/ci.yml`）在所有 PR、推送到 `main` 和手动触发时运行：先跑上面的检查和面板状态机回归，再用 `tools/release.ps1` 真实构建便携版，ZIP、SHA-256 校验文件和 `build-info.json` 作为构建产物保留 30 天。同一 PR 有新推送时会取消旧的运行。
+
+### 发版
+
+1. 改版本号：`powershell -NoProfile -ExecutionPolicy Bypass -File tools\release.ps1 -Version 0.1.0-alpha.3 -AllowDirty`。它会同步 `src-tauri/Cargo.toml`、`package.json` 和 `Cargo.lock`，顺带在本地打一个包。
+2. 提交版本号改动并推送到 `main`。
+3. 打标签并推送：`git tag v0.1.0-alpha.3 && git push origin v0.1.0-alpha.3`。
+
+推送 `v*` 标签会触发 `.github/workflows/release.yml`：核对标签与 `Cargo.toml` 版本一致 → 跑完整的检查和构建 → 核对校验值、版本和来源提交 → 创建 GitHub Release 并上传 ZIP、校验文件和构建信息。版本号带 `-`（alpha、beta、rc）的标为预发布。说明里附 SHA-256，并自动列出自上个标签以来的提交。
 
 建议仓库维护者在 GitHub 网页上为 `main` 设置分支保护：禁止直接推送，要求通过 PR 合并，并要求 CI 检查通过。
 
 ## 许可证
 
-待定。
+[MIT](LICENSE)。

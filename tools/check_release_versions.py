@@ -1,6 +1,7 @@
 """只读核对发布版本，防止构建和界面使用不同版本来源。"""
 
 import json
+import sys
 from pathlib import Path
 import tomllib
 
@@ -28,6 +29,9 @@ def check_versions(root: Path) -> list[str]:
 
 
 def main() -> int:
+    # Windows 管道默认是本地代码页（CI 上是 cp1252），中文会编码失败。
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
     try:
         errors = check_versions(ROOT)
     except (OSError, ValueError, TypeError) as error:

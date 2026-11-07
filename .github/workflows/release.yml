@@ -1,0 +1,108 @@
+name: 发布
+
+# 推送 v* 标签即发布：标签须与 src-tauri/Cargo.toml 的版本一致（v0.1.0-alpha.3 ↔ 0.1.0-alpha.3）。
+# 先跑完整的检查与构建，再核对产物并创建 GitHub Release；带 - 的版本标为预发布。
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify-tag:
+    name: 核对标签与版本
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+      - name: 读取并核对版本
+        id: version
+        shell: bash
+        run: |
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("src-tauri/Cargo.toml","rb"))["package"]["version"])')
+          tag="${GITHUB_REF_NAME}"
+          if [ "v${version}" != "${tag}" ]; then
+            echo "::error::标签 ${tag} 与 Cargo.toml 的版本 ${version} 不一致"
+            exit 1
+          fi
+          if [[ "${version}" == *-* ]]; then prerelease=true; else prerelease=false; fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "prerelease=${prerelease}" >> "$GITHUB_OUTPUT"
+
+  ci:
+    name: 检查与构建
+    needs: verify-tag
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    name: 创建 GitHub Release
+    needs: [verify-tag, ci]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: 下载构建产物
+        uses: actions/download-artifact@v4
+        with:
+          name: nianlai-windows
+          path: dist-release
+      - name: 核对产物
+        shell: bash
+        working-directory: dist-release
+        env:
+          VERSION: ${{ needs.verify-tag.outputs.version }}
+        run: |
+          zip="nianlai-${VERSION}-windows-x64-portable.zip"
+          sum="nianlai-${VERSION}.sha256"
+          test -f "$zip" && test -f "$sum" && test -f build-info.json
+          # 校验文件由 PowerShell 写出，带 BOM 和 CRLF。
+          sed -e '1s/^\xEF\xBB\xBF//' -e 's/\r$//' "$sum" | sha256sum -c -
+          python3 - <<'EOF'
+          import json, os
+          info = json.load(open("build-info.json", encoding="utf-8-sig"))
+          problems = []
+          if info.get("version") != os.environ["VERSION"]:
+              problems.append(f"版本 {info.get('version')} 与标签不符")
+          if info.get("source_commit") != os.environ["GITHUB_SHA"]:
+              problems.append(f"source_commit {info.get('source_commit')} 不是标签提交 {os.environ['GITHUB_SHA']}")
+          if info.get("git_dirty") or info.get("skip_build"):
+              problems.append("构建时工作区有改动或跳过了构建")
+          if problems:
+              raise SystemExit("产物核对失败：" + "；".join(problems))
+          print("产物核对通过：", info["version"], info["exe_sha256"])
+          EOF
+      - name: 创建 Release
+        shell: bash
+        working-directory: dist-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.verify-tag.outputs.version }}
+          PRERELEASE: ${{ needs.verify-tag.outputs.prerelease }}
+        run: |
+          zip="nianlai-${VERSION}-windows-x64-portable.zip"
+          sum="nianlai-${VERSION}.sha256"
+          exe_sha=$(python3 -c 'import json; print(json.load(open("build-info.json", encoding="utf-8-sig"))["exe_sha256"])')
+          zip_sha=$(sha256sum "$zip" | cut -d' ' -f1)
+          {
+            echo "Windows x64 便携版：解压后运行 \`nianlai.exe\`，需要 WebView2 运行时（Windows 11 通常自带）。"
+            echo "此版本未签名，SmartScreen 提示时选择“更多信息 → 仍要运行”。"
+            if [ "$PRERELEASE" = true ]; then echo; echo "这是预发布版本，仍在自用验证阶段。"; fi
+            echo
+            echo "| 文件 | SHA-256 |"
+            echo "|---|---|"
+            echo "| \`${zip}\` | \`${zip_sha}\` |"
+            echo "| \`nianlai.exe\` | \`${exe_sha}\` |"
+          } > notes.md
+          flags=()
+          if [ "$PRERELEASE" = true ]; then flags+=(--prerelease); fi
+          gh release create "$GITHUB_REF_NAME" "$zip" "$sum" build-info.json \
+            --verify-tag --title "拈来 ${VERSION}" --notes-file notes.md --generate-notes "${flags[@]}"

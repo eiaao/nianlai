@@ -3,12 +3,18 @@ name: Windows 检查与构建
 on:
   push:
     branches: [main]
-    tags: ["v*"]
   pull_request:
   workflow_dispatch:
+  # 发布工作流复用整套检查和构建，产物由调用方取用。
+  workflow_call:
 
 permissions:
   contents: read
+
+concurrency:
+  # 同一 PR 的旧运行直接取消；main 的每次推送都保留完整结果。
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TARGET_DIR: ${{ github.workspace }}/target
@@ -17,6 +23,7 @@ jobs:
   check:
     name: 检查
     runs-on: windows-latest
+    timeout-minutes: 45
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
@@ -36,18 +43,21 @@ jobs:
           components: clippy, rustfmt
       - name: 缓存 Cargo
         uses: Swatinem/rust-cache@v2
-      - name: 安装前端依赖
-        run: pnpm install --frozen-lockfile
-      - name: 检查前端
-        run: pnpm check
-      - name: 检查搜索确认键的自动重复
-        run: node tools/test-panel-key-repeat.mjs
+        with:
+          shared-key: check
       - name: 安装 Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: 安装前端依赖
+        run: pnpm install --frozen-lockfile
+      - name: 检查前端
+        run: pnpm check
+      - name: 面板状态机回归
+        run: node tools/test-panel-key-repeat.mjs
+      # Windows runner 的控制台编码是 cp1252，-X utf8 才能输出中文；-I 会忽略 PYTHONUTF8 环境变量。
       - name: 核对发布版本来源
-        run: python -I tools/check_release_versions.py
+        run: python -X utf8 -I tools/check_release_versions.py
       - name: 检查 Rust 格式
         run: cargo fmt --all -- --check
       - name: 检查 Rust 代码
@@ -55,12 +65,13 @@ jobs:
       - name: 运行 Rust 测试
         run: cargo test --workspace
       - name: 检查发布脚本
-        run: python -I -m unittest discover -s tools -p "test_release*.py" -v
+        run: python -X utf8 -I -m unittest discover -s tools -p "test_release*.py" -v
 
   build:
-    name: 构建
+    name: 构建便携版
     needs: check
     runs-on: windows-latest
+    timeout-minutes: 45
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
@@ -76,13 +87,13 @@ jobs:
           cache-dependency-path: pnpm-lock.yaml
       - name: 安装 Rust 工具链
         uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
       - name: 缓存 Cargo
         uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
       - name: 构建 Windows x64 便携版
         run: powershell -NoProfile -ExecutionPolicy Bypass -File tools/release.ps1
-      - name: 上传 Windows 便携版与构建信息
+      - name: 上传便携版与构建信息
         uses: actions/upload-artifact@v4
         with:
           name: nianlai-windows
@@ -91,3 +102,4 @@ jobs:
             release/nianlai-*.sha256
             release/build-info.json
           if-no-files-found: error
+          retention-days: 30

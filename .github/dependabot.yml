@@ -1,13 +1,23 @@
 version: 2
 updates:
+  # 补丁版本合成一个 PR；0.x 的次版本在 Cargo 里可能不兼容，仍单独提。
   - package-ecosystem: cargo
     directory: /
     schedule: { interval: weekly }
     open-pull-requests-limit: 5
+    groups:
+      cargo-patch:
+        update-types: [patch]
   - package-ecosystem: npm
     directory: /
     schedule: { interval: weekly }
     open-pull-requests-limit: 5
+    groups:
+      npm-minor-patch:
+        update-types: [minor, patch]
   - package-ecosystem: github-actions
     directory: /
     schedule: { interval: monthly }
+    groups:
+      actions:
+        patterns: ["*"]

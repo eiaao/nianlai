@@ -219,7 +219,7 @@ try {
 运行前需要 Microsoft Edge WebView2 运行时（Windows 11 通常已自带）；若缺失，请先安装微软的 WebView2 Evergreen 运行时。
 首次运行若遇到 Windows SmartScreen 提示，请在确认文件来源后选择“更多信息 → 仍要运行”。此版本未签名。
 
-使用：默认按 $($script:UsageDefaults.Hotkey) 呼出面板，可在设置文件里改。
+使用：默认按 $($script:UsageDefaults.Hotkey) 呼出面板，可在托盘菜单“设置…”里改。
 设置文件：$($script:UsageDefaults.SettingsFile)
 数据目录：$($script:UsageDefaults.DataDirectory)
 日志目录：$($script:UsageDefaults.LogDirectory)

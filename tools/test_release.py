@@ -141,7 +141,7 @@ class ReleaseTests(unittest.TestCase):
             self.assertEqual(contents.read("nianlai.exe"), self.binary.read_bytes())
             instructions = contents.read("使用说明.txt").decode("utf-8-sig")
             for text in (
-                "WebView2", "SmartScreen", "更多信息 → 仍要运行", "Ctrl+`（反引号键）", "可在设置文件里改",
+                "WebView2", "SmartScreen", "更多信息 → 仍要运行", "Ctrl+`（反引号键）", "可在托盘菜单“设置…”里改",
                 r"%APPDATA%\Nianlai\settings.json", r"%LOCALAPPDATA%\Nianlai\data",
                 r"%LOCALAPPDATA%\Nianlai\logs", "托盘图标右键“退出”", "Ctrl+Alt+Shift+Q",
                 "只运行一个实例", "再次双击会呼出已在运行的面板", "开机自启", "在托盘菜单里勾选",
