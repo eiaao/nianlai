@@ -196,7 +196,7 @@ fn event(sequence: u32, origin: Instant) -> CopyEvent {
         source_process: source.into(),
         source_path: format!(
             r"C:\Program Files\{}\{source}",
-            &source.trim_end_matches(".exe")
+            source.trim_end_matches(".exe")
         ),
         owner_process: source.into(),
         owner_pid: 1000 + sequence % 4,

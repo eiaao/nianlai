@@ -18,10 +18,10 @@ pub fn sha256(bytes: &[u8]) -> Result<Fingerprint, String> {
         0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
         0x5be0cd19,
     ];
-    let compress = |chunk: &[u8], state: &mut [u32; 8]| {
+    let compress = |chunk: &[u8; 64], state: &mut [u32; 8]| {
         let mut w = [0u32; 64];
-        for (word, part) in w.iter_mut().zip(chunk.chunks_exact(4)) {
-            *word = u32::from_be_bytes(part.try_into().unwrap());
+        for (word, part) in w.iter_mut().zip(chunk.as_chunks::<4>().0) {
+            *word = u32::from_be_bytes(*part);
         }
         for i in 16..64 {
             let a = w[i - 15];
@@ -53,22 +53,21 @@ pub fn sha256(bytes: &[u8]) -> Result<Fingerprint, String> {
             *s = s.wrapping_add(value);
         }
     };
-    let mut blocks = bytes.chunks_exact(64);
-    for block in &mut blocks {
+    let (blocks, rest) = bytes.as_chunks::<64>();
+    for block in blocks {
         compress(block, &mut state);
     }
-    let rest = blocks.remainder();
     let mut tail = [0u8; 128];
     tail[..rest.len()].copy_from_slice(rest);
     tail[rest.len()] = 0x80;
     let size = if rest.len() < 56 { 64 } else { 128 };
     tail[size - 8..size].copy_from_slice(&(bytes.len() as u64 * 8).to_be_bytes());
-    for block in tail[..size].chunks_exact(64) {
+    for block in tail[..size].as_chunks::<64>().0 {
         compress(block, &mut state);
     }
     let mut digest = [0; 32];
-    for (part, value) in digest.chunks_exact_mut(4).zip(state) {
-        part.copy_from_slice(&value.to_be_bytes());
+    for (part, value) in digest.as_chunks_mut::<4>().0.iter_mut().zip(state) {
+        *part = value.to_be_bytes();
     }
     Ok(digest)
 }
