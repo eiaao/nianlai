@@ -26,13 +26,13 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: 检出代码
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: 安装 pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 10
       - name: 安装 Node.js 并缓存 pnpm store
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
@@ -45,7 +45,7 @@ jobs:
         with:
           shared-key: check
       - name: 安装 Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: 安装前端依赖
@@ -73,13 +73,13 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: 检出代码
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: 安装 pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 10
       - name: 安装 Node.js 并缓存 pnpm store
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
@@ -94,7 +94,7 @@ jobs:
       - name: 构建 Windows x64 便携版
         run: powershell -NoProfile -ExecutionPolicy Bypass -File tools/release.ps1
       - name: 上传便携版与构建信息
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: nianlai-windows
           path: |

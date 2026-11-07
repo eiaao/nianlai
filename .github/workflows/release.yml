@@ -22,7 +22,7 @@ jobs:
       prerelease: ${{ steps.version.outputs.prerelease }}
     steps:
       - name: 检出代码
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
       - name: 读取并核对版本
         id: version
         shell: bash
@@ -50,7 +50,7 @@ jobs:
       contents: write
     steps:
       - name: 下载构建产物
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: nianlai-windows
           path: dist-release
