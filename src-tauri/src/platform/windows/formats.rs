@@ -109,7 +109,12 @@ pub fn register(name: &str) -> Result<u32> {
 
 pub fn nul_length(data: &[u8], wide: bool) -> Option<usize> {
     if wide {
-        if let Some(index) = data.chunks_exact(2).position(|unit| unit == [0, 0]) {
+        if let Some(index) = data
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .position(|unit| *unit == [0, 0])
+        {
             return Some(index * 2);
         }
         data.len().is_multiple_of(2).then_some(data.len())
@@ -268,8 +273,10 @@ pub fn parse_dropfiles(data: &[u8]) -> Option<Vec<String>> {
             return None;
         }
         let units: Vec<_> = payload
-            .chunks_exact(2)
-            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u16::from_le_bytes(*pair))
             .collect();
         let mut at = 0;
         loop {

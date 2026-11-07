@@ -1338,7 +1338,7 @@ impl Hooks {
                                                 context.drain_recheck_samples = context.drain_recheck_samples.saturating_add(1);
                                                 context.drain_rechecked_releases = context.drain_rechecked_releases.saturating_add(recheck.released);
                                                 context.drain_rechecked_presses = context.drain_rechecked_presses.saturating_add(recheck.newly_pressed);
-                                                let _ = releases_context.fetch_update(Ordering::Relaxed, Ordering::Relaxed,
+                                                let _ = releases_context.try_update(Ordering::Relaxed, Ordering::Relaxed,
                                                     |count| Some(count.saturating_add(recheck.released)));
                                             }
                                         }

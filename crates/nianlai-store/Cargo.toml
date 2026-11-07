@@ -2,7 +2,7 @@
 name = "nianlai-store"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.90"
+rust-version = "1.95"
 
 [dependencies]
 rusqlite = { version = "0.38", features = ["bundled"] }

@@ -100,8 +100,10 @@ impl Content {
         self.raw(TEXT).map(|bytes| {
             String::from_utf16_lossy(
                 &bytes
-                    .chunks_exact(2)
-                    .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|pair| u16::from_le_bytes(*pair))
                     .take_while(|unit| *unit != 0)
                     .collect::<Vec<_>>(),
             )
@@ -216,8 +218,10 @@ impl Content {
                 .raw(TEXT)
                 .map(|bytes| {
                     let units = bytes
-                        .chunks_exact(2)
-                        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|pair| u16::from_le_bytes(*pair))
                         .take_while(|unit| *unit != 0);
                     char::decode_utf16(units)
                         .map(|character| character.unwrap_or(char::REPLACEMENT_CHARACTER))

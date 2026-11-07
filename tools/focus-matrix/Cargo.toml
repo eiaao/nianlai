@@ -2,7 +2,7 @@
 name = "focus-matrix"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.90"
+rust-version = "1.95"
 publish = false
 description = "拈来 G0 焦点矩阵无人值守验证工具（探路版）"
 

@@ -77,7 +77,7 @@
 
 技术栈：Tauri 2 + Rust，前端 Svelte 5 + TypeScript。
 
-准备 Rust（stable，MSVC 工具链）、Node.js 20 以上、pnpm，以及 Visual Studio 生成工具和 WebView2。
+准备 rustup（Rust 版本由 `rust-toolchain.toml` 固定，首次构建时自动安装）、Node.js 20 以上、pnpm，以及 Visual Studio 生成工具和 WebView2。
 
 ```bash
 pnpm install

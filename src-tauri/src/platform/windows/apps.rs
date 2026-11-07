@@ -232,7 +232,7 @@ fn icon_pixels(
         )
     } == height as i32;
     let mut has_alpha = false;
-    for pixel in pixels.chunks_exact_mut(4) {
+    for pixel in pixels.as_chunks_mut::<4>().0 {
         pixel.swap(0, 2); // BGRA → RGBA
         has_alpha |= pixel[3] != 0;
     }

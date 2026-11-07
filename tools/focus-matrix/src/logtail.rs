@@ -175,7 +175,7 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].1["event"], "shown");
         assert!(tail.read_increment(&mut cursor).unwrap().is_empty());
-        cursor.get_mut().truncate(0);
+        cursor.get_mut().clear();
         assert!(tail.read_increment(&mut cursor).is_err());
     }
     #[test]
