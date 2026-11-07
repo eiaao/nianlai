@@ -1,5 +1,5 @@
 [toolchain]
 # 本机和 CI 使用同一版本，避免新版 clippy 的 lint 让 CI 突然变红；升级时改这里并修完新 lint。
-channel = "1.99.0-x86_64-pc-windows-msvc"
+channel = "1.99.0"
 components = ["clippy", "rustfmt"]
 profile = "minimal"
