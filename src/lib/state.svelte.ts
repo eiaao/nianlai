@@ -6,8 +6,20 @@ import type { HistoryItem, HistorySnapshot, PanelInteraction, PasteMode, SearchS
 import type { Preferences } from "./preferences";
 
 const HOLD_HINT_MS = 300;
-// 比后端撤销窗口（4 秒）略短，免得点了撤销却已经提交。
-const UNDO_MS = 3500;
+// 页脚撤销提示停留的时长。删除的条目在回收站里保留 7 天，提示消失后 Ctrl+Z 照样能撤销。
+const UNDO_MS = 5000;
+// 删除收藏要在这段时间内再按一次 Delete 确认（B13）。
+const HOLD_MS = 600;
+const HINT_MS = 1600;
+const LEAVE_MS = 900;
+// 删掉后多留一会儿铺满的进度：粉碎在下一次渲染时才给这一行拍底版。
+const HOLD_CLEAR_MS = 100;
+
+// 页脚删除标签里的条目摘要：最多 16 个字。
+function deleteLabel(item: HistoryItem) {
+  const text = [...(item.preview || item.file_names[0] || "").replace(/\s+/g, " ").trim()];
+  return text.length > 16 ? `${text.slice(0, 16).join("")}…` : text.join("") || "1 条记录";
+}
 const DEFAULT_PREFERENCES: Preferences = { layout: "a", theme: "system", motion: "soft", density: "compact" };
 
 export type PasteFeedback = {
@@ -28,8 +40,14 @@ export class PanelState {
   history = $state<HistorySnapshot>({ items: [], total: 0, recording: false, last_recorded_ms: null, store_status: null });
   favorites = $state<HistoryItem[]>([]);
   favoritePending = $state<number | null>(null);
-  // 刚删除、还能撤销的那一条（只在本次呼出内有效）。
+  // 刚删除的那一条，页脚显示撤销提示用；撤销本身由后端按删除顺序恢复，跨呼出有效。
   undo = $state<{ id: number; session: number; label: string; startedAt: number; duration: number } | null>(null);
+  // 删除收藏要按住 Delete：holding 时条目上走进度，提前松开转成 hint 提示一会儿。
+  holdDelete = $state<{ id: number; session: number; phase: "holding" | "hint"; keys: string; startedAt: number; duration: number; leaving?: boolean } | null>(null);
+  private holdTimer: ReturnType<typeof setTimeout> | null = null;
+  // 正在粉碎退出的条目（只有它播放删除动画），以及列表收起后让选中竖条重新量位置的计数。
+  leavingId: number | null = null;
+  layoutRevision = $state(0);
   private deleting = false;
   private undoTimer: ReturnType<typeof setTimeout> | null = null;
   preferences = $state<Preferences>({ ...DEFAULT_PREFERENCES });
@@ -255,28 +273,70 @@ export class PanelState {
     this.undoTimer = null;
   }
 
-  /** Delete：删掉当前条目（可撤销）。只在快速模式；搜索框里的 Delete 仍是删字。 */
-  deleteCurrent = async () => {
+  /**
+   * 按下 Delete（搜索模式是 Ctrl+Delete，Delete 仍是删字）：普通条目立即移到回收站（可撤销）；
+   * 收藏的要按住不放，条目上的进度走满才删，中途松开就取消。按键重复不算新的按下。
+   */
+  pressDelete = () => {
     const item = this.currentItem;
-    if (!this.visible || !this.interactive || this.busy || this.mode !== "quick" || !item || this.deleting) return;
-    if (item.favorite) { this.message = "收藏的记录先取消收藏再删除。"; return; }
+    if (!this.visible || !this.interactive || this.busy || !item || this.deleting || this.holdDelete?.phase === "holding") return;
+    if (!item.favorite) { void this.deleteCurrent(); return; }
+    const session = this.session;
+    this.clearHold();
+    this.holdDelete = { id: item.id, session, phase: "holding", keys: this.mode === "search" ? "Ctrl+Delete" : "Delete", startedAt: Date.now(), duration: HOLD_MS };
+    this.holdTimer = setTimeout(() => { this.holdTimer = null; this.finishHold(); }, HOLD_MS);
+  };
+
+  // 按满：进度保持铺满，让粉碎从铺满的样子开始；动画结束后再清掉。
+  private finishHold() {
+    const hold = this.holdDelete;
+    if (hold?.phase !== "holding" || hold.leaving) return;
+    if (hold.session !== this.session || !this.visible || this.currentItem?.id !== hold.id) { this.clearHold(); return; }
+    this.holdDelete = { ...hold, leaving: true };
+    const leaving = this.holdDelete;
+    void this.deleteCurrent().finally(() => {
+      this.holdTimer = setTimeout(() => { this.holdTimer = null; if (this.holdDelete === leaving) this.holdDelete = null; }, HOLD_CLEAR_MS);
+    });
+  }
+
+  /** 松开 Delete：还没按满就取消，留一句“按住不放”的提示；主线程忙、计时器晚到时按实际按住的时长算。 */
+  releaseDelete = () => {
+    const hold = this.holdDelete;
+    if (!hold || hold.phase !== "holding" || hold.leaving) return;
+    if (Date.now() - hold.startedAt >= hold.duration) { this.finishHold(); return; }
+    this.clearHold();
+    if (hold.session !== this.session || !this.visible) return;
+    this.holdDelete = { ...hold, phase: "hint", startedAt: Date.now(), duration: HINT_MS };
+    this.holdTimer = setTimeout(() => { this.holdTimer = null; this.holdDelete = null; }, HINT_MS);
+  };
+
+  private clearHold() {
+    this.holdDelete = null;
+    if (this.holdTimer !== null) clearTimeout(this.holdTimer);
+    this.holdTimer = null;
+  }
+
+  private deleteCurrent = async () => {
+    const item = this.currentItem;
+    if (!this.visible || !this.interactive || this.busy || !item || this.deleting) return;
     const session = this.session;
     const index = this.selected;
     this.deleting = true;
     try {
       const removed = await ipc.deleteItem?.(item.id);
       if (session !== this.session || !this.visible) return;
-      if (!removed) { this.message = "这条记录不能删除。"; return; }
+      if (!removed) { this.message = "这条记录已经不在了。"; return; }
       this.message = "";
       this.previewOpen = false;
+      this.leavingId = item.id;
+      setTimeout(() => { if (this.leavingId === item.id) this.leavingId = null; }, LEAVE_MS);
       this.history = { ...this.history, items: this.history.items.filter((entry) => entry.id !== item.id), total: Math.max(0, this.history.total - 1) };
       this.searchItems = this.searchItems.filter((entry) => entry.id !== item.id);
+      this.favorites = this.favorites.filter((entry) => entry.id !== item.id);
       // 删除后停在原位置（也就是下一条），没有下一条时退到上一条。
       this.selected = Math.max(0, Math.min(index, this.visibleItems.length - 1));
       this.clearUndo();
-      const text = [...(item.preview || item.file_names[0] || "").replace(/\s+/g, " ").trim()];
-      const label = text.length > 16 ? `${text.slice(0, 16).join("")}…` : text.join("") || "1 条记录";
-      this.undo = { id: item.id, session, label, startedAt: Date.now(), duration: UNDO_MS };
+      this.undo = { id: item.id, session, label: deleteLabel(item), startedAt: Date.now(), duration: UNDO_MS };
       this.undoTimer = setTimeout(() => { this.undoTimer = null; this.undo = null; }, UNDO_MS);
     } catch {
       if (session === this.session && this.visible) this.message = "删除失败，请重试。";
@@ -285,22 +345,28 @@ export class PanelState {
     }
   };
 
+  /** Ctrl+Z：恢复最近删除的一条。不限于这次呼出：后端记着本次运行里的删除顺序，可以连续撤销。 */
   undoDelete = async () => {
-    const undo = this.undo;
-    if (!undo || undo.session !== this.session || !this.visible) return;
+    if (!this.visible) return;
+    const session = this.session;
     this.clearUndo();
     try {
-      const restored = await ipc.undoDelete?.(undo.id);
-      if (undo.session !== this.session || !this.visible) return;
-      if (!restored) { this.message = "已超过撤销时间。"; return; }
+      const restored = await ipc.undoDelete?.();
+      if (session !== this.session || !this.visible) return;
+      if (!restored) { this.message = "没有可以撤销的删除。"; return; }
       const snapshot = await ipc.getHistory();
-      if (undo.session !== this.session || !this.visible) return;
+      if (session !== this.session || !this.visible) return;
       this.history = snapshot;
+      if (restored.favorite) {
+        const favorites = await ipc.getFavorites?.();
+        if (favorites && session === this.session) this.favorites = favorites;
+      }
       if (this.mode === "search") this.searchRevision += 1;
-      const index = this.visibleItems.findIndex((entry) => entry.id === undo.id);
+      this.message = "";
+      const index = this.visibleItems.findIndex((entry) => entry.id === restored.id);
       if (index >= 0) this.selected = index;
     } catch {
-      if (undo.session === this.session && this.visible) this.message = "撤销失败，请重试。";
+      if (session === this.session && this.visible) this.message = "撤销失败，请重试。";
     }
   };
 
@@ -516,6 +582,8 @@ export class PanelState {
 
   keyup = (event: KeyboardEvent) => {
     this.setModifiers(event.ctrlKey, event.shiftKey);
+    // 页面自己收到的 Delete（activated 快速模式、搜索模式的 Ctrl+Delete）在这里松开；松开 Ctrl 不算。
+    if (event.key === "Delete" && event.isTrusted === true) this.releaseDelete();
     if (this.interaction === "close_only") {
       const downAt = this.closeOnlyEscape;
       this.closeOnlyEscape = null;
@@ -619,6 +687,7 @@ export class PanelState {
   }
 
   move = (offset: number) => {
+    if (this.holdDelete) this.clearHold();
     this.selected = Math.max(0, Math.min(this.filtered.length - 1, this.selected + offset));
   };
 
@@ -674,7 +743,9 @@ export class PanelState {
       case "Shift+Enter": void this.choose(this.selected, "copy", event); break;
       case "Ctrl+Enter": void this.choose(this.selected, "text", event); break;
       case "Ctrl+D": if (this.currentItem) void this.toggleFavorite(this.currentItem.id); break;
-      case "Delete": void this.deleteCurrent(); break;
+      // 钩子在按下时送 Delete:down、松开时送 Delete。
+      case "Delete:down": if (this.mode === "quick") this.pressDelete(); break;
+      case "Delete": if (this.mode === "quick") this.releaseDelete(); break;
       case "Ctrl+Z": void this.undoDelete(); break;
       case "Escape":
         if (this.previewOpen) { this.previewOpen = false; break; }
@@ -736,7 +807,7 @@ export class PanelState {
           : ctrlOnly && event.key.toLowerCase() === "z"
           ? "Ctrl+Z"
           : unmodified && event.key === "Delete"
-          ? "Delete"
+          ? "Delete:down"
           : event.key === "Enter" && !event.altKey && !event.metaKey && !(event.ctrlKey && event.shiftKey)
           ? event.ctrlKey ? "Ctrl+Enter" : event.shiftKey ? "Shift+Enter" : "Enter"
           : unmodified && (horizontal || /^[1-9]$/.test(event.key) || event.key === " " || ["Escape", "ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End"].includes(event.key)) ? event.key === " " ? "Space" : event.key : null;
@@ -760,6 +831,12 @@ export class PanelState {
     if (event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey && event.key === "Enter") {
       event.preventDefault();
       if (!event.repeat && performance.now() - this.compositionEnded >= 50) this.navigate("Ctrl+Enter", event);
+      return;
+    }
+    // 搜索模式删除当前结果：Delete 留给搜索框删字，这里用 Ctrl+Delete。
+    if (event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey && event.key === "Delete") {
+      event.preventDefault();
+      if (!event.repeat && performance.now() - this.compositionEnded >= 50) this.pressDelete();
       return;
     }
     if ((event.ctrlKey && ["f", "p", "r", "+", "-", "=", "0"].includes(event.key.toLowerCase())) || event.key === "F5" || event.key === "F7") {
@@ -918,7 +995,7 @@ export class PanelState {
         this.imeActive = false;
         this.favoritePending = null;
         this.pinnedIds = null;
-        this.clearUndo();
+        this.clearUndo(); this.clearHold();
         void this.refreshFavorites();
         this.activationRetrying = false;
         this.composing = false;
@@ -997,7 +1074,7 @@ export class PanelState {
         this.visible = false;
         this.previewOpen = false;
         this.setModifiers(false, false);
-        this.clearUndo();
+        this.clearUndo(); this.clearHold();
         this.imeActive = false;
         this.clearFeedback();
         this.mode = "quick";
@@ -1065,7 +1142,7 @@ export class PanelState {
     return () => {
       disposed = true; this.searchRequest += 1; this.foregroundSnapshot = null;
       this.clearDomChoice(true); this.cancelDomFocus(); this.clearSearchTimer();
-      this.clearFeedback(); this.setModifiers(false, false); this.clearUndo();
+      this.clearFeedback(); this.setModifiers(false, false); this.clearUndo(); this.clearHold();
       unlisten.forEach((stop) => stop()); frames.forEach(cancelAnimationFrame);
     };
   };

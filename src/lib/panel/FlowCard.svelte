@@ -3,6 +3,7 @@
   import type { HistoryItem } from "../ipc";
   import { colorValue, linkParts, relativeTime, sourceName, typeLabel, visualKind } from "./content";
   import SourceIcon from "./SourceIcon.svelte";
+  import { leave } from "./motion";
 
   let { panel, item, index }: { panel: PanelState; item: HistoryItem; index: number } = $props();
   const selected = $derived(index === panel.selected);
@@ -12,6 +13,7 @@
   const excerpt = $derived(kind === "code"
     ? item.preview.split("\n").slice(0, 8).join("\n")
     : [...(item.preview || "（空文本）")].slice(0, kind === "long" || kind === "rich" ? 126 : 84).join(""));
+  const hold = $derived(panel.holdDelete?.id === item.id ? panel.holdDelete : null);
 </script>
 
 <button
@@ -23,6 +25,7 @@
   aria-selected={selected}
   tabindex="-1"
   data-flow-index={index}
+  out:leave={{ leaving: panel.leavingId === item.id, motion: panel.motion, collapse: false }}
   disabled={panel.busy || panel.awaitingRelease || !panel.interactive}
   onpointerdown={(event) => event.preventDefault()}
   onclick={(event) => panel.choose(index, "paste", event)}
@@ -51,6 +54,13 @@
       <span class="card-excerpt" class:long={kind === "long" || kind === "rich"} class:code={kind === "code"}>{excerpt}</span>
     {/if}
 
+    {#if hold}
+      <!-- 删除收藏要按住：卡片底色从左往右填满即移到回收站；提前松开换成提示。 -->
+      {#key hold.startedAt}
+        {#if hold.phase === "holding"}<i class="hold-fill" aria-hidden="true" style={`animation-duration: ${hold.duration}ms`}></i>{/if}
+        <span class="hold-tip" class:hint={hold.phase === "hint"} role="status" aria-live="polite">{#if hold.phase === "holding"}继续按住 <kbd>{hold.keys}</kbd>，删除收藏{:else}收藏的记录要按住 <kbd>{hold.keys}</kbd> 才删除{/if}</span>
+      {/key}
+    {/if}
     <span class="card-index">{panel.slotLabel(index) ?? (index < panel.favoriteCount ? "PIN" : "—")} / FRAME</span>
     <span class="card-source"><SourceIcon {item} /><span>{sourceName(item)} · {relativeTime(item.copied_ms)}</span></span>
   </span>
@@ -86,6 +96,12 @@
   .file-names { position: absolute; left: 94px; right: 15px; top: 70px; display: grid; font: 12px/2 var(--font-ui); }
   .file-names > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .file-size { position: absolute; left: 19px; bottom: 53px; color: var(--c-card-muted); font: 10px var(--font-mono); }
+  .hold-fill { position: absolute; inset: 0; z-index: 2; background: color-mix(in srgb, var(--c-star) 18%, transparent); transform-origin: left; pointer-events: none; animation: hold-fill linear forwards; }
+  .hold-tip { position: absolute; z-index: 4; left: 14px; right: 14px; bottom: 34px; display: flex; align-items: center; justify-content: center; gap: 4px; padding: 5px 8px; border-radius: var(--radius-xs); background: var(--c-raised); box-shadow: 0 0 0 1px color-mix(in srgb, var(--c-star) 45%, transparent); color: var(--c-star); font: 11px var(--font-ui); white-space: nowrap; animation: hold-tip var(--fade-duration) linear; }
+  .hold-tip.hint { box-shadow: 0 0 0 1px var(--c-line); color: var(--c-card-muted); }
+  .hold-tip kbd { color: inherit; font: 600 10px/1.4 var(--font-mono); }
+  @keyframes hold-fill { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+  @keyframes hold-tip { from { opacity: 0; } to { opacity: 1; } }
   @media (max-width: 520px) {
     .card-source { max-width: 124px; }
     .card-source :global(.source-icon) { display: none; }

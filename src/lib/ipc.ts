@@ -11,6 +11,7 @@ export type HistoryItem = {
   copy_count: number; partial: boolean; favorite: boolean; favorite_position: number | null;
   source_name: string | null; source_icon: string | null;
 };
+export type TrashItem = HistoryItem & { deleted_ms: number };
 export type HistorySnapshot = { items: HistoryItem[]; total: number; recording: boolean; last_recorded_ms: number | null; store_status: string | null };
 export type AppSettings = {
   hotkey?: string;
@@ -77,7 +78,10 @@ export const getFavorites = () => invoke<HistoryItem[]>("get_favorites");
 export const setFavorite = (id: number, favorite: boolean) => invoke<HistoryItem | null>("set_favorite", { id, favorite });
 // Delete 先挂起、撤销窗口（后端 UNDO_WINDOW，4 秒）后才真删；收藏的返回 false。
 export const deleteItem = (id: number) => invoke<boolean>("delete_item", { id });
-export const undoDelete = (id: number) => invoke<boolean>("undo_delete", { id });
+export const undoDelete = () => invoke<HistoryItem | null>("undo_delete");
+export const getTrash = () => invoke<TrashItem[]>("get_trash");
+export const restoreItem = (id: number) => invoke<HistoryItem | null>("restore_item", { id });
+export const purgeItems = (ids: number[] | null) => invoke<number>("purge_items", { ids });
 export const getSettings = () => invoke<AppSettings>("get_settings");
 export const setSettings = (settings: SettingsUpdate) => invoke<AppSettings>("set_settings", { settings });
 export const validateHotkey = (value: string) => invoke<HotkeyValidation>("validate_hotkey", { value });

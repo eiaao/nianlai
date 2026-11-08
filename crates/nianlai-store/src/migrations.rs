@@ -35,7 +35,7 @@ pub struct Step {
     pub apply: fn(&Transaction<'_>) -> Result<()>,
 }
 
-pub const STEPS: &[Step] = &[Step { apply: v1 }, Step { apply: v2 }];
+pub const STEPS: &[Step] = &[Step { apply: v1 }, Step { apply: v2 }, Step { apply: v3 }];
 pub const VERSION: u32 = STEPS.len() as u32;
 
 pub fn user_version(c: &Connection) -> Result<u32> {
@@ -181,6 +181,19 @@ fn v2(tx: &Transaction<'_>) -> Result<()> {
                 SELECT e.source_app_id FROM copy_events e
                 WHERE e.content_id=contents.id AND e.source_app_id IS NOT NULL
                 ORDER BY e.time_ms DESC,e.id DESC LIMIT 1);",
+    )?;
+    Ok(())
+}
+
+// v3（M2-5）：回收站（B12）。删除先在 trash 里登记，保留期满或手动清空时才物理删除；
+// 内容行物理删除时 trash 行随之级联删除。收藏的内容也能进回收站：收藏行保留，恢复后仍是收藏，
+// 物理删除前由写入方先删收藏行（favorites 外键不级联）。
+fn v3(tx: &Transaction<'_>) -> Result<()> {
+    tx.execute_batch(
+        "CREATE TABLE trash (
+                content_id INTEGER PRIMARY KEY REFERENCES contents(id) ON DELETE CASCADE,
+                deleted_ms INTEGER NOT NULL);
+            CREATE INDEX trash_time ON trash(deleted_ms);",
     )?;
     Ok(())
 }

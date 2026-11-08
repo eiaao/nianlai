@@ -917,6 +917,8 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
         if !pressed {
             return false;
         }
+        // 按键重复时这个键已经在吞；只有第一下按下才算“按下”。
+        let first_press = !context.swallowed[vk as usize];
         context.swallowed[vk as usize] = true;
         if context.pending.is_some() {
             context.buffer(key, mods);
@@ -981,6 +983,10 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
                     | "8"
                     | "9"
             ) {
+                // 删除收藏要按住 Delete（B12）：按下先报一次，松开照常投递 "Delete"，前端据此计时。
+                if name == "Delete" && first_press {
+                    let _ = context.sender.try_send(HookEvent::Key("Delete:down"));
+                }
                 context.release_action[vk as usize] = Some(name);
             } else {
                 let _ = context.sender.try_send(HookEvent::Key(name));

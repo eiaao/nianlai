@@ -1,4 +1,5 @@
 import type { MotionPreference } from "../preferences";
+import { COLLAPSE_AFTER_MS, shatter } from "./deleteEffect";
 
 // v7 的临界阻尼弹簧：积分不超过 1/120s，每帧只写 transform / opacity。
 export class SpringValue {
@@ -77,4 +78,31 @@ export class SpringValue {
     }
     this.frame = requestAnimationFrame((time) => this.tick(time));
   }
+}
+
+/**
+ * 删除时的退场（B12）：只给刚删除的那一条（panel.leavingId）播放；搜索结果刷新等其他移除不动画。
+ * 原位置立即隐藏，复制品在浮层上粉碎成粒子（deleteEffect.ts）；列表行等擦除扫过大半再收起高度，
+ * 让下面的条目补位。卡片流不收起，卡片自己会移动补位。减少动画时只淡出。
+ */
+export function leave(node: HTMLElement, { leaving, motion, collapse }: { leaving: boolean; motion: MotionPreference; collapse: boolean }) {
+  if (!leaving) return { duration: 0 };
+  // 让选中竖条不再把这一行当成选中行；leaving 让列表先藏起紧跟在后面、由下一条新画出的分区标题，
+  // 旧标题留在原处，收起结束后两者在同一位置交接，不跳动。
+  node.removeAttribute("data-history-index");
+  node.classList.add("leaving");
+  if (motion === "none" || matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    return { duration: 120, css: (t: number) => `opacity:${t}` };
+  }
+  shatter(node, node.closest<HTMLElement>(".panel-shell") ?? document.body);
+  const height = node.offsetHeight, total = COLLAPSE_AFTER_MS + (collapse ? 260 : 0);
+  return {
+    duration: total,
+    css: (_t: number, u: number) => {
+      if (!collapse) return "visibility:hidden;";
+      const shrink = Math.max(0, (u * total - COLLAPSE_AFTER_MS) / 260);
+      const eased = shrink * shrink * (3 - 2 * shrink);
+      return `visibility:hidden;height:${(height * (1 - eased)).toFixed(2)}px;overflow:hidden;`;
+    },
+  };
 }

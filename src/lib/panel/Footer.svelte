@@ -22,7 +22,7 @@
           {#key panel.undo.startedAt}
             <!-- 删除后的撤销入口：页脚左侧的浅色小标签，倒计时条走完自动消失（与后端撤销窗口对齐）。 -->
             <span class="undo-chip" role="status" aria-live="polite">
-              <span class="undo-text">已删除<span class="undo-label">「{panel.undo.label}」</span></span>
+              <span class="undo-text">已移到回收站<span class="undo-label">「{panel.undo.label}」</span></span>
               <button type="button" tabindex="-1" onpointerdown={(event) => event.preventDefault()} onclick={() => { void panel.undoDelete(); }}>撤销</button><kbd>Ctrl+Z</kbd>
               <i class="undo-progress" style={`animation-duration: ${panel.undo.duration}ms`}></i>
             </span>

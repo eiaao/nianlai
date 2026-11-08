@@ -71,6 +71,8 @@ pub struct History {
     max_records: usize,
     max_bytes: usize,
     next_favorite_position: u64,
+    // 回收站（B12）：删除的记录连同删除时间移到这里；内存模式退出即丢，和历史本身一样。
+    trash: Vec<(Record, u64)>,
 }
 
 // DWORD 序列号会回绕；半个序列空间内按有符号差判断新旧。
@@ -111,6 +113,7 @@ impl History {
             max_records: MAX_RECORDS,
             max_bytes: MAX_BYTES,
             next_favorite_position: 1,
+            trash: Vec::new(),
         }
     }
 
@@ -205,18 +208,51 @@ impl History {
     }
 
     // 删除一条历史；收藏的不删（B03）。
-    pub fn delete(&mut self, id: usize) -> bool {
+    /// 删除：移进回收站。收藏的也可以（界面先确认），恢复后仍是收藏。
+    pub fn delete(&mut self, id: usize, now_ms: u64) -> bool {
         let Some(index) = self.records.iter().position(|record| record.id == id) else {
             return false;
         };
-        if self.records[index].favorite {
-            return false;
-        }
-        self.records.remove(index);
+        let record = self.records.remove(index).unwrap();
+        self.trash.push((record, now_ms));
         if self.last_observation_id == Some(id) {
             self.last_observation_id = None;
         }
         true
+    }
+
+    /// 从回收站恢复，按原来的时间放回列表。
+    pub fn restore(&mut self, id: usize) -> Option<Preview> {
+        let index = self.trash.iter().position(|(record, _)| record.id == id)?;
+        let (record, _) = self.trash.remove(index);
+        let at = self
+            .records
+            .iter()
+            .position(|other| other.updated_ms < record.updated_ms)
+            .unwrap_or(self.records.len());
+        let preview = preview(&record);
+        self.records.insert(at, record);
+        Some(preview)
+    }
+
+    /// 物理删除回收站里的记录：`ids` 为 None 时清掉删除时间早于 `before_ms` 的。
+    pub fn purge(&mut self, ids: Option<&[usize]>, before_ms: u64) -> usize {
+        let before = self.trash.len();
+        self.trash.retain(|(record, at)| match ids {
+            Some(ids) => !ids.contains(&record.id),
+            None => *at >= before_ms,
+        });
+        before - self.trash.len()
+    }
+
+    pub fn trash(&self) -> Vec<(Preview, u64)> {
+        let mut items: Vec<_> = self
+            .trash
+            .iter()
+            .map(|(record, at)| (preview(record), *at))
+            .collect();
+        items.sort_by_key(|(item, at)| std::cmp::Reverse((*at, item.id)));
+        items
     }
 
     // 收藏列表按收藏顺序返回（E01）。
@@ -258,6 +294,15 @@ impl History {
         {
             self.last_observation_id = None;
             return Ok(Ingest::skipped("skipped", Some("own_echo")));
+        }
+        // 回收站里的内容又被复制：先放回列表，下面按重复内容处理。
+        if let Some(index) = self
+            .trash
+            .iter()
+            .position(|(record, _)| record.content.fingerprint == content.fingerprint)
+        {
+            let (record, _) = self.trash.remove(index);
+            self.records.push_front(record);
         }
         let same = self
             .records
@@ -371,35 +416,7 @@ impl History {
 
     pub fn snapshot(&self) -> Snapshot {
         Snapshot {
-            items: self
-                .records
-                .iter()
-                .take(300)
-                .map(|record| {
-                    let event = record.events.last().unwrap();
-                    Preview {
-                        id: record.id,
-                        kind: record.content.kind.into(),
-                        preview: record.content.preview.clone(),
-                        file_names: record.content.file_names.clone(),
-                        source: if event.source_process.is_empty() {
-                            "来源未知".into()
-                        } else {
-                            event.source_process.clone()
-                        },
-                        copied_ms: record.updated_ms,
-                        copy_count: record.events.len(),
-                        partial: record.partial,
-                        favorite: record.favorite,
-                        favorite_position: record.favorite_position,
-                        source_name: (!event.source_process.is_empty()
-                            || !event.source_path.is_empty())
-                        .then(|| source_name(event)),
-                        // 内存模式不做图标提取（无磁盘库可写缓存），图标字段留空。
-                        source_icon: None,
-                    }
-                })
-                .collect(),
+            items: self.records.iter().take(300).map(preview).collect(),
             total: self.records.len(),
             recording: self.recording,
             last_recorded_ms: self.last_recorded_ms,
@@ -432,6 +449,30 @@ impl History {
             self.next_id += 1;
         }
         Ok(())
+    }
+}
+
+fn preview(record: &Record) -> Preview {
+    let event = record.events.last().unwrap();
+    Preview {
+        id: record.id,
+        kind: record.content.kind.into(),
+        preview: record.content.preview.clone(),
+        file_names: record.content.file_names.clone(),
+        source: if event.source_process.is_empty() {
+            "来源未知".into()
+        } else {
+            event.source_process.clone()
+        },
+        copied_ms: record.updated_ms,
+        copy_count: record.events.len(),
+        partial: record.partial,
+        favorite: record.favorite,
+        favorite_position: record.favorite_position,
+        source_name: (!event.source_process.is_empty() || !event.source_path.is_empty())
+            .then(|| source_name(event)),
+        // 内存模式不做图标提取（无磁盘库可写缓存），图标字段留空。
+        source_icon: None,
     }
 }
 

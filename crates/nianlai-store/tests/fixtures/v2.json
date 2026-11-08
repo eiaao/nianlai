@@ -1,0 +1,986 @@
+{
+  "version": 2,
+  "counts": {
+    "contents": 37,
+    "formats": 44,
+    "events": 40,
+    "indexed": 37,
+    "favorites": 0,
+    "source_apps": 4
+  },
+  "records": [
+    {
+      "id": 1,
+      "kind": "文本",
+      "preview": "拈来是一个开源剪贴板工具，呼出快、不抢焦点。",
+      "file_names": [],
+      "bytes": 44,
+      "partial": false,
+      "copied_ms": 1792888860000,
+      "source": "Code.exe",
+      "copy_count": 1,
+      "fingerprint": "4455d105fde383c5c4fff110b9362196f331801f5fca1eb78ed97a85d3c29c10",
+      "formats": [
+        "CF_UNICODETEXT"
+      ],
+      "text": "拈来是一个开源剪贴板工具，呼出快、不抢焦点。"
+    },
+    {
+      "id": 2,
+      "kind": "文本",
+      "preview": "Clipboard history should survive restarts and upgrades.",
+      "file_names": [],
+      "bytes": 110,
+      "partial": false,
+      "copied_ms": 1792886520000,
+      "source": "chrome.exe",
+      "copy_count": 1,
+      "fingerprint": "84074af5be5ce5ec5e84d19889828dcae182ab8fba56616e942d3ca90bc2d38f",
+      "formats": [
+        "CF_UNICODETEXT"
+      ],
+      "text": "Clipboard history should survive restarts and upgrades."
+    },
+    {
+      "id": 3,
+      "kind": "文本",
+      "preview": "https://example.com/path/to/resource?id=12345&lang=zh-CN",
+      "file_names": [],
+      "bytes": 112,
+      "partial": false,
+      "copied_ms": 1792886580000,
+      "source": "explorer.exe",
+      "copy_count": 1,
+      "fingerprint": "d09c1eb0cb252fa2ddf4c3bfde1358bc735a209eada64e5e72d720d4f7339ac8",
+      "formats": [
+        "CF_UNICODETEXT"
+      ],
+      "text": "https://example.com/path/to/resource?id=12345&lang=zh-CN"
+    },
+    {
+      "id": 4,
+      "kind": "文本",
+      "preview": "fn main() {\n    println!(\"你好，拈来\");\n}\n",
+      "file_names": [],
+      "bytes": 74,
+      "partial": false,
+      "copied_ms": 1792886640000,
+      "source": "notepad.exe",
+      "copy_count": 1,
+      "fingerprint": "3fd9b2e9e8b270c152228b1e6405c6c235602c284b49ed36039bc3ee2dd156da",
+      "formats": [
+        "CF_UNICODETEXT"
+      ],
+      "text": "fn main() {\n    println!(\"你好，拈来\");\n}\n"
+    },
+    {
+      "id": 5,
+      "kind": "文本",
+      "preview": "订单尾号 8867，收件人：张三，电话尾号 0042",
+      "file_names": [],
+      "bytes": 52,
+      "partial": false,
+      "copied_ms": 1792886700000,
+      "source": "Code.exe",
+      "copy_count": 1,
+      "fingerprint": "f1a8f0324704866174b4c7ee17e2e9ed8031680febbf71c5f31aa5ea7a03adfb",
+      "formats": [
+        "CF_UNICODETEXT"
+      ],
+      "text": "订单尾号 8867，收件人：张三，电话尾号 0042"
+    },
+    {
+      "id": 6,
+      "kind": "文本",
+      "preview": "😀 表情与组合字符 👩‍💻 测试",
+      "file_names": [],
+      "bytes": 38,
+      "partial": false,
+      "copied_ms": 1792886760000,
+      "source": "chrome.exe",
+      "copy_count": 1,
+      "fingerprint": "4d698778329ceb7a365490afe291941f0f71442f5a7a462cb99d6e72a2abc433",
+      "formats": [
+        "CF_UNICODETEXT"
+      ],
+      "text": "😀 表情与组合字符 👩‍💻 测试"
+    },
+    {
+      "id": 7,
+      "kind": "文本",
+      "preview": "100% 完成 a_b\\c \"引号\" 'single' <tag> & more",
+      "file_names": [],
+      "bytes": 80,
+      "partial": false,
+      "copied_ms": 1792886820000,
+      "source": "explorer.exe",
+      "copy_count": 1,
+      "fingerprint": "aa830148f4f0be5db2d9885dafffb840567996dea8099d4a6fb2d28245f68c2a",
+      "formats": [
+        "CF_UNICODETEXT"
+      ],
+      "text": "100% 完成 a_b\\c \"引号\" 'single' <tag> & more"
+    },
+    {
+      "id": 8,
+      "kind": "文本",
+      "preview": "ABC Mixed Case rUsT RUST rust",
+      "file_names": [],
+      "bytes": 58,
+      "partial": false,
+      "copied_ms": 1792886880000,
+      "source": "notepad.exe",
+      "copy_count": 1,
+      "fingerprint": "322fd28898a6e69b7f5cb0f45d8ace3b220ef16dc5ffc058e263dd0a2c67300b",
+      "formats": [
+        "CF_UNICODETEXT"
+      ],
+      "text": "ABC Mixed Case rUsT RUST rust"
+    },
+    {
+      "id": 9,
+      "kind": "文本",
+      "preview": "2026-10-25 21:30:00 时间戳与数字 3.14159 1e10",
+      "file_names": [],
+      "bytes": 78,
+      "partial": false,
+      "copied_ms": 1792886940000,
+      "source": "Code.exe",
+      "copy_count": 1,
+      "fingerprint": "116f00a5e6be05d22267b03eb4ab8d7c2392cd5e8af89af9ec26f110fb70fbd4",
+      "formats": [
+        "CF_UNICODETEXT"
+      ],
+      "text": "2026-10-25 21:30:00 时间戳与数字 3.14159 1e10"
+    },
+    {
+      "id": 10,
+      "kind": "文本",
+      "preview": "这是一段用于测试全文索引的中文长句，包含标点、数字 42 和英文 word。这是一段用于测试全文索引的中文长句，包含标点、数字 42 和英文 word。这是一段用于测试全文索引的中文长句，包含标点、数字 42 和英文 word。这是一段用于测试全文索引的中文长句，包含标点、数字 42 和英文 word。这是一段用于测试全文索引的中文长句，包含标点、数字 42 和英文 word。这是一段用于测试全文索引的中文长句，包含标点、数字 42 和英文 word。这是一段用于测试全文索引的中文长句，包含标点、数字 42 和英文 word。这是一段用于测试全文索引的中文长句，包含标点、数字 42 和英文 w",
+      "file_names": [],
+      "bytes": 1520,
+      "partial": false,
+      "copied_ms": 1792887000000,
+      "source": "chrome.exe",
+      "copy_count": 1,
+      "fingerprint": "115e56fe31f465c18e798f576b53fe29fcfcef2b755c205fac111763efe6594d",
+      "formats": [
+        "CF_UNICODETEXT"
+      ],
+      "text": "这是一段用于测试全文索引的中文长句，包含标点、数字 42 和英文 word。这是一段用于测试全文索引的中文长句，包含标点、数字 42 和英文 word。这是一段用于测试全文索引的中文长句，包含标点、数字 42 和英文 word。这是一段用于测试全文索引的中文长句，包含标点、数字 42 和英文 word。这是一段用于测试全文索引的中文长句，包含标点、数字 42 和英文 word。这是一段用于测试全文索引的中文长句，包含标点、数字 42 和英文 word。这是一段用于测试全文索引的中文长句，包含标点、数字 42 和英文 word。这是一段用于测试全文索引的中文长句，包含标点、数字 42 和英文 word。这是一段用于测试全文索引的中文长句，包含标点、数字 42 和英文 word。这是一段用于测试全文索引的中文长句，包含标点、数字 42 和英文 word。这是一段用于测试全文索引的中文长句，包含标点、数字 42 和英文 word。这是一段用于测试全文索引的中文长句，包含标点、数字 42 和英文 word。这是一段用于测试全文索引的中文长句，包含标点、数字 42 和英文 word。这是一段用于测试全文索引的中文长句，包含标点、数字 42 和英文 word。这是一段用于测试全文索引的中文长句，包含标点、数字 42 和英文 word。这是一段用于测试全文索引的中文长句，包含标点、数字 42 和英文 word。这是一段用于测试全文索引的中文长句，包含标点、数字 42 和英文 word。这是一段用于测试全文索引的中文长句，包含标点、数字 42 和英文 word。这是一段用于测试全文索引的中文长句，包含标点、数字 42 和英文 word。这是一段用于测试全文索引的中文长句，包含标点、数字 42 和英文 word。"
+    },
+    {
+      "id": 11,
+      "kind": "文本",
+      "preview": "　全角空格　与\t制表符\r\n换行 CRLF",
+      "file_names": [],
+      "bytes": 40,
+      "partial": false,
+      "copied_ms": 1792887060000,
+      "source": "explorer.exe",
+      "copy_count": 1,
+      "fingerprint": "ac16826c7f4918fd85a2396f4baa47c19fa6da134190c7cec19f321900bb81ae",
+      "formats": [
+        "CF_UNICODETEXT"
+      ],
+      "text": "　全角空格　与\t制表符\r\n换行 CRLF"
+    },
+    {
+      "id": 12,
+      "kind": "文本",
+      "preview": "C:\\Users\\张三\\Documents\\报告.docx 路径文本",
+      "file_names": [],
+      "bytes": 68,
+      "partial": false,
+      "copied_ms": 1792887120000,
+      "source": "notepad.exe",
+      "copy_count": 1,
+      "fingerprint": "b2598d44ca57124c3a88597279252ec7ce5b46dd07acfe3894cdb3404378d64a",
+      "formats": [
+        "CF_UNICODETEXT"
+      ],
+      "text": "C:\\Users\\张三\\Documents\\报告.docx 路径文本"
+    },
+    {
+      "id": 13,
+      "kind": "文本",
+      "preview": "SELECT * FROM contents WHERE kind='文本' ORDER BY sort_ms DESC;",
+      "file_names": [],
+      "bytes": 122,
+      "partial": false,
+      "copied_ms": 1792887180000,
+      "source": "Code.exe",
+      "copy_count": 1,
+      "fingerprint": "03011732b1017babc58bc43d487122a8d6f1ce5dec9abce66a1ffb68120025e7",
+      "formats": [
+        "CF_UNICODETEXT"
+      ],
+      "text": "SELECT * FROM contents WHERE kind='文本' ORDER BY sort_ms DESC;"
+    },
+    {
+      "id": 14,
+      "kind": "文本",
+      "preview": "日本語テキスト と 한국어 텍스트 и русский",
+      "file_names": [],
+      "bytes": 54,
+      "partial": false,
+      "copied_ms": 1792887240000,
+      "source": "chrome.exe",
+      "copy_count": 1,
+      "fingerprint": "3d4f8ff763e0b498b025e71f3ec36908bfead379bbe5b54753e8550aa2da6c3e",
+      "formats": [
+        "CF_UNICODETEXT"
+      ],
+      "text": "日本語テキスト と 한국어 텍스트 и русский"
+    },
+    {
+      "id": 15,
+      "kind": "文本",
+      "preview": "重复内容 A",
+      "file_names": [],
+      "bytes": 12,
+      "partial": false,
+      "copied_ms": 1792888800000,
+      "source": "notepad.exe",
+      "copy_count": 3,
+      "fingerprint": "bd1193430505549319965e54924c997496038342956e806b9a51422a1c5e0a76",
+      "formats": [
+        "CF_UNICODETEXT"
+      ],
+      "text": "重复内容 A"
+    },
+    {
+      "id": 16,
+      "kind": "文本",
+      "preview": "重复内容 B",
+      "file_names": [],
+      "bytes": 12,
+      "partial": false,
+      "copied_ms": 1792888740000,
+      "source": "explorer.exe",
+      "copy_count": 2,
+      "fingerprint": "626845a4d6f2ced8cf60d6893a6668364d3ee94ac977139f731bd1871e08c123",
+      "formats": [
+        "CF_UNICODETEXT"
+      ],
+      "text": "重复内容 B"
+    },
+    {
+      "id": 17,
+      "kind": "文本",
+      "preview": "Ditto EcoPaste Maccy PasteNow 竞品名单",
+      "file_names": [],
+      "bytes": 68,
+      "partial": false,
+      "copied_ms": 1792887420000,
+      "source": "Code.exe",
+      "copy_count": 1,
+      "fingerprint": "9ef31f77df085accc0ae6b75619e60f21cf5bd2a719d648869d8a485104fa0af",
+      "formats": [
+        "CF_UNICODETEXT"
+      ],
+      "text": "Ditto EcoPaste Maccy PasteNow 竞品名单"
+    },
+    {
+      "id": 18,
+      "kind": "文本",
+      "preview": "短",
+      "file_names": [],
+      "bytes": 2,
+      "partial": false,
+      "copied_ms": 1792887480000,
+      "source": "chrome.exe",
+      "copy_count": 1,
+      "fingerprint": "f15de5f85f45d45ed5f3a1ce7b93c0351f194dc9507b8b32405890b149202ee7",
+      "formats": [
+        "CF_UNICODETEXT"
+      ],
+      "text": "短"
+    },
+    {
+      "id": 19,
+      "kind": "文本",
+      "preview": "ab",
+      "file_names": [],
+      "bytes": 4,
+      "partial": false,
+      "copied_ms": 1792887540000,
+      "source": "explorer.exe",
+      "copy_count": 1,
+      "fingerprint": "aa192520adf3da264e9ccc1606f4e770e9b21b6e4ecb0b6734f18d19eb360cc8",
+      "formats": [
+        "CF_UNICODETEXT"
+      ],
+      "text": "ab"
+    },
+    {
+      "id": 20,
+      "kind": "文本",
+      "preview": "   前后空白   ",
+      "file_names": [],
+      "bytes": 20,
+      "partial": false,
+      "copied_ms": 1792887600000,
+      "source": "notepad.exe",
+      "copy_count": 1,
+      "fingerprint": "cd7f160efd7c4469a6483e61fca4c925b046c21f900bf433551d9d03cb734c26",
+      "formats": [
+        "CF_UNICODETEXT"
+      ],
+      "text": "   前后空白   "
+    },
+    {
+      "id": 21,
+      "kind": "富文本",
+      "preview": "富文本 一号",
+      "file_names": [],
+      "bytes": 35,
+      "partial": false,
+      "copied_ms": 1792887660000,
+      "source": "Code.exe",
+      "copy_count": 1,
+      "fingerprint": "6ca34cdfe267b0ef6b6d2e893e57ef8f3fdcac20747463992341dd779c63f4f6",
+      "formats": [
+        "CF_UNICODETEXT",
+        "HTML Format"
+      ],
+      "text": "富文本 一号"
+    },
+    {
+      "id": 22,
+      "kind": "富文本",
+      "preview": "Rich text two",
+      "file_names": [],
+      "bytes": 72,
+      "partial": false,
+      "copied_ms": 1792887720000,
+      "source": "chrome.exe",
+      "copy_count": 1,
+      "fingerprint": "35aa3623ab7f51f2be4c64713ca3a1bfda51a6e5e2c8101934098c5a9c5359ff",
+      "formats": [
+        "CF_UNICODETEXT",
+        "HTML Format",
+        "Rich Text Format"
+      ],
+      "text": "Rich text two"
+    },
+    {
+      "id": 23,
+      "kind": "富文本",
+      "preview": "富文本（无纯文本预览）",
+      "file_names": [],
+      "bytes": 34,
+      "partial": false,
+      "copied_ms": 1792887780000,
+      "source": "explorer.exe",
+      "copy_count": 1,
+      "fingerprint": "311065ab1efbf8fbd3d832a67324100061913209a1e958a217f522547fa2cc65",
+      "formats": [
+        "HTML Format"
+      ],
+      "text": null
+    },
+    {
+      "id": 24,
+      "kind": "富文本",
+      "preview": "合并前的纯文本",
+      "file_names": [],
+      "bytes": 48,
+      "partial": false,
+      "copied_ms": 1792887840000,
+      "source": "notepad.exe",
+      "copy_count": 1,
+      "fingerprint": "01b429c80e3b06841d41807926b1750b396f249af59f7a9d62399de0c05d6167",
+      "formats": [
+        "CF_UNICODETEXT",
+        "HTML Format"
+      ],
+      "text": "合并前的纯文本"
+    },
+    {
+      "id": 25,
+      "kind": "富文本",
+      "preview": "Markdown **加粗** `code`",
+      "file_names": [],
+      "bytes": 69,
+      "partial": false,
+      "copied_ms": 1792887900000,
+      "source": "Code.exe",
+      "copy_count": 1,
+      "fingerprint": "67674c52d4fa01ebc50ad782372a456ff354fc96c931dcc2d7920caf679d9588",
+      "formats": [
+        "CF_UNICODETEXT",
+        "HTML Format"
+      ],
+      "text": "Markdown **加粗** `code`"
+    },
+    {
+      "id": 26,
+      "kind": "图片",
+      "preview": "图片 16×16",
+      "file_names": [],
+      "bytes": 429,
+      "partial": false,
+      "copied_ms": 1792887960000,
+      "source": "chrome.exe",
+      "copy_count": 1,
+      "fingerprint": "80d24fb5a8fdc9cd8af4a739b64116af87e2a3ca4c5a383578ee4b8c8029cc7e",
+      "formats": [
+        "PNG"
+      ],
+      "text": null
+    },
+    {
+      "id": 27,
+      "kind": "图片",
+      "preview": "图片 1920×1080",
+      "file_names": [],
+      "bytes": 629,
+      "partial": false,
+      "copied_ms": 1792888020000,
+      "source": "explorer.exe",
+      "copy_count": 1,
+      "fingerprint": "09cf441610c6ad3c8f0f1844334c7ad830a2b1587261d54ccee7e8eb0584ef71",
+      "formats": [
+        "PNG"
+      ],
+      "text": null
+    },
+    {
+      "id": 28,
+      "kind": "图片",
+      "preview": "图片 64×32",
+      "file_names": [],
+      "bytes": 340,
+      "partial": false,
+      "copied_ms": 1792888080000,
+      "source": "notepad.exe",
+      "copy_count": 1,
+      "fingerprint": "b6fc67272081625ef32a5805b1ebf480c6c3c0ce2111f5e0e8226a8889f9ddaa",
+      "formats": [
+        "CF_DIB"
+      ],
+      "text": null
+    },
+    {
+      "id": 29,
+      "kind": "图片",
+      "preview": "图片 320×240",
+      "file_names": [],
+      "bytes": 469,
+      "partial": false,
+      "copied_ms": 1792888140000,
+      "source": "Code.exe",
+      "copy_count": 1,
+      "fingerprint": "0c5d19f98b3b48e77c15a4a109f27a2f54e213505482a9fb637f2c879e92f70b",
+      "formats": [
+        "CF_DIB",
+        "PNG"
+      ],
+      "text": null
+    },
+    {
+      "id": 30,
+      "kind": "图片",
+      "preview": "图片（尺寸未知）",
+      "file_names": [],
+      "bytes": 128,
+      "partial": false,
+      "copied_ms": 1792888200000,
+      "source": "chrome.exe",
+      "copy_count": 1,
+      "fingerprint": "15f7370555fdf88d78e5157ed9406735e1ff0648cd41002990e743360856ffcd",
+      "formats": [
+        "PNG"
+      ],
+      "text": null
+    },
+    {
+      "id": 31,
+      "kind": "文件",
+      "preview": "1 个文件 · 项目报告.docx",
+      "file_names": [
+        "项目报告.docx"
+      ],
+      "bytes": 27,
+      "partial": false,
+      "copied_ms": 1792888260000,
+      "source": "explorer.exe",
+      "copy_count": 1,
+      "fingerprint": "63d2e70101765ff7699622aea917d52e42eb2dcc848cc81408fb2d024e1615d6",
+      "formats": [
+        "CF_HDROP"
+      ],
+      "text": null
+    },
+    {
+      "id": 32,
+      "kind": "文件",
+      "preview": "4 个文件 · IMG_0001.jpg、IMG_0002.jpg、IMG_0003.jpg",
+      "file_names": [
+        "IMG_0001.jpg",
+        "IMG_0002.jpg",
+        "IMG_0003.jpg",
+        "IMG_0004.jpg"
+      ],
+      "bytes": 88,
+      "partial": false,
+      "copied_ms": 1792888320000,
+      "source": "notepad.exe",
+      "copy_count": 1,
+      "fingerprint": "c1a567c2a70e262a3dac63318ee23c933f194b5210d14726e692da10b2dcc2a8",
+      "formats": [
+        "CF_HDROP"
+      ],
+      "text": null
+    },
+    {
+      "id": 33,
+      "kind": "文件",
+      "preview": "1 个文件 · 目录",
+      "file_names": [
+        "目录"
+      ],
+      "bytes": 10,
+      "partial": false,
+      "copied_ms": 1792888380000,
+      "source": "Code.exe",
+      "copy_count": 1,
+      "fingerprint": "aad7ca24595c2a5a663ddb3aeb0e12b302cc399918d0318e0a98645b943357c6",
+      "formats": [
+        "CF_HDROP"
+      ],
+      "text": null
+    },
+    {
+      "id": 34,
+      "kind": "文件",
+      "preview": "1 个文件 · 路径.txt",
+      "file_names": [
+        "路径.txt"
+      ],
+      "bytes": 27,
+      "partial": false,
+      "copied_ms": 1792888440000,
+      "source": "chrome.exe",
+      "copy_count": 1,
+      "fingerprint": "3be62f7e1c77dfc5eaaa70623f1f1c2a38221ddf61300ecddb641394e9b5ebdc",
+      "formats": [
+        "CF_HDROP"
+      ],
+      "text": null
+    },
+    {
+      "id": 35,
+      "kind": "文本",
+      "preview": "图文混合：带图片格式的文本",
+      "file_names": [],
+      "bytes": 119,
+      "partial": false,
+      "copied_ms": 1792888500000,
+      "source": "explorer.exe",
+      "copy_count": 1,
+      "fingerprint": "3c99512fa89a037f493f77ba9dc7a93d657f4b21b62a9df06f6b0fd052ffd0ca",
+      "formats": [
+        "CF_UNICODETEXT",
+        "PNG"
+      ],
+      "text": "图文混合：带图片格式的文本"
+    },
+    {
+      "id": 36,
+      "kind": "文本",
+      "preview": "读取时被打断的内容",
+      "file_names": [],
+      "bytes": 18,
+      "partial": true,
+      "copied_ms": 1792888560000,
+      "source": "notepad.exe",
+      "copy_count": 1,
+      "fingerprint": "6ea6dead6661782c0ab8b2f8be62f7b47d26f660df2b83963ccc0bc8ec4ffde1",
+      "formats": [
+        "CF_UNICODETEXT"
+      ],
+      "text": "读取时被打断的内容"
+    },
+    {
+      "id": 37,
+      "kind": "文本",
+      "preview": "最后一条记录",
+      "file_names": [],
+      "bytes": 12,
+      "partial": false,
+      "copied_ms": 1792888620000,
+      "source": "Code.exe",
+      "copy_count": 1,
+      "fingerprint": "c5a4b2d91aef16aa1329280111cb5d7558b1c36e568be2d0d0a0eb9189281490",
+      "formats": [
+        "CF_UNICODETEXT"
+      ],
+      "text": "最后一条记录"
+    }
+  ],
+  "searches": [
+    {
+      "query": "",
+      "mode": "Recent",
+      "ids": [
+        1,
+        15,
+        16,
+        37,
+        36,
+        35,
+        34,
+        33,
+        32,
+        31,
+        30,
+        29,
+        28,
+        27,
+        26,
+        25,
+        24,
+        23,
+        22,
+        21,
+        20,
+        19,
+        18,
+        17,
+        14,
+        13,
+        12,
+        11,
+        10,
+        9,
+        8,
+        7,
+        6,
+        5,
+        4,
+        3,
+        2
+      ]
+    },
+    {
+      "query": "拈来",
+      "mode": "Substring",
+      "ids": [
+        1,
+        4
+      ]
+    },
+    {
+      "query": "剪贴板工具",
+      "mode": "Index",
+      "ids": [
+        1
+      ]
+    },
+    {
+      "query": "clipboard",
+      "mode": "Index",
+      "ids": [
+        2
+      ]
+    },
+    {
+      "query": "CLIPBOARD",
+      "mode": "Index",
+      "ids": [
+        2
+      ]
+    },
+    {
+      "query": "example.com",
+      "mode": "Index",
+      "ids": [
+        3
+      ]
+    },
+    {
+      "query": "12345",
+      "mode": "Index",
+      "ids": [
+        3
+      ]
+    },
+    {
+      "query": "println",
+      "mode": "Index",
+      "ids": [
+        4
+      ]
+    },
+    {
+      "query": "订单尾号",
+      "mode": "Index",
+      "ids": [
+        5
+      ]
+    },
+    {
+      "query": "😀",
+      "mode": "Substring",
+      "ids": [
+        6
+      ]
+    },
+    {
+      "query": "👩‍💻",
+      "mode": "Index",
+      "ids": [
+        6
+      ]
+    },
+    {
+      "query": "%",
+      "mode": "Substring",
+      "ids": [
+        7
+      ]
+    },
+    {
+      "query": "\"引号\"",
+      "mode": "Index",
+      "ids": [
+        7
+      ]
+    },
+    {
+      "query": "rust",
+      "mode": "Index",
+      "ids": [
+        8
+      ]
+    },
+    {
+      "query": "重复内容",
+      "mode": "Index",
+      "ids": [
+        15,
+        16
+      ]
+    },
+    {
+      "query": "项目报告",
+      "mode": "Index",
+      "ids": [
+        31
+      ]
+    },
+    {
+      "query": "IMG_0002",
+      "mode": "Index",
+      "ids": [
+        32
+      ]
+    },
+    {
+      "query": "目录",
+      "mode": "Substring",
+      "ids": [
+        33
+      ]
+    },
+    {
+      "query": "路径",
+      "mode": "Substring",
+      "ids": [
+        34,
+        12
+      ]
+    },
+    {
+      "query": "富文本",
+      "mode": "Index",
+      "ids": [
+        21
+      ]
+    },
+    {
+      "query": "合并前",
+      "mode": "Index",
+      "ids": [
+        24
+      ]
+    },
+    {
+      "query": "ab",
+      "mode": "Substring",
+      "ids": [
+        19,
+        8
+      ]
+    },
+    {
+      "query": "订 8867",
+      "mode": "Mixed",
+      "ids": [
+        5
+      ]
+    },
+    {
+      "query": "select",
+      "mode": "Index",
+      "ids": [
+        13
+      ]
+    },
+    {
+      "query": "不存在的词语",
+      "mode": "Index",
+      "ids": []
+    },
+    {
+      "query": "长句",
+      "mode": "Substring",
+      "ids": [
+        10
+      ]
+    },
+    {
+      "query": "  前后空白  ",
+      "mode": "Index",
+      "ids": [
+        20
+      ]
+    }
+  ],
+  "schema": [
+    {
+      "kind": "index",
+      "name": "content_order",
+      "table": "contents",
+      "sql": "CREATE INDEX content_order ON contents(sort_ms DESC,sort_order DESC)"
+    },
+    {
+      "kind": "index",
+      "name": "content_revision",
+      "table": "contents",
+      "sql": "CREATE INDEX content_revision ON contents(sort_order DESC)"
+    },
+    {
+      "kind": "index",
+      "name": "event_content",
+      "table": "copy_events",
+      "sql": "CREATE INDEX event_content ON copy_events(content_id,time_ms,id)"
+    },
+    {
+      "kind": "index",
+      "name": "source_app_path",
+      "table": "source_apps",
+      "sql": "CREATE INDEX source_app_path ON source_apps(exe_path)"
+    },
+    {
+      "kind": "index",
+      "name": "sqlite_autoindex_contents_1",
+      "table": "contents",
+      "sql": null
+    },
+    {
+      "kind": "index",
+      "name": "sqlite_autoindex_favorites_1",
+      "table": "favorites",
+      "sql": null
+    },
+    {
+      "kind": "index",
+      "name": "sqlite_autoindex_formats_1",
+      "table": "formats",
+      "sql": null
+    },
+    {
+      "kind": "index",
+      "name": "sqlite_autoindex_source_apps_1",
+      "table": "source_apps",
+      "sql": null
+    },
+    {
+      "kind": "table",
+      "name": "contents",
+      "table": "contents",
+      "sql": "CREATE TABLE contents (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                fingerprint BLOB NOT NULL UNIQUE CHECK(length(fingerprint)=32),\n                kind TEXT NOT NULL, preview TEXT NOT NULL, file_names TEXT NOT NULL,\n                bytes INTEGER NOT NULL CHECK(bytes>=0), partial INTEGER NOT NULL,\n                sort_ms INTEGER NOT NULL, source TEXT NOT NULL, copy_count INTEGER NOT NULL,\n                sort_order INTEGER NOT NULL DEFAULT 0,\n                search_text TEXT NOT NULL, source_app_id INTEGER REFERENCES source_apps(id))"
+    },
+    {
+      "kind": "table",
+      "name": "copy_events",
+      "table": "copy_events",
+      "sql": "CREATE TABLE copy_events (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                content_id INTEGER NOT NULL REFERENCES contents(id) ON DELETE CASCADE,\n                time_ms INTEGER NOT NULL, source_process TEXT NOT NULL, owner_process TEXT NOT NULL,\n                owner_pid INTEGER NOT NULL, sequence INTEGER NOT NULL, source_app_id INTEGER REFERENCES source_apps(id))"
+    },
+    {
+      "kind": "table",
+      "name": "favorites",
+      "table": "favorites",
+      "sql": "CREATE TABLE favorites (\n                content_id INTEGER PRIMARY KEY REFERENCES contents(id),\n                position INTEGER NOT NULL UNIQUE,\n                title TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '',\n                created_ms INTEGER NOT NULL, updated_ms INTEGER NOT NULL)"
+    },
+    {
+      "kind": "table",
+      "name": "formats",
+      "table": "formats",
+      "sql": "CREATE TABLE formats (\n                content_id INTEGER NOT NULL REFERENCES contents(id) ON DELETE CASCADE,\n                name TEXT NOT NULL, fingerprint BLOB NOT NULL CHECK(length(fingerprint)=32),\n                bytes INTEGER NOT NULL CHECK(bytes>=0), encoding INTEGER NOT NULL CHECK(encoding IN (0,1)),\n                data BLOB NOT NULL, PRIMARY KEY(content_id,name))"
+    },
+    {
+      "kind": "table",
+      "name": "search_index",
+      "table": "search_index",
+      "sql": "CREATE VIRTUAL TABLE search_index USING fts5(search_text, content='contents', content_rowid='id', tokenize='trigram')"
+    },
+    {
+      "kind": "table",
+      "name": "search_index_config",
+      "table": "search_index_config",
+      "sql": "CREATE TABLE 'search_index_config'(k PRIMARY KEY, v) WITHOUT ROWID"
+    },
+    {
+      "kind": "table",
+      "name": "search_index_data",
+      "table": "search_index_data",
+      "sql": "CREATE TABLE 'search_index_data'(id INTEGER PRIMARY KEY, block BLOB)"
+    },
+    {
+      "kind": "table",
+      "name": "search_index_docsize",
+      "table": "search_index_docsize",
+      "sql": "CREATE TABLE 'search_index_docsize'(id INTEGER PRIMARY KEY, sz BLOB)"
+    },
+    {
+      "kind": "table",
+      "name": "search_index_idx",
+      "table": "search_index_idx",
+      "sql": "CREATE TABLE 'search_index_idx'(segid, term, pgno, PRIMARY KEY(segid, term)) WITHOUT ROWID"
+    },
+    {
+      "kind": "table",
+      "name": "source_apps",
+      "table": "source_apps",
+      "sql": "CREATE TABLE source_apps (\n                id INTEGER PRIMARY KEY AUTOINCREMENT,\n                process_name TEXT NOT NULL, exe_path TEXT NOT NULL,\n                display_name TEXT NOT NULL, icon_file TEXT NOT NULL, icon_key TEXT NOT NULL,\n                updated_ms INTEGER NOT NULL,\n                UNIQUE(process_name, exe_path))"
+    },
+    {
+      "kind": "table",
+      "name": "sqlite_sequence",
+      "table": "sqlite_sequence",
+      "sql": "CREATE TABLE sqlite_sequence(name,seq)"
+    },
+    {
+      "kind": "trigger",
+      "name": "content_delete",
+      "table": "contents",
+      "sql": "CREATE TRIGGER content_delete AFTER DELETE ON contents BEGIN\n                INSERT INTO search_index(search_index,rowid,search_text) VALUES('delete',old.id,old.search_text);\n            END"
+    },
+    {
+      "kind": "trigger",
+      "name": "content_insert",
+      "table": "contents",
+      "sql": "CREATE TRIGGER content_insert AFTER INSERT ON contents BEGIN\n                INSERT INTO search_index(rowid,search_text) VALUES(new.id,new.search_text);\n            END"
+    },
+    {
+      "kind": "trigger",
+      "name": "content_search_update",
+      "table": "contents",
+      "sql": "CREATE TRIGGER content_search_update AFTER UPDATE OF search_text ON contents BEGIN\n                INSERT INTO search_index(search_index,rowid,search_text) VALUES('delete',old.id,old.search_text);\n                INSERT INTO search_index(rowid,search_text) VALUES(new.id,new.search_text);\n            END"
+    }
+  ]
+}

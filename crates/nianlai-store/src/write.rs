@@ -102,7 +102,7 @@ impl Store {
                         .map(|v| v as u64);
                     *shared.write().unwrap() = Cache {
                         items,
-                        total: counts.contents,
+                        total: counts.contents - counts.trashed,
                         last_recorded_ms,
                         latest_sequence: None,
                     };
@@ -321,17 +321,18 @@ impl Store {
             Ok(Some(item))
         })
     }
-    // 删除一条历史（PRD 6.7 Delete；撤销窗口由调用方在提交前把握）。被收藏的内容不删（B03），返回 Ok(false)。
-    // formats、copy_events 随外键级联删除，搜索索引由 content_delete 触发器同步。
+    // 删除一条历史（PRD 6.7 Delete）：放进回收站（B12），不物理删除；收藏的内容也可以（B13 由界面确认）。
+    // 返回 false 表示内容不存在或已在回收站。
     pub fn delete(&self, id: usize) -> Result<bool> {
         self.call(move |w| {
             let tx = w.connection.transaction()?;
-            if !schema::deletable(&tx, id)? {
-                return Ok(false);
-            }
-            let removed = tx.execute("DELETE FROM contents WHERE id=?1", [id as i64])? > 0;
+            let moved = tx.execute(
+                "INSERT INTO trash(content_id,deleted_ms) SELECT id,?2 FROM contents WHERE id=?1 \
+                 ON CONFLICT(content_id) DO NOTHING",
+                params![id as i64, now_ms() as i64],
+            )? > 0;
             tx.commit()?;
-            if removed {
+            if moved {
                 if w.last.as_ref().is_some_and(|(last, _)| *last == id) {
                     w.last = None;
                 }
@@ -339,7 +340,54 @@ impl Store {
                 cache.items.retain(|item| item.id != id);
                 cache.total = cache.total.saturating_sub(1);
             }
-            Ok(removed)
+            Ok(moved)
+        })
+    }
+    // 从回收站恢复：回到原来的位置（排序时间不变）。不在回收站里返回 None。
+    pub fn restore(&self, id: usize) -> Result<Option<Metadata>> {
+        self.call(move |w| {
+            let tx = w.connection.transaction()?;
+            if tx.execute("DELETE FROM trash WHERE content_id=?1", [id as i64])? == 0 {
+                return Ok(None);
+            }
+            let item = schema::metadata(&tx, id)?;
+            tx.commit()?;
+            update_cache(&mut w.cache.write().unwrap(), item.clone(), &[], 1);
+            Ok(Some(item))
+        })
+    }
+    // 物理删除回收站里的内容：`ids` 为 None 时按删除时间早于 `before_ms` 的全部清掉。
+    // 收藏行先删（外键不级联）；formats、copy_events、trash 随内容级联，搜索索引由触发器同步。
+    pub fn purge(&self, ids: Option<Vec<usize>>, before_ms: u64) -> Result<usize> {
+        self.call(move |w| {
+            let tx = w.connection.transaction()?;
+            let targets: Vec<i64> = match ids {
+                Some(ids) => {
+                    let mut found = Vec::new();
+                    for id in ids {
+                        if schema::trashed(&tx, id)? {
+                            found.push(id as i64);
+                        }
+                    }
+                    found
+                }
+                None => tx
+                    .prepare("SELECT content_id FROM trash WHERE deleted_ms<?1")?
+                    .query_map([before_ms.min(i64::MAX as u64) as i64], |r| r.get(0))?
+                    .collect::<std::result::Result<_, _>>()?,
+            };
+            for id in &targets {
+                tx.execute("DELETE FROM favorites WHERE content_id=?1", [id])?;
+                tx.execute("DELETE FROM contents WHERE id=?1", [id])?;
+            }
+            tx.commit()?;
+            if w.last
+                .as_ref()
+                .is_some_and(|(last, _)| targets.contains(&(*last as i64)))
+            {
+                w.last = None;
+            }
+            Ok(targets.len())
         })
     }
     // 后台刷新来源应用（A06）：更新显示名和图标缓存引用。图标文件由调用方先写好。
@@ -517,6 +565,8 @@ impl Writer {
         let mut delta = 0;
         if let Some(existing) = merge_id {
             let mut keep = existing;
+            // 回收站里的行不计入列表总数：合并前活着几行，合并后只剩一行活的。
+            let mut live_before = usize::from(!schema::trashed(&tx, existing)?);
             outcome = if same {
                 "merged_same_observation"
             } else {
@@ -531,6 +581,7 @@ impl Writer {
                     existing
                 };
                 let dropped = if keeper == existing { other } else { existing };
+                live_before += usize::from(!schema::trashed(&tx, other)?);
                 tx.execute(
                     "UPDATE copy_events SET content_id=?1 WHERE content_id=?2",
                     params![keeper as i64, dropped as i64],
@@ -546,9 +597,10 @@ impl Writer {
                 )?;
                 tx.execute("DELETE FROM contents WHERE id=?1", [dropped as i64])?;
                 deleted.push(dropped);
-                delta -= 1;
                 keep = keeper;
             }
+            tx.execute("DELETE FROM trash WHERE content_id=?1", [keep as i64])?;
+            delta += 1 - live_before as isize;
             let text = search_text(&merged)?;
             tx.execute("UPDATE contents SET fingerprint=?2,kind=?3,preview=?4,file_names=?5,bytes=?6,partial=?7,sort_ms=?8,search_text=?9 WHERE id=?1",
                 params![keep as i64,merged.fingerprint.as_slice(),merged.kind,merged.preview,serde_json::to_string(&merged.file_names).unwrap(),merged.bytes as i64,partial,event.time_ms as i64,text])?;
@@ -558,6 +610,10 @@ impl Writer {
         } else if let Some(existing) = duplicate {
             id = existing;
             outcome = "duplicate";
+            // 回收站里的内容又被复制：它又是活的，回到列表。
+            if tx.execute("DELETE FROM trash WHERE content_id=?1", [id as i64])? > 0 {
+                delta += 1;
+            }
             tx.execute(
                 "UPDATE contents SET partial=?2,sort_ms=?3 WHERE id=?1",
                 params![id as i64, partial, event.time_ms as i64],

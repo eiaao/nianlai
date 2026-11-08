@@ -41,7 +41,7 @@ pub fn search(c: &Connection, query: &str) -> Result<Search> {
         "SELECT {} FROM contents c INDEXED BY content_order LEFT JOIN favorites fv ON fv.content_id=c.id LEFT JOIN source_apps sa ON sa.id=c.source_app_id",
         schema::COLUMNS
     );
-    let mut predicates = Vec::new();
+    let mut predicates = vec![schema::LIVE.to_owned()];
     let mut params = Vec::new();
     if !indexed.is_empty() {
         predicates
@@ -53,9 +53,7 @@ pub fn search(c: &Connection, query: &str) -> Result<Search> {
         predicates.push("instr(c.search_text,?) > 0".to_owned());
         params.push(word);
     }
-    if !predicates.is_empty() {
-        sql.push_str(&format!(" WHERE {}", predicates.join(" AND ")));
-    }
+    sql.push_str(&format!(" WHERE {}", predicates.join(" AND ")));
     sql.push_str(" ORDER BY c.sort_ms DESC,c.sort_order DESC LIMIT 300");
     let items = c
         .prepare_cached(&sql)?
