@@ -2,6 +2,7 @@
   // “历史与存储”分区：自动快照（B18）。恢复会登记后让拈来重启，启动时在打开库之前替换。
   import { onMount } from "svelte";
   import * as ipc from "../lib/ipc";
+  import TrashSection from "./TrashSection.svelte";
   import type { AppSettings, SettingsUpdate, SnapshotInfo, SnapshotReason, SnapshotState } from "../lib/ipc";
 
   let { maxMb, disabled, onsave }: {
@@ -84,6 +85,8 @@
 </script>
 
 <section class="page">
+  <TrashSection {disabled} />
+
   <div><h2>自动快照</h2><p class="page-intro">每天自动给历史库拍一份快照，版本更新后也会额外拍一份，保留最近 {state_?.keep ?? 7} 份。快照包含文字、图片和文件路径，不包含文件本身。出问题时可以把历史恢复到其中任何一份。</p></div>
 
   {#if state_?.restored}

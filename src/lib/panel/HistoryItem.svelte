@@ -4,14 +4,22 @@
   import type { HistoryItem } from "../ipc";
   import { linkParts, relativeTime, sourceName, typeLabel, visualKind } from "./content";
   import SourceIcon from "./SourceIcon.svelte";
+  import { leave } from "./motion";
 
   let { panel, item, index, layout = "a" }: { panel: PanelState; item: HistoryItem; index: number; layout?: "a" | "b" } = $props();
   const selected = $derived(index === panel.selected);
   const kind = $derived(visualKind(item));
   const link = $derived(linkParts(item));
+  const hold = $derived(panel.holdDelete?.id === item.id ? panel.holdDelete : null);
 </script>
 
-<li class:history-row={layout === "a"} class:command-row={layout === "b"} class:selected data-history-index={index}>
+<li class:history-row={layout === "a"} class:command-row={layout === "b"} class:selected class:holding={hold?.phase === "holding"} data-history-index={index}
+  out:leave={{ leaving: panel.leavingId === item.id, motion: panel.motion, collapse: true }}
+  onoutroend={() => { panel.layoutRevision += 1; }}>
+  {#if hold?.phase === "holding"}
+    <!-- 删除收藏要按住：底色从左往右填满即移到回收站；说明文字换掉第二行，不遮标题。 -->
+    {#key hold.startedAt}<i class="hold-fill" aria-hidden="true" style={`animation-duration: ${hold.duration}ms`}></i>{/key}
+  {/if}
   <button
     id={`history-option-${item.id}`}
     class="row-select"
@@ -33,7 +41,11 @@
           {#each panel.highlights(item.preview || "（空文本）") as part}{#if part.hit}<mark>{part.text}</mark>{:else}{part.text}{/if}{/each}
         {/if}
       </span>
-      <span class="row-sub">{sourceName(item)} · {typeLabel(item)}{item.copy_count > 1 ? ` · ${item.copy_count} 次` : ""}{item.partial ? " · 部分格式" : ""}</span>
+      {#if hold}
+        <span class="row-sub hold-sub" class:hint={hold.phase === "hint"} role="status" aria-live="polite">{#if hold.phase === "holding"}继续按住，删除收藏{:else}要按住 <kbd>{hold.keys}</kbd> 才删除{/if}</span>
+      {:else}
+        <span class="row-sub">{sourceName(item)} · {typeLabel(item)}{item.copy_count > 1 ? ` · ${item.copy_count} 次` : ""}{item.partial ? " · 部分格式" : ""}</span>
+      {/if}
     </span>
   </button>
   <button
@@ -72,6 +84,15 @@
   .row-star.favorite, .history-row:hover .row-star, .history-row.selected .row-star, .command-row:hover .row-star, .command-row.selected .row-star, .row-star:focus-visible { opacity: 1; }
   .row-star:disabled { cursor: default; }
   .row-time { align-self: start; padding-top: 14px; overflow: hidden; color: var(--faint); font: 9px var(--font-mono); text-align: right; white-space: nowrap; }
+  li { position: relative; isolation: isolate; }
+  .hold-fill { position: absolute; inset: 0; z-index: -1; background: color-mix(in srgb, var(--star) 14%, transparent); transform-origin: left; pointer-events: none; animation: hold-fill linear forwards; }
+  .hold-sub, .selected .hold-sub { color: var(--star); animation: hold-sub var(--fade-duration) linear; }
+  .hold-sub.hint, .selected .hold-sub.hint { color: var(--muted); }
+  .hold-sub kbd { color: inherit; font: 600 9px/1.25 var(--font-mono); }
+  @keyframes hold-sub { from { opacity: 0; } to { opacity: 1; } }
+  .holding .row-star { animation: hold-star 220ms ease-in-out infinite alternate; }
+  @keyframes hold-fill { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+  @keyframes hold-star { from { transform: rotate(-8deg); } to { transform: rotate(8deg); } }
   mark { background: transparent; color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
 
   .command-row { height: var(--size-row-b); grid-template-columns: minmax(0, 1fr) 18px 38px; gap: 8px; padding: 0 18px 0 15px; }
@@ -102,6 +123,8 @@
     .command-row .row-time { font-size: 8px; }
   }
   @media (prefers-reduced-motion: reduce) {
+    /* 进度是信息（还要按多久），减少动画时保留；只去掉星标晃动。 */
+    .holding .row-star { animation: none; }
     .command-row .slot { transition: opacity var(--duration-reduce) linear; transform: none; }
   }
 </style>

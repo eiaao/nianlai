@@ -511,7 +511,6 @@ impl Controller {
         }
         self.clipboard.shutdown();
         self.history.flush_deferred();
-        self.history.flush_delete();
         self.history.summary();
         self.logger.event("shutdown", json!({}));
         self.logger.flush();

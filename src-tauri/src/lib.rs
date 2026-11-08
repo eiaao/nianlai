@@ -157,10 +157,32 @@ fn delete_item(id: usize) -> Result<bool, String> {
         .delete(id)
 }
 #[tauri::command]
-fn undo_delete(id: usize) -> Result<bool, String> {
-    Ok(history::active()
+fn undo_delete() -> Result<Option<history::Preview>, String> {
+    history::active()
         .ok_or_else(|| "历史服务未就绪".to_owned())?
-        .undo_delete(id))
+        .undo_delete()
+}
+#[tauri::command]
+fn get_trash() -> Result<Vec<history::Trashed>, String> {
+    history::active()
+        .ok_or_else(|| "历史服务未就绪".to_owned())?
+        .trash()
+}
+#[tauri::command]
+fn restore_item(app: AppHandle, id: usize) -> Result<Option<history::Preview>, String> {
+    let restored = history::active()
+        .ok_or_else(|| "历史服务未就绪".to_owned())?
+        .restore(id)?;
+    // 面板开着时列表跟着刷新。
+    let _ = panel::dispatch(&app, Action::HistoryChanged);
+    Ok(restored)
+}
+/// 物理删除回收站里的条目；`ids` 为空表示清空回收站。
+#[tauri::command]
+fn purge_items(ids: Option<Vec<usize>>) -> Result<usize, String> {
+    history::active()
+        .ok_or_else(|| "历史服务未就绪".to_owned())?
+        .purge(ids)
 }
 #[tauri::command]
 fn frontend_ready(app: AppHandle) -> Result<(), String> {
@@ -276,6 +298,9 @@ pub fn run() {
             set_favorite,
             delete_item,
             undo_delete,
+            get_trash,
+            restore_item,
+            purge_items,
             frontend_ready,
             start_search,
             search_ready,

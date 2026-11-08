@@ -130,6 +130,8 @@ pub struct Counts {
     pub indexed: usize,
     pub favorites: usize,
     pub source_apps: usize,
+    // 回收站里的条数（v3 起）；contents 含这些，列表总数要减掉。
+    pub trashed: usize,
 }
 #[derive(Clone, Default)]
 pub struct Cache {
@@ -213,12 +215,12 @@ impl Reader {
         tx.commit()?;
         Ok(app)
     }
-    // 这条内容现在能不能物理删除：被收藏的内容不能（B03）。自动清理（B02）与删除命令都走这里。
-    pub fn deletable(&self, id: usize) -> Result<bool> {
+    /// 回收站（B12）：最近删除的在前，带删除时间。
+    pub fn trash(&self) -> Result<Vec<(Metadata, u64)>> {
         let tx = self.connection.unchecked_transaction()?;
-        let deletable = schema::deletable(&tx, id)?;
+        let items = schema::trash(&tx)?;
         tx.commit()?;
-        Ok(deletable)
+        Ok(items)
     }
     pub fn content(&self, id: usize) -> Result<Option<std::sync::Arc<content::Content>>> {
         let tx = self.connection.unchecked_transaction()?;

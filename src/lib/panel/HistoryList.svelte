@@ -37,6 +37,8 @@
   ul { position: relative; flex: 1; min-height: 0; list-style: none; margin: 0; padding: 5px 0; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
   .section-heading { height: 29px; display: flex; align-items: center; gap: 7px; margin: 0; padding: 0 12px; color: var(--faint); font: 9px var(--font-mono); letter-spacing: .08em; }
   .section-heading svg { width: 14px; height: 14px; color: var(--star); }
+  /* 删除动画期间：被删的那条带着旧的“最近”标题留在原处，紧跟其后的新标题先不显示。 */
+  ul :global(li.leaving + li.section-heading) { display: none; }
   .empty { display: grid; gap: var(--space-2); margin: 0; padding: 38px 18px; color: var(--muted); font-size: 12px; line-height: 1.8; }
   .empty strong { color: var(--text); font-weight: 600; overflow-wrap: anywhere; }
   .command-list { padding: 4px 0; scrollbar-color: var(--line) transparent; }

@@ -41,6 +41,7 @@ pub fn structure(c: &Connection) -> Result<()> {
     c.prepare(
         "SELECT content_id,position,title,note,created_ms,updated_ms FROM favorites LIMIT 0",
     )?;
+    c.prepare("SELECT content_id,deleted_ms FROM trash LIMIT 0")?;
     let triggers: i64 = c.query_row("SELECT count(*) FROM sqlite_schema WHERE type='trigger' AND name IN ('content_insert','content_delete','content_search_update')", [], |r|r.get(0))?;
     if triggers != 3 {
         return Err(Error::Invalid("missing_index_triggers"));
@@ -51,6 +52,8 @@ pub fn structure(c: &Connection) -> Result<()> {
 
 // 列表项统一带收藏状态和来源应用信息（A06/E01）；三个 JOIN 都是主键点查，不改变排序索引的驱动方式。
 pub const COLUMNS: &str = "c.id,c.fingerprint,c.kind,c.preview,c.file_names,c.bytes,c.partial,c.sort_ms,c.source,c.copy_count,c.sort_order,fv.position,sa.display_name,sa.icon_file";
+/// 不在回收站里的内容（B12）。列表、收藏、搜索都只看这些。
+pub const LIVE: &str = "NOT EXISTS(SELECT 1 FROM trash t WHERE t.content_id=c.id)";
 pub const JOINS: &str = "FROM contents c LEFT JOIN favorites fv ON fv.content_id=c.id LEFT JOIN source_apps sa ON sa.id=c.source_app_id";
 pub fn metadata_row(r: &Row<'_>) -> rusqlite::Result<Metadata> {
     let fingerprint: Vec<u8> = r.get(1)?;
@@ -107,7 +110,7 @@ pub fn metadata(c: &Connection, id: usize) -> Result<Metadata> {
 pub fn recent(c: &Connection) -> Result<Vec<Metadata>> {
     let mut items = c
         .prepare(&format!(
-            "SELECT {COLUMNS} {JOINS} ORDER BY c.sort_ms DESC,c.sort_order DESC LIMIT 300"
+            "SELECT {COLUMNS} {JOINS} WHERE {LIVE} ORDER BY c.sort_ms DESC,c.sort_order DESC LIMIT 300"
         ))?
         .query_map([], metadata_row)?
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -121,7 +124,7 @@ pub fn favorites(c: &Connection) -> Result<Vec<Metadata>> {
     let mut items = c
         .prepare(&format!(
             "SELECT {COLUMNS} FROM contents c JOIN favorites fv ON fv.content_id=c.id \
-             LEFT JOIN source_apps sa ON sa.id=c.source_app_id ORDER BY fv.position ASC LIMIT 300"
+             LEFT JOIN source_apps sa ON sa.id=c.source_app_id WHERE {LIVE} ORDER BY fv.position ASC LIMIT 300"
         ))?
         .query_map([], metadata_row)?
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -130,8 +133,8 @@ pub fn favorites(c: &Connection) -> Result<Vec<Metadata>> {
     }
     Ok(items)
 }
-/// 这条内容能不能物理删除：被收藏的内容不能（B03，删除历史与自动清理都必须先问这里）。
-/// 收藏引用由外键兜底——即使调用方漏了检查，删除也会在数据库层失败。
+/// 这条内容是否没有被收藏。同指纹合并时保留被收藏的那行（B03）。
+/// 收藏引用由外键兜底——物理删除被收藏的内容会在数据库层失败，必须先删收藏行。
 pub fn deletable(c: &Connection, id: usize) -> Result<bool> {
     let favorited: bool = c.query_row(
         "SELECT EXISTS(SELECT 1 FROM favorites WHERE content_id=?1)",
@@ -139,6 +142,27 @@ pub fn deletable(c: &Connection, id: usize) -> Result<bool> {
         |r| r.get(0),
     )?;
     Ok(!favorited)
+}
+/// 回收站里的内容，最近删除的在前；第二项是删除时间。
+pub fn trash(c: &Connection) -> Result<Vec<(Metadata, u64)>> {
+    let mut items = c
+        .prepare(&format!(
+            "SELECT {COLUMNS},t.deleted_ms {JOINS} JOIN trash t ON t.content_id=c.id \
+             ORDER BY t.deleted_ms DESC,c.id DESC LIMIT 1000"
+        ))?
+        .query_map([], |r| Ok((metadata_row(r)?, r.get::<_, i64>(14)? as u64)))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    for (item, _) in &mut items {
+        formats_meta(c, item)?;
+    }
+    Ok(items)
+}
+pub fn trashed(c: &Connection, id: usize) -> Result<bool> {
+    Ok(c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM trash WHERE content_id=?1)",
+        [id as i64],
+        |r| r.get(0),
+    )?)
 }
 pub fn source_app_by_path(c: &Connection, exe_path: &str) -> Result<Option<SourceApp>> {
     let app = c
@@ -170,6 +194,7 @@ pub fn counts(c: &Connection) -> Result<Counts> {
         })?,
         favorites: c.query_row("SELECT count(*) FROM favorites", [], |r| number(r, 0))?,
         source_apps: c.query_row("SELECT count(*) FROM source_apps", [], |r| number(r, 0))?,
+        trashed: c.query_row("SELECT count(*) FROM trash", [], |r| number(r, 0))?,
     })
 }
 pub fn content(c: &Connection, id: usize, hash: Hash) -> Result<Option<Arc<Content>>> {

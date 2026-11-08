@@ -12,6 +12,8 @@
   $effect(() => {
     const selectedId = panel.visibleItems[panel.selected]?.id;
     panel.motion;
+    // 删除的条目粉碎收起后，下面的行才补上来；收起结束时再量一次位置。
+    panel.layoutRevision;
     void tick().then(() => {
       if (!panel.list || !rail) return;
       const row = selectedId === undefined ? null : panel.list.querySelector<HTMLElement>(`[data-history-index="${panel.selected}"]`);

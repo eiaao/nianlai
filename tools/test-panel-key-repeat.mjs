@@ -34,7 +34,7 @@ let rejectSearch = false;
 let pendingPaste = null;
 const handlers = new Map();
 export function reset() { calls.length = 0; rejectNext = false; rejectSearch = false; pendingPaste = null; handlers.clear();
-  store.history = null; store.favorites = []; store.deletable = true; store.undoable = true; }
+  store.history = null; store.favorites = []; store.deletable = true; store.undoable = null; }
 export function rejectNextPaste() { rejectNext = true; }
 export function rejectNextSearch() { rejectSearch = true; }
 export function deferNextPaste() {
@@ -57,7 +57,7 @@ export async function startSearch(session) {
   if (rejectSearch) { rejectSearch = false; throw new Error("模拟搜索切换失败"); }
 }
 // 交互优化（收藏、删除、撤销）用的可控替身；默认 getHistory 返回 null，启动预热直接跳过，不影响旧用例。
-export const store = { history: null, favorites: [], deletable: true, undoable: true };
+export const store = { history: null, favorites: [], deletable: true, undoable: null };
 export async function getHistory() { return store.history; }
 export async function getFavorites() { return store.favorites; }
 export async function setFavorite(id, favorite) {
@@ -66,7 +66,10 @@ export async function setFavorite(id, favorite) {
     favorite, favorite_position: favorite ? 9 : null };
 }
 export async function deleteItem(id) { calls.push({ command: "deleteItem", id }); return store.deletable; }
-export async function undoDelete(id) { calls.push({ command: "undoDelete", id }); return store.undoable; }
+export async function undoDelete() {
+  calls.push({ command: "undoDelete" });
+  return store.undoable ? { ...(store.history?.items.find((item) => item.id === store.undoable) ?? {}), id: store.undoable, favorite: false } : null;
+}
 export async function frontendReady() {}
 export async function reportPainted() {}
 export async function searchReady() {}
@@ -1205,46 +1208,146 @@ test("交互优化：收藏不占槽位、本次呼出不挪位置、删除可�
     assert.deepEqual(panel.filtered.slice(0, 3).map((item) => item.id), [108, 109, 103], "下次呼出按新收藏排");
   });
 
-  await suite.test("Delete 删掉当前条并停在原位置，Ctrl+Z 撤销回来；收藏的拒删", async (context) => {
+  await suite.test("Delete 移到回收站并停在原位置，Ctrl+Z 撤销回来", async (context) => {
     const { panel } = await quick(context);
     const full = pinnedHistory();
     panel.selected = 3;
+    ipc.emit("key", { session: 37, key: "Delete:down" });
+    await flush();
+    assert.deepEqual(ipc.calls, [{ command: "deleteItem", id: 102 }], "普通条目按下就删");
     ipc.emit("key", { session: 37, key: "Delete" });
     await flush();
-    assert.deepEqual(ipc.calls, [{ command: "deleteItem", id: 102 }]);
+    assert.equal(ipc.calls.length, 1, "松开不再删第二条");
     assert.ok(panel.filtered.every((item) => item.id !== 102));
     assert.equal(panel.currentItem.id, 103);
     assert.equal(panel.undo.id, 102);
     assert.equal(panel.undo.session, 37);
     assert.equal(panel.undo.label, "合成条目");
-    assert.equal(panel.undo.duration, 3500);
+    assert.equal(panel.undo.duration, 5000);
     ipc.store.history = full;
+    ipc.store.undoable = 102;
     ipc.emit("key", { session: 37, key: "Ctrl+Z" });
     await flush(); await flush();
-    assert.deepEqual(ipc.calls.at(-1), { command: "undoDelete", id: 102 });
+    assert.deepEqual(ipc.calls.at(-1), { command: "undoDelete" });
     assert.equal(panel.undo, null);
     assert.equal(panel.currentItem.id, 102);
-    ipc.calls.length = 0;
+    ipc.store.undoable = null;
+    ipc.emit("key", { session: 37, key: "Ctrl+Z" });
+    await flush();
+    assert.match(panel.message, /没有可以撤销/);
+  });
+
+  await suite.test("收藏的要按住 Delete：按满才删，提前松开或移开选择都取消", async (context) => {
+    context.mock.timers.enable({ apis: ["setTimeout"] });
+    const { panel } = await quick(context);
     panel.selected = 0;
+    const pinned = panel.currentItem;
+    assert.equal(pinned.favorite, true);
+    ipc.emit("key", { session: 37, key: "Delete:down" });
+    await flush();
+    assert.deepEqual(ipc.calls, [], "按下只开始计时");
+    assert.equal(panel.holdDelete.id, pinned.id);
+    assert.equal(panel.holdDelete.phase, "holding");
+    assert.equal(panel.holdDelete.duration, 600);
+    assert.equal(panel.message, "", "不用红色提示行");
+    context.mock.timers.tick(300);
     ipc.emit("key", { session: 37, key: "Delete" });
     await flush();
-    assert.deepEqual(ipc.calls, [], "收藏的不发删除");
-    assert.match(panel.message, /取消收藏/);
+    assert.equal(panel.holdDelete.phase, "hint", "提前松开换成提示");
+    context.mock.timers.tick(600);
+    await flush();
+    assert.deepEqual(ipc.calls, [], "提前松开不删");
+    context.mock.timers.tick(1000);
+    assert.equal(panel.holdDelete, null, "提示过一会儿消失");
+
+    ipc.emit("key", { session: 37, key: "Delete:down" });
+    ipc.emit("key", { session: 37, key: "ArrowDown" });
+    assert.equal(panel.holdDelete, null, "按住时移开选择就取消");
+    context.mock.timers.tick(700);
+    await flush();
+    assert.deepEqual(ipc.calls, []);
+
+    panel.selected = 0;
+    ipc.emit("key", { session: 37, key: "Delete:down" });
+    ipc.emit("key", { session: 37, key: "Delete:down" });
+    context.mock.timers.tick(600);
+    await flush();
+    assert.deepEqual(ipc.calls, [{ command: "deleteItem", id: pinned.id }], "按满才删，且只删一次");
+    assert.equal(panel.leavingId, pinned.id, "只有删掉的这条播放粉碎");
+    assert.equal(panel.holdDelete.phase, "holding", "拍底版之前进度保持铺满");
+    context.mock.timers.tick(100);
+    assert.equal(panel.holdDelete, null);
+    context.mock.timers.tick(800);
+    assert.equal(panel.leavingId, null);
+    assert.equal(panel.undo.id, pinned.id, "删掉后照常给撤销标签");
+    ipc.emit("key", { session: 37, key: "Delete" });
+    await flush();
+    assert.equal(ipc.calls.length, 1, "按满后的松开什么都不做");
+  });
+
+  await suite.test("主线程忙、计时器晚到时，松开按实际按住的时长算：已满就删", async (context) => {
+    context.mock.timers.enable({ apis: ["setTimeout"] });
+    const { panel } = await quick(context);
+    panel.selected = 0;
+    const pinned = panel.currentItem;
+    ipc.emit("key", { session: 37, key: "Delete:down" });
+    const now = Date.now;
+    Date.now = () => now() + 700;
+    try {
+      ipc.emit("key", { session: 37, key: "Delete" });
+    } finally {
+      Date.now = now;
+    }
+    await flush();
+    assert.deepEqual(ipc.calls, [{ command: "deleteItem", id: pinned.id }]);
+    context.mock.timers.tick(600);
+    await flush();
+    assert.equal(ipc.calls.length, 1, "晚到的计时器不再删第二次");
+  });
+
+  await suite.test("搜索模式：Delete 留给输入框，Ctrl+Delete 删当前结果，收藏的同样要按住", async (context) => {
+    context.mock.timers.enable({ apis: ["setTimeout"] });
+    const { panel } = await quick(context);
     panel.mode = "search";
     panel.selected = 3;
+    ipc.emit("key", { session: 37, key: "Delete:down" });
     ipc.emit("key", { session: 37, key: "Delete" });
     await flush();
     assert.deepEqual(ipc.calls, [], "搜索模式的 Delete 留给输入框");
+    panel.searchItems = pinnedHistory().items;
+    const target = panel.currentItem;
+    const event = keydown(panel, { key: "Delete", ctrlKey: true });
+    await flush();
+    assert.ok(event.defaultPrevented);
+    assert.equal(target.favorite, false);
+    assert.deepEqual(ipc.calls, [{ command: "deleteItem", id: target.id }], "搜索模式用 Ctrl+Delete 删除当前结果");
+    ipc.calls.length = 0;
+    panel.selected = 0;
+    assert.equal(panel.currentItem.favorite, true);
+    keydown(panel, { key: "Delete", ctrlKey: true });
+    assert.equal(panel.holdDelete.keys, "Ctrl+Delete");
+    keyup(panel, { key: "Delete", ctrlKey: true });
+    assert.equal(panel.holdDelete.phase, "hint");
+    context.mock.timers.tick(700);
+    await flush();
+    assert.deepEqual(ipc.calls, [], "提前松开不删");
   });
 
-  await suite.test("新一次呼出清掉上一会话的撤销入口", async (context) => {
+  await suite.test("新一次呼出清掉上一会话的撤销提示，Ctrl+Z 仍能撤销", async (context) => {
     const { panel } = await quick(context);
     panel.selected = 3;
-    ipc.emit("key", { session: 37, key: "Delete" });
+    ipc.emit("key", { session: 37, key: "Delete:down" });
     await flush();
     assert.ok(panel.undo);
     ipc.emit("shown", shown({ session: 38, history: pinnedHistory() }));
     assert.equal(panel.undo, null);
+    ipc.store.history = pinnedHistory();
+    ipc.store.undoable = 102;
+    ipc.calls.length = 0;
+    ipc.emit("key", { session: 38, key: "Ctrl+Z" });
+    await flush(); await flush();
+    assert.deepEqual(ipc.calls, [{ command: "undoDelete" }]);
+    assert.equal(panel.currentItem.id, 102);
   });
 
   await suite.test("按住 Ctrl/Shift 超过 300 ms 才换页脚提示，快速组合键不闪", async (context) => {

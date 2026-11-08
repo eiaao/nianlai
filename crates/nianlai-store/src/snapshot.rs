@@ -81,6 +81,7 @@ fn relational_check(c: &Connection) -> Result<Counts> {
         OR EXISTS(SELECT 1 FROM contents c LEFT JOIN search_index_docsize s ON s.id=c.id WHERE s.id IS NULL)
         OR EXISTS(SELECT 1 FROM search_index_docsize s LEFT JOIN contents c ON c.id=s.id WHERE c.id IS NULL)
         OR EXISTS(SELECT 1 FROM favorites fv LEFT JOIN contents c ON c.id=fv.content_id WHERE c.id IS NULL)
+        OR EXISTS(SELECT 1 FROM trash t LEFT JOIN contents c ON c.id=t.content_id WHERE c.id IS NULL)
         OR EXISTS(SELECT 1 FROM copy_events e LEFT JOIN source_apps a ON a.id=e.source_app_id WHERE e.source_app_id IS NOT NULL AND a.id IS NULL)
         OR EXISTS(SELECT 1 FROM contents c LEFT JOIN source_apps a ON a.id=c.source_app_id WHERE c.source_app_id IS NOT NULL AND a.id IS NULL)",[],|r|r.get(0))?;
     if invalid {

@@ -751,18 +751,13 @@ fn favorites_are_stable_ordered_and_survive_copies_search_and_reuse() {
     check(&temp.0).unwrap();
 }
 
-// B03：被收藏的内容不能物理删除；补齐合并撞上被收藏的重复内容时保留收藏行。
+// B03：补齐合并撞上被收藏的重复内容时保留收藏行；外键兜底，被收藏的内容行不能直接物理删除。
 #[test]
-fn favorited_content_is_not_deletable_and_merges_keep_the_favorite() {
+fn merges_keep_the_favorite_and_favorites_block_physical_delete() {
     let temp = Temp::new();
     let store = temp.store();
     let at = Instant::now();
     ingest(&store, rich("收藏后补齐合并"), 1, at);
-    store.set_favorite(1, true).unwrap().unwrap();
-    let reader = store.reader().unwrap();
-    assert!(!reader.deletable(1).unwrap());
-    store.set_favorite(1, false).unwrap().unwrap();
-    assert!(reader.deletable(1).unwrap());
     store.set_favorite(1, true).unwrap().unwrap();
 
     // 已有一条未收藏的纯文本记录；补齐成富文本后与“收藏后补齐合并”同指纹，必须并成一行。
@@ -821,43 +816,96 @@ fn refresh_source_app_updates_display_and_icon_reference_only() {
     assert_eq!((counts.events, counts.source_apps), (1, 1));
 }
 
-// 面板 Delete：删除历史连带格式、复制事件和搜索索引；收藏的内容拒删（B03）；删除后再复制同样内容会新建记录。
+// 面板 Delete（B12）：先进回收站，列表、搜索、收藏里都看不到；能恢复回原位；再复制同样内容也会回来。
+// 物理删除连带格式、复制事件、搜索索引和收藏行。
 #[test]
-fn delete_removes_record_events_and_index_but_refuses_favorites() {
+fn delete_moves_to_trash_then_restore_revive_and_purge() {
     let temp = Temp::new();
     let store = temp.store();
     let at = Instant::now();
-    for i in 1..=3 {
+    for i in 1..=4 {
         ingest(&store, text(&format!("删除测试{i}")), i, at);
     }
     store.set_favorite(3, true).unwrap().unwrap();
-    assert!(!store.delete(3).unwrap());
+    // 收藏的也能删（界面先确认），恢复后仍是收藏。
+    assert!(store.delete(3).unwrap());
     assert!(store.delete(2).unwrap());
     assert!(!store.delete(2).unwrap());
+    assert!(!store.delete(99).unwrap());
     let cache = store.cache();
     assert_eq!(cache.total, 2);
-    assert!(cache.items.iter().all(|item| item.id != 2));
+    assert!(cache.items.iter().all(|item| item.id != 2 && item.id != 3));
     let reader = store.reader().unwrap();
-    assert!(reader.content(2).unwrap().is_none());
-    let found: Vec<usize> = reader
-        .search("删除测试")
-        .unwrap()
-        .items
-        .into_iter()
-        .map(|item| item.id)
-        .collect();
-    assert_eq!(found.len(), 2);
-    assert!(!found.contains(&2));
+    assert!(reader.favorites().unwrap().is_empty());
+    assert!(reader.content(2).unwrap().is_some(), "回收站里的内容还在");
+    let found = |reader: &Reader| -> Vec<usize> {
+        let mut ids: Vec<usize> = reader
+            .search("删除测试")
+            .unwrap()
+            .items
+            .into_iter()
+            .map(|item| item.id)
+            .collect();
+        ids.sort_unstable();
+        ids
+    };
+    assert_eq!(found(&reader), [1, 4]);
+    assert_eq!(found(&reader), {
+        let mut ids: Vec<usize> = reader.recent().unwrap().iter().map(|i| i.id).collect();
+        ids.sort_unstable();
+        ids
+    });
+    let trash = reader.trash().unwrap();
+    assert_eq!(
+        trash.iter().map(|(item, _)| item.id).collect::<Vec<_>>(),
+        [2, 3]
+    );
+    assert!(trash.iter().all(|(_, at)| *at > 0));
+    assert!(trash[1].0.favorite);
+
+    // 恢复：回到原来的位置，收藏还在。
+    let restored = store.restore(3).unwrap().unwrap();
+    assert!(restored.favorite);
+    assert!(store.restore(3).unwrap().is_none());
+    assert_eq!(store.cache().total, 3);
+    assert_eq!(
+        store.cache().items.iter().map(|i| i.id).collect::<Vec<_>>(),
+        [4, 3, 1]
+    );
+    // 回收站里的内容再被复制：回到列表，复制次数累加。
+    let again = ingest(&store, text("删除测试2"), 5, at);
+    assert_eq!((again.outcome, again.record_id), ("duplicate", Some(2)));
+    assert_eq!(store.cache().total, 4);
+    assert!(store.reader().unwrap().trash().unwrap().is_empty());
+
+    // 物理删除：指定条目，或按删除时间清掉过期的；不在回收站里的不动。
+    store.delete(3).unwrap();
+    store.delete(1).unwrap();
+    assert_eq!(store.purge(Some(vec![3, 4]), 0).unwrap(), 1);
+    assert_eq!(store.purge(None, 0).unwrap(), 0, "删除时间不早于 0");
+    assert_eq!(store.purge(None, u64::MAX).unwrap(), 1);
+    let counts = check(&temp.0).unwrap();
+    assert_eq!(
+        (counts.contents, counts.trashed, counts.favorites),
+        (2, 0, 0)
+    );
     let c = writable(&temp.0.join("history.db")).unwrap();
     let orphans: usize = c
         .query_row(
-            "SELECT (SELECT count(*) FROM copy_events WHERE content_id=2)+(SELECT count(*) FROM formats WHERE content_id=2)",
+            "SELECT (SELECT count(*) FROM copy_events WHERE content_id IN (1,3))+(SELECT count(*) FROM formats WHERE content_id IN (1,3))",
             [],
             |r| schema::number(r, 0),
         )
         .unwrap();
     assert_eq!(orphans, 0);
-    let again = ingest(&store, text("删除测试2"), 4, at);
-    assert_eq!(again.outcome, "saved");
-    check(&temp.0).unwrap();
+    assert_eq!(ingest(&store, text("删除测试3"), 6, at).outcome, "saved");
+    drop(store);
+    // 重新打开：列表总数不含回收站。
+    store_reopen_total(&temp, 3);
+}
+fn store_reopen_total(temp: &Temp, expected: usize) {
+    let store = temp.store();
+    store.delete(store.cache().items[0].id).unwrap();
+    drop(store);
+    assert_eq!(temp.store().cache().total, expected - 1);
 }

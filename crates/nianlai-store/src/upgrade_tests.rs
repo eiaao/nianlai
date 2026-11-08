@@ -813,8 +813,8 @@ fn rebuild_fixture(version: u32) {
     c.execute_batch("PRAGMA journal_mode=DELETE;").unwrap();
     drop(c);
     assert!(
-        fs::metadata(&target).unwrap().len() < 100 * 1024,
-        "夹具要保持在几十 KB 以内"
+        fs::metadata(&target).unwrap().len() < 128 * 1024,
+        "夹具要保持在 128 KB 以内"
     );
     fs::write(
         fixtures().join(format!("v{version}.json")),
@@ -832,6 +832,11 @@ fn rebuild_fixture(version: u32) {
 fn rebuild_v1_fixture() {
     rebuild_fixture(1);
 }
+#[test]
+#[ignore = "重建夹具才跑，见 rebuild_fixture 的说明"]
+fn rebuild_v2_fixture() {
+    rebuild_fixture(2);
+}
 
 // v1 夹具里出现过的来源进程名（populate 的 sources）；回填的 source_apps 应当恰好是这些。
 const BACKFILLED_APPS: &[&str] = &["Code.exe", "chrome.exe", "explorer.exe", "notepad.exe"];
@@ -841,7 +846,7 @@ fn v2_migration_backfills_source_apps_and_keeps_content_and_search() {
     let manifest = load_manifest(1);
     let temp = fixture_copy(1);
     let store = Store::open(&temp.0, sha256).unwrap();
-    assert_eq!(store.report().version, 2);
+    assert_eq!(store.report().version, VERSION);
     assert_eq!(store.report().migrated_from, Some(1));
     // 记录、搜索结果与清单一致；收藏表为空。
     assert_matches(&temp.0, &manifest);
@@ -945,4 +950,37 @@ fn failing_v2_step_keeps_database_at_v1() {
     // 修好步骤后重新打开：正常升到最新，内容与清单一致。
     drop(Store::open(&temp.0, sha256).unwrap());
     assert_matches(&temp.0, &manifest);
+}
+
+// v2 夹具（0.1.0-alpha.3 发布时的结构，带来源应用）升到最新：记录、搜索、来源应用不变，回收站为空且可用。
+#[test]
+fn fixture_v2_opens_with_latest_code_and_trash_works() {
+    let manifest = load_manifest(2);
+    assert_eq!(manifest.version, 2);
+    let temp = fixture_copy(2);
+    let c =
+        Connection::open_with_flags(temp.0.join("history.db"), OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    assert_eq!(schema_rows(&c), manifest.schema);
+    drop(c);
+    let store = Store::open(&temp.0, sha256).unwrap();
+    assert_eq!(store.report().version, VERSION);
+    assert_eq!(store.report().migrated_from, (VERSION > 2).then_some(2));
+    assert_eq!(store.cache().total, manifest.counts.contents);
+    let actual = manifest_of(&temp.0);
+    assert_eq!(actual.counts, manifest.counts);
+    assert_eq!(actual.records, manifest.records);
+    assert_eq!(actual.searches, manifest.searches);
+    check(&temp.0).unwrap();
+    let backups = backups(&temp.0);
+    assert_eq!(backups.len(), usize::from(VERSION > 2));
+    if VERSION > 2 {
+        assert_valid_backup(&backups[0], 2, &manifest);
+    }
+    let id = store.cache().items[0].id;
+    assert!(store.delete(id).unwrap());
+    assert_eq!(store.cache().total, manifest.counts.contents - 1);
+    assert_eq!(store.reader().unwrap().trash().unwrap().len(), 1);
+    assert!(store.restore(id).unwrap().is_some());
+    check(&temp.0).unwrap();
 }
