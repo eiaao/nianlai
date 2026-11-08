@@ -397,6 +397,8 @@ pub enum Action {
     },
     Quit,
     QuitFrontend,
+    // 恢复快照等需要重新打开数据库的操作：按退出走完清理，再由守护者立刻拉起。
+    Relaunch,
 }
 
 impl Controller {
@@ -1827,7 +1829,8 @@ impl Panel {
                     let _ = reply.send((self.session, generation));
                 }
             }
-            Action::Quit | Action::QuitFrontend => {
+            Action::Quit | Action::QuitFrontend | Action::Relaunch => {
+                let relaunch = matches!(action, Action::Relaunch);
                 app.state::<Controller>()
                     .stopping
                     .store(true, Ordering::Release);
@@ -1840,9 +1843,13 @@ impl Panel {
                     self.log(logger, "quit_cleanup_failed", json!({"error":error}));
                 }
                 self.hooks.take();
-                self.log(logger, "quit_requested", json!({}));
+                self.log(logger, "quit_requested", json!({"relaunch":relaunch}));
                 logger.flush();
-                app.exit(0);
+                app.exit(if relaunch {
+                    crate::recovery::RELAUNCH_CODE
+                } else {
+                    0
+                });
             }
             _ => {}
         }

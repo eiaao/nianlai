@@ -8,7 +8,10 @@ mod write;
 
 pub use migrations::VERSION;
 pub use search::{Search, SearchMode};
-pub use snapshot::{SnapshotReport, check, restore, snapshot, snapshot_due, validate_snapshot};
+pub use snapshot::{
+    Reason, Retention, SNAPSHOT_KEEP, SnapshotInfo, SnapshotReport, check, list_snapshots, restore,
+    snapshot, snapshot_due, snapshot_file, snapshot_reason, snapshot_with, validate_snapshot,
+};
 pub use write::Store;
 
 use content::{Fingerprint, Hash};

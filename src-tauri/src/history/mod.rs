@@ -1,5 +1,6 @@
 pub mod content;
 mod memory;
+pub mod snapshots;
 
 use crate::log::{Logger, now_ms};
 use content::{Content, Fingerprint, Hash};
@@ -222,15 +223,17 @@ impl History {
                     history.0.disabled.store(true, Ordering::Release);
                 changed();return;
             }
-            let result=nianlai_store::snapshot_due(store.directory()).and_then(|due| {
-                if due {nianlai_store::snapshot(store.directory()).map(Some)}else{Ok(None)}
-            });
-            match result {
-                Ok(Some(report))=>logger.event("snapshot",json!({"elapsed_ms":report.elapsed_ms,"bytes":report.bytes,"retained":report.retained,"deleted":report.deleted})),
-                Ok(None)=>{},
-                Err(error)=>logger.event("snapshot_failed",json!({"error_code":error.to_string()})),
+            // 启动时先检查一次，之后每小时检查是否到了每日快照的时间（程序常常连开好几天）。
+            loop {
+                let Some(directory)=history.store_directory() else {return};
+                snapshots::automatic(&directory, &logger);
+                std::thread::sleep(snapshots::CHECK_INTERVAL);
             }
         }).is_err() {self.0.logger.event("store_check_failed",json!({"error_code":"thread_start"}));}
+    }
+    /// 库已打开时的数据目录；内存模式（库没打开）返回 None。
+    pub fn store_directory(&self) -> Option<PathBuf> {
+        self.0.store_directory()
     }
     // 图片降级成路径时 PNG 存在这里；库没打开（内存模式）也照样用数据目录。
     pub fn exports(&self) -> Option<PathBuf> {
@@ -245,6 +248,9 @@ impl History {
 }
 
 impl Shared {
+    pub fn store_directory(&self) -> Option<PathBuf> {
+        self.store().map(|store| store.directory().to_path_buf())
+    }
     pub(crate) fn store(&self) -> Option<Store> {
         if self.disabled.load(Ordering::Acquire) {
             None
@@ -256,6 +262,8 @@ impl Shared {
         let location = self.logger.directories.data_source;
         let directory = self.logger.directories.data.clone();
         let _ = self.directory.set(directory.clone());
+        // 上次登记的快照恢复要在打开库之前完成。
+        snapshots::apply_pending(&directory, &self.logger);
         let opened = (|| {
             *self.application_guard.lock().unwrap() =
                 Some(nianlai_store::application_guard(&directory)?);
