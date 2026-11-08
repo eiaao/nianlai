@@ -1,9 +1,9 @@
 use super::super::{formats, hash, window};
 use super::{Notice, Shared, notice};
 use crate::{
-    capture::blocking_marker,
+    capture::{blocking_marker, rules::gate},
     history::{
-        CopyEvent,
+        Captured, CopyEvent,
         content::{Content, DIB, DIBV5, Data, FILES, TEXT},
     },
     paste::capture_access::{AccessError, CaptureAttempt, OwnerSnapshot, capture_attempt},
@@ -131,6 +131,7 @@ struct Attempt {
     ole_bitmap: bool,
     reason: Option<&'static str>,
     marker: Option<&'static str>,
+    rule: Option<&'static str>,
     retry_latest: bool,
     enumerate_error: Option<Value>,
 }
@@ -149,6 +150,7 @@ impl Attempt {
             ole_bitmap: false,
             reason: None,
             marker: None,
+            rule: None,
             retry_latest: false,
             enumerate_error: None,
         }
@@ -249,39 +251,48 @@ fn read_once(shared: &Shared, owner: Option<HWND>, mut attempt: Attempt) -> Atte
         attempt.reason = Some("own_write");
     } else {
         attempt.notice.owner = super::process(owner);
-        match formats::enumerate() {
-            Err((code, count)) => {
-                attempt.reason = Some("enumerate_failed");
-                attempt.enumerate_error = Some(json!({"code":code,"after":count,
+        // 暂停和排除应用在列出格式之前判断：正文不读进内存（PRD 6.1）。
+        let skip = gate().before_read(
+            &window::process_name(attempt.notice.source),
+            &window::process_name(attempt.notice.owner),
+        );
+        if let Some(reason) = skip {
+            attempt.reason = Some(reason);
+        } else {
+            match formats::enumerate() {
+                Err((code, count)) => {
+                    attempt.reason = Some("enumerate_failed");
+                    attempt.enumerate_error = Some(json!({"code":code,"after":count,
                     "since_open_ms":started.elapsed().as_secs_f64()*1000.0-attempt.wait_ms,"holder":holder()}));
-            }
-            Ok(all) => {
-                attempt.all = all;
-                attempt.marker = blocking_marker(
-                    attempt.all.iter().map(|(_, name)| name.as_str()),
-                    |marker| {
-                        let id = attempt.all.iter().find(|(_, name)| name == marker)?.0;
-                        let started = Instant::now();
-                        let result = with_data(id, |bytes| {
-                            Ok(u32::from_le_bytes(
-                                bytes
-                                    .get(..4)
-                                    .ok_or("read_failed")?
-                                    .try_into()
-                                    .map_err(|_| "read_failed")?,
-                            ))
-                        })
-                        .ok();
-                        if started.elapsed() > Duration::from_secs(1) {
-                            shared.logger.event("capture_slow", json!({"format":marker,"read_ms":started.elapsed().as_secs_f64()*1000.0}));
-                        }
-                        result
-                    },
-                );
-                if attempt.marker.is_some() {
-                    attempt.reason = Some("marker");
-                } else {
-                    read_formats(shared, &mut attempt);
+                }
+                Ok(all) => {
+                    attempt.all = all;
+                    attempt.marker = blocking_marker(
+                        attempt.all.iter().map(|(_, name)| name.as_str()),
+                        |marker| {
+                            let id = attempt.all.iter().find(|(_, name)| name == marker)?.0;
+                            let started = Instant::now();
+                            let result = with_data(id, |bytes| {
+                                Ok(u32::from_le_bytes(
+                                    bytes
+                                        .get(..4)
+                                        .ok_or("read_failed")?
+                                        .try_into()
+                                        .map_err(|_| "read_failed")?,
+                                ))
+                            })
+                            .ok();
+                            if started.elapsed() > Duration::from_secs(1) {
+                                shared.logger.event("capture_slow", json!({"format":marker,"read_ms":started.elapsed().as_secs_f64()*1000.0}));
+                            }
+                            result
+                        },
+                    );
+                    if attempt.marker.is_some() {
+                        attempt.reason = Some("marker");
+                    } else {
+                        read_formats(shared, &mut attempt);
+                    }
                 }
             }
         }
@@ -420,6 +431,13 @@ pub(super) fn run(shared: &Shared) {
         if shared.stopping.load(Ordering::Acquire) && !coordination_failed {
             attempt.reason = Some("stopping");
         }
+        if attempt.reason.is_none()
+            && let Err(skip) = gate().after_read(&mut attempt.data)
+        {
+            attempt.reason = Some(skip.reason);
+            attempt.rule = skip.rule;
+            attempt.data.clear();
+        }
         if attempt.reason.is_none() {
             match Content::new(std::mem::take(&mut attempt.data), hash::sha256) {
                 Ok(content) => {
@@ -445,14 +463,17 @@ pub(super) fn run(shared: &Shared) {
                     let result = if shared.stopping.load(Ordering::Acquire) {
                         None
                     } else {
-                        Some(
-                            shared
-                                .history
-                                .ingest(content, event, attempt.partial, Instant::now()),
-                        )
+                        Some(shared.history.capture(
+                            content,
+                            event,
+                            attempt.partial,
+                            Instant::now(),
+                        ))
                     };
                     match result {
-                        Some(Ok(result)) => {
+                        Some(Ok(Captured::Deferred)) => outcome = "deferred",
+                        Some(Ok(Captured::Transient)) => attempt.reason = Some("transient"),
+                        Some(Ok(Captured::Stored(result))) => {
                             write_ms = Some(result.write_ms);
                             transaction_ok = Some(result.transaction_ok);
                             outcome = result.outcome;
@@ -492,7 +513,7 @@ pub(super) fn run(shared: &Shared) {
             }
         }
         shared.logger.event("capture", json!({
-            "sequence":attempt.notice.sequence,"trigger":attempt.notice.trigger,"outcome":outcome,"reason":attempt.reason,"marker":attempt.marker,
+            "sequence":attempt.notice.sequence,"trigger":attempt.notice.trigger,"outcome":outcome,"reason":attempt.reason,"marker":attempt.marker,"rule":attempt.rule,
             "enumerate_error":attempt.enumerate_error,"write_ms":write_ms,"transaction_ok":transaction_ok,"error_code":store_error,
             "source_process":source,"owner_process":owner,"same_process":attempt.notice.source!=0 && attempt.notice.source==attempt.notice.owner,
             "formats":attempt.all.iter().take(60).map(|(_, name)| formats::log_name(name)).collect::<Vec<_>>(),"format_count":attempt.all.len(),

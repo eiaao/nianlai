@@ -1,3 +1,6 @@
+pub mod rules;
+pub mod sensitive;
+
 pub const MARKERS: [&str; 4] = [
     "Clipboard Viewer Ignore",
     "ExcludeClipboardContentFromMonitorProcessing",

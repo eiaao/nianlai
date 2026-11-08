@@ -2,7 +2,8 @@
   import { onMount } from "svelte";
   import * as ipc from "../lib/ipc";
   import HotkeyEditor from "./HotkeyEditor.svelte";
-  import type { AppSettings, SettingsUpdate } from "../lib/ipc";
+  import CapturePage from "./CapturePage.svelte";
+  import type { AppSettings, CaptureSettings, SettingsUpdate } from "../lib/ipc";
   import {
     applyPreferences, DEFAULT_PREFERENCES, normalizePreferences,
     type DensityPreference, type MotionPreference, type Preferences, type ThemePreference,
@@ -18,6 +19,7 @@
   let page = $state("general");
   let preferences = $state<Preferences>({ ...DEFAULT_PREFERENCES });
   let hotkey = $state("Ctrl+`");
+  let capture = $state<CaptureSettings | null>(null);
   let loading = $state(true);
   let saving = $state(false);
   let status = $state("正在读取设置…");
@@ -35,6 +37,7 @@
 
   function apply(settingsValue: AppSettings) {
     hotkey = settingsValue.hotkey ?? "Ctrl+`";
+    capture = (settingsValue.capture as CaptureSettings | undefined) ?? null;
     preferences = normalizePreferences(settingsValue);
     applyPreferences(preferences);
   }
@@ -118,6 +121,8 @@
             <label class="setting"><span class="setting-copy"><strong>列表密度</strong><small>v0.1 提供紧凑密度；舒适档将在后续版本开放。</small></span><select value={preferences.density} disabled={loading || saving} onchange={(event) => save({ panel: { density: event.currentTarget.value as DensityPreference } }, "列表密度已保存")}><option value="compact">紧凑</option><option value="comfortable" disabled>舒适（后续版本）</option></select></label>
           </div></div>
         </section>
+      {:else if page === "record"}
+        <CapturePage {capture} disabled={loading || saving} onsave={save} />
       {:else}
         <section class="page placeholder">
           <h2>{pages.find((entry) => entry.id === page)?.label}</h2>
@@ -147,11 +152,6 @@
   .main-head h1 { margin: 0; font: 600 21px var(--font-display); }
   .main-head > span { color: var(--settings-muted); font: 9px var(--font-mono); letter-spacing: .08em; }
   .content { flex: 1; min-height: 0; overflow: auto; padding: 24px 28px 30px; }
-  .page { display: grid; gap: 20px; }
-  h2 { margin: 0 0 6px; font: 600 18px var(--font-display); }
-  .page-intro { margin: 0; color: var(--settings-muted); font-size: 11px; line-height: 1.7; }
-  .group { display: grid; gap: 8px; }
-  .group-title { color: var(--settings-muted); font-size: 11px; font-weight: 600; letter-spacing: .04em; }
   .layout-options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
   .layout-option { position: relative; display: grid; align-content: start; gap: 9px; padding: 12px; border: 1px solid var(--settings-line); border-radius: var(--radius-sm); background: transparent; color: var(--settings-text); text-align: left; }
   .layout-option[aria-checked="true"] { border-color: var(--settings-accent); background: var(--settings-selected); box-shadow: inset 3px 0 0 var(--settings-accent); }
@@ -159,14 +159,6 @@
   .layout-option small { color: var(--settings-muted); font-size: 10px; line-height: 1.5; }
   .layout-check { position: absolute; right: 9px; top: 8px; color: var(--settings-accent); font: 11px var(--font-mono); }
   .mini { width: 100%; height: 62px; border: 1px solid currentColor; color: var(--settings-accent); background: var(--a-preview); }
-  .card { border: 1px solid var(--settings-line); border-radius: var(--radius-md); background: var(--settings-card); }
-  .setting { min-height: 64px; display: flex; align-items: center; gap: 18px; padding: 13px 16px; border-bottom: 1px solid var(--settings-line); }
-  .setting:last-child { border-bottom: 0; }
-  .setting-copy { min-width: 0; flex: 1; }
-  .setting-copy strong { display: block; font-size: 13px; font-weight: 600; }
-  .setting-copy small { display: block; margin-top: 4px; color: var(--settings-muted); font-size: 11px; line-height: 1.5; }
-  select { min-width: 150px; min-height: 33px; padding: 5px 9px; border: 1px solid var(--settings-line); border-radius: var(--radius-sm); background: var(--settings-field); color: var(--settings-text); font-size: 11px; }
-  select:disabled { opacity: .65; }
   footer { min-height: 34px; flex: none; padding: 9px 28px; border-top: 1px solid var(--settings-line); color: var(--settings-muted); font-size: 10px; }
   footer.failed { color: var(--state-critical); }
   .placeholder { color: var(--settings-muted); font-size: 12px; line-height: 1.8; }

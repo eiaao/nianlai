@@ -35,6 +35,7 @@ pub struct Settings {
     pub memory: Memory,
     pub experiments: Experiments,
     pub log: Log,
+    pub capture: Capture,
     #[serde(flatten)]
     unknown: Unknown,
 }
@@ -48,9 +49,71 @@ impl Default for Settings {
             memory: Memory::default(),
             experiments: Experiments::default(),
             log: Log::default(),
+            capture: Capture::default(),
             unknown: Unknown::new(),
         }
     }
+}
+
+/// 默认排除的密码管理器（A07）。按进程名比较，不区分大小写。
+pub const DEFAULT_EXCLUDED_APPS: [&str; 6] = [
+    "KeePass.exe",
+    "KeePassXC.exe",
+    "Bitwarden.exe",
+    "1Password.exe",
+    "Enpass.exe",
+    "RoboForm.exe",
+];
+pub const MAX_TEXT_KB: u64 = 2048;
+const MAX_EXCLUDED_APPS: usize = 200;
+
+/// 采集规则（PRD 6.1，A07–A11）。暂停和“忽略下一次”只在内存里，不在这里。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Capture {
+    pub excluded_apps: Vec<String>,
+    pub sensitive_off: Vec<String>,
+    pub text: bool,
+    pub rich_text: bool,
+    pub images: bool,
+    pub files: bool,
+    pub max_text_kb: u64,
+    pub transient: bool,
+    pub transient_ms: u64,
+    #[serde(flatten)]
+    unknown: Unknown,
+}
+
+impl Default for Capture {
+    fn default() -> Self {
+        Self {
+            excluded_apps: DEFAULT_EXCLUDED_APPS.map(String::from).to_vec(),
+            sensitive_off: Vec::new(),
+            text: true,
+            rich_text: true,
+            images: true,
+            files: true,
+            max_text_kb: MAX_TEXT_KB,
+            transient: true,
+            transient_ms: 1000,
+            unknown: Unknown::new(),
+        }
+    }
+}
+
+fn valid_app(value: &Value) -> bool {
+    // 只存进程名（如 KeePass.exe），不收路径；前后空格会让比较永远对不上，直接视为无效。
+    value.as_str().is_some_and(|name| {
+        !name.is_empty()
+            && name.len() <= 260
+            && name.trim() == name
+            && !name.contains(['\\', '/', '\0'])
+    })
+}
+
+fn string_list(value: &Value, max: usize, valid: impl Fn(&Value) -> bool) -> bool {
+    value
+        .as_array()
+        .is_some_and(|items| items.len() <= max && items.iter().all(valid))
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -210,6 +273,54 @@ fn validate(mut value: Value) -> (Settings, Vec<Issue>) {
         "log.max_total_mb",
         json!(20),
         |v| v.as_u64().is_some_and(|n| n > 0 && n <= u64::MAX / MIB),
+        &mut issues,
+    );
+    let capture = section(object, "capture", &mut issues);
+    field(
+        capture,
+        "excluded_apps",
+        "capture.excluded_apps",
+        json!(DEFAULT_EXCLUDED_APPS),
+        |v| string_list(v, MAX_EXCLUDED_APPS, valid_app),
+        &mut issues,
+    );
+    field(
+        capture,
+        "sensitive_off",
+        "capture.sensitive_off",
+        json!([]),
+        |v| {
+            string_list(v, 64, |id| {
+                id.as_str()
+                    .is_some_and(|id| !id.is_empty() && id.len() <= 64)
+            })
+        },
+        &mut issues,
+    );
+    for name in ["text", "rich_text", "images", "files", "transient"] {
+        field(
+            capture,
+            name,
+            &format!("capture.{name}"),
+            json!(true),
+            Value::is_boolean,
+            &mut issues,
+        );
+    }
+    field(
+        capture,
+        "max_text_kb",
+        "capture.max_text_kb",
+        json!(MAX_TEXT_KB),
+        |v| v.as_u64().is_some_and(|n| (1..=MAX_TEXT_KB).contains(&n)),
+        &mut issues,
+    );
+    field(
+        capture,
+        "transient_ms",
+        "capture.transient_ms",
+        json!(1000),
+        |v| v.as_u64().is_some_and(|n| (200..=5000).contains(&n)),
         &mut issues,
     );
     // 已逐项规范所有已知字段；未知字段由各层 flatten 原样接收。
@@ -492,6 +603,50 @@ pub(crate) mod tests {
         assert_eq!(loaded.get(), updated);
         assert_eq!(updated.memory.resuspend_minutes, 0.5);
         assert!(updated.experiments.searchbox_focus);
+    }
+
+    #[test]
+    fn capture_rules_validate_each_field() {
+        let (settings, issues) = validate(json!({}));
+        assert!(issues.is_empty());
+        assert_eq!(settings.capture, Capture::default());
+        assert!(
+            settings
+                .capture
+                .excluded_apps
+                .iter()
+                .any(|app| app == "KeePass.exe")
+        );
+        let (settings, issues) = validate(json!({"capture":{
+            "excluded_apps":["Code.exe"], "sensitive_off":["jwt"], "rich_text":false,
+            "max_text_kb":64, "transient":false, "transient_ms":1500
+        }}));
+        assert!(issues.is_empty());
+        assert_eq!(settings.capture.excluded_apps, ["Code.exe"]);
+        assert_eq!(settings.capture.sensitive_off, ["jwt"]);
+        assert!(!settings.capture.rich_text && settings.capture.text);
+        assert_eq!(
+            (settings.capture.max_text_kb, settings.capture.transient_ms),
+            (64, 1500)
+        );
+        for apps in [
+            json!(["C:\\Tools\\a.exe"]),
+            json!([" a.exe"]),
+            json!([""]),
+            json!("a.exe"),
+            json!([1]),
+        ] {
+            let (settings, issues) = validate(json!({"capture":{"excluded_apps":apps}}));
+            assert_eq!(
+                settings.capture.excluded_apps,
+                Capture::default().excluded_apps
+            );
+            assert_eq!(issues.len(), 1);
+        }
+        let (settings, issues) =
+            validate(json!({"capture":{"max_text_kb":0,"transient_ms":100,"images":"no"}}));
+        assert_eq!(issues.len(), 3);
+        assert_eq!(settings.capture, Capture::default());
     }
 
     #[test]

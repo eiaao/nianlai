@@ -1,4 +1,5 @@
 use crate::{
+    capture::rules::gate,
     log::Logger,
     panel::{self, Action, Controller},
     platform, settings_window,
@@ -6,8 +7,8 @@ use crate::{
 use serde_json::json;
 use std::time::Instant;
 use tauri::{
-    AppHandle, Manager, Wry,
-    menu::{CheckMenuItem, Menu, MenuItem},
+    AppHandle, Emitter, Manager, Wry,
+    menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
     plugin::TauriPlugin,
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
@@ -16,6 +17,8 @@ use tauri_plugin_autostart::ManagerExt;
 const OPEN_PANEL: &str = "tray_open_panel";
 const SETTINGS: &str = "tray_settings";
 const AUTOSTART: &str = "tray_autostart";
+const PAUSE: &str = "tray_pause";
+const IGNORE_NEXT: &str = "tray_ignore_next";
 const QUIT: &str = "tray_quit";
 
 pub fn single_instance() -> TauriPlugin<Wry> {
@@ -46,7 +49,53 @@ pub fn setup(app: &AppHandle, logger: &Logger) -> Result<(), Box<dyn std::error:
         None::<&str>,
     )?;
     let quit = MenuItem::with_id(app, QUIT, "退出", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&open, &settings, &autostart, &quit])?;
+    // A09：暂停只在内存里，重启后自动恢复记录。
+    let pause =
+        CheckMenuItem::with_id(app, PAUSE, "暂停记录", true, gate().paused(), None::<&str>)?;
+    let ignore = CheckMenuItem::with_id(
+        app,
+        IGNORE_NEXT,
+        "忽略下一次复制",
+        true,
+        gate().ignoring_next(),
+        None::<&str>,
+    )?;
+    let separator = PredefinedMenuItem::separator(app)?;
+    let separator_end = PredefinedMenuItem::separator(app)?;
+    let menu = Menu::with_items(
+        app,
+        &[
+            &open,
+            &settings,
+            &separator,
+            &pause,
+            &ignore,
+            &separator_end,
+            &autostart,
+            &quit,
+        ],
+    )?;
+    {
+        // 暂停或“忽略下一次”变化（含采集线程消耗掉“忽略下一次”）时同步菜单、提示和面板横幅。
+        let (pause, ignore, app) = (pause.clone(), ignore.clone(), app.clone());
+        gate().subscribe(std::sync::Arc::new(move || {
+            let paused = gate().paused();
+            let _ = pause.set_checked(paused);
+            let _ = ignore.set_checked(gate().ignoring_next());
+            if let Some(tray) = app.tray_by_id("nianlai") {
+                let _ = tray.set_tooltip(Some(if paused {
+                    "拈来（已暂停记录）"
+                } else {
+                    "拈来"
+                }));
+            }
+            let _ = app.emit(
+                "capture:changed",
+                json!({"paused":paused,"ignore_next":gate().ignoring_next()}),
+            );
+            let _ = panel::dispatch(&app, Action::HistoryChanged);
+        }));
+    }
     let menu_autostart = autostart.clone();
     let icon = app.default_window_icon().cloned().ok_or("托盘图标不存在")?;
 
@@ -57,6 +106,30 @@ pub fn setup(app: &AppHandle, logger: &Logger) -> Result<(), Box<dyn std::error:
         .show_menu_on_left_click(false)
         .on_menu_event(move |app, event| match event.id().as_ref() {
             OPEN_PANEL => open_panel(app),
+            PAUSE => {
+                let paused = !gate().paused();
+                gate().set_paused(paused);
+                record(
+                    app,
+                    if paused {
+                        "采集：已暂停记录"
+                    } else {
+                        "采集：已恢复记录"
+                    },
+                );
+            }
+            IGNORE_NEXT => {
+                let ignore = !gate().ignoring_next();
+                gate().set_ignore_next(ignore);
+                record(
+                    app,
+                    if ignore {
+                        "采集：将忽略下一次复制"
+                    } else {
+                        "采集：取消忽略下一次复制"
+                    },
+                );
+            }
             SETTINGS => {
                 let app = app.clone();
                 tauri::async_runtime::spawn(async move {

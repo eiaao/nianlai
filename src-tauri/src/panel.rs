@@ -465,6 +465,7 @@ impl Controller {
             let _ = dispatch(&app, Action::HistoryChanged);
         });
         changed();
+        self.history.set_changed(changed.clone());
         self.history.maintenance(changed.clone());
         let mut capture = self.capture.lock().unwrap();
         if self.stopping.load(Ordering::Acquire) {
@@ -507,6 +508,7 @@ impl Controller {
             panel.hooks.take();
         }
         self.clipboard.shutdown();
+        self.history.flush_deferred();
         self.history.flush_delete();
         self.history.summary();
         self.logger.event("shutdown", json!({}));
@@ -518,6 +520,11 @@ pub fn dispatch(app: &AppHandle, action: Action) -> Result<(), String> {
     let handle = app.clone();
     app.run_on_main_thread(move || {
         let controller = handle.state::<Controller>();
+        if matches!(action, Action::Toggle { .. }) {
+            // 刚复制、还在暂存期（A11）的内容先写入，呼出后列表里就有它。
+            // 必须在拿面板锁之前：写入后的刷新通知会在主线程上同步再进 dispatch。
+            controller.history.flush_deferred();
+        }
         let mut panel = controller.inner.lock().unwrap();
         if let Err(error) = panel.act(&handle, &controller.logger, action) {
             panel.log(&controller.logger, "panel_error", json!({"error":error}));

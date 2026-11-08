@@ -11,10 +11,30 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex, OnceLock, RwLock,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
+
+type Changed = Arc<dyn Fn() + Send + Sync>;
+
+/// 新复制的内容先留在内存里，等一小段时间再写盘（A11 临时内容）：
+/// 文本扩展等工具借用剪贴板后会很快还原成原来的内容，期间被还原就整条丢弃，从未落盘。
+struct Deferred {
+    content: Arc<Content>,
+    event: CopyEvent,
+    partial: bool,
+    // 这条之前剪贴板上的内容；剪贴板变回它，就说明这条是临时借用。
+    previous: Option<Fingerprint>,
+    generation: u64,
+}
+
+/// 采集线程拿到的结果：已写入、暂存待写、或判定为临时内容而丢弃。
+pub enum Captured {
+    Stored(Ingest),
+    Deferred,
+    Transient,
+}
 
 /// 面板里按 Delete 后可撤销的时长。期间条目从列表和搜索里拿掉，到期才真正删除。
 pub const UNDO_WINDOW: Duration = Duration::from_secs(4);
@@ -72,6 +92,11 @@ pub struct Shared {
     refresh: Mutex<Option<crate::platform::apps::Refresher>>,
     // 待删除（撤销窗口内）的那一条；同一时间只挂一条，新的删除会先提交上一条。
     pending_delete: Mutex<Option<(usize, Instant)>>,
+    deferred: Mutex<Option<Deferred>>,
+    generation: AtomicU64,
+    // 最近一次出现在剪贴板上的内容（含我们自己写回的）。
+    last_seen: Mutex<Option<Fingerprint>>,
+    changed: Mutex<Option<Changed>>,
     hash: Hash,
     logger: Logger,
 }
@@ -97,6 +122,10 @@ impl History {
             last_write: Mutex::new(None),
             refresh: Mutex::new(None),
             pending_delete: Mutex::new(None),
+            deferred: Mutex::new(None),
+            generation: AtomicU64::new(0),
+            last_seen: Mutex::new(None),
+            changed: Mutex::new(None),
             hash,
             logger,
         });
@@ -112,6 +141,8 @@ impl History {
     pub fn search(&self, query: &str, request_id: u64) -> Result<SearchReply, String> {
         self.0.search(query, request_id)
     }
+    // 采集走 capture()；测试直接写入。
+    #[cfg(test)]
     pub fn ingest(
         &self,
         content: Arc<Content>,
@@ -120,6 +151,28 @@ impl History {
         now: Instant,
     ) -> Result<Ingest, String> {
         self.0.ingest(content, event, partial, now)
+    }
+    /// 采集线程的入口：按设置决定立即写入，还是先暂存再写（A11）。
+    pub fn capture(
+        &self,
+        content: Arc<Content>,
+        event: CopyEvent,
+        partial: bool,
+        now: Instant,
+    ) -> Result<Captured, String> {
+        let policy = crate::capture::rules::gate().policy();
+        let window = policy
+            .transient
+            .then(|| Duration::from_millis(policy.transient_ms));
+        Shared::capture(&self.0, content, event, partial, now, window)
+    }
+    /// 立刻写入暂存的内容：呼出面板前、退出前调用，保证面板里能看到刚复制的内容。
+    pub fn flush_deferred(&self) {
+        self.0.flush_deferred();
+    }
+    /// 暂存内容写入后用来通知面板刷新。
+    pub fn set_changed(&self, changed: Changed) {
+        *self.0.changed.lock().unwrap() = Some(changed);
     }
     pub fn get(&self, id: usize) -> Result<Option<Arc<Content>>, String> {
         self.0.get(id)
@@ -214,6 +267,12 @@ impl Shared {
                 report["location"] = json!(location);
                 self.logger.event("store_opened", report);
                 *self.status.lock().unwrap() = None;
+                *self.last_seen.lock().unwrap() = store
+                    .cache()
+                    .items
+                    .iter()
+                    .max_by_key(|item| item.copied_ms)
+                    .map(|item| item.fingerprint);
                 // 来源应用的显示名与图标在采集线程之外刷新（A06）：门槛 P95 ≤ 500 ms 不受影响。
                 let refresher = crate::platform::apps::start(this.clone(), self.logger.clone());
                 *self.refresh.lock().unwrap() = Some(refresher);
@@ -332,7 +391,11 @@ impl Shared {
             }
         }
         snapshot.recording = self.recording.load(Ordering::Acquire);
-        snapshot.store_status = *self.status.lock().unwrap();
+        snapshot.store_status = self.status.lock().unwrap().or_else(|| {
+            crate::capture::rules::gate()
+                .paused()
+                .then_some("已暂停记录")
+        });
         snapshot
     }
     pub fn search(&self, query: &str, request_id: u64) -> Result<SearchReply, String> {
@@ -412,6 +475,111 @@ impl Shared {
         }
         result
     }
+    fn capture(
+        this: &Arc<Self>,
+        content: Arc<Content>,
+        event: CopyEvent,
+        partial: bool,
+        now: Instant,
+        window: Option<Duration>,
+    ) -> Result<Captured, String> {
+        let fingerprint = content.fingerprint;
+        // 整个过程持锁：暂存内容的写入和新内容的处理按复制顺序进行。
+        let mut deferred = this.deferred.lock().unwrap();
+        if let Some(pending) = deferred.take() {
+            if pending.previous == Some(fingerprint) && pending.content.fingerprint != fingerprint {
+                // 剪贴板变回了借用前的内容：暂存的那条丢弃，还原回来的也不算一次新复制。
+                *this.last_seen.lock().unwrap() = Some(fingerprint);
+                this.logger.event(
+                    "capture_transient",
+                    json!({"held_ms":pending.event.observed.elapsed().as_secs_f64()*1000.0,"kind":pending.content.kind}),
+                );
+                return Ok(Captured::Transient);
+            }
+            this.commit_deferred(pending);
+        }
+        let previous = this.last_seen.lock().unwrap().replace(fingerprint);
+        let Some(window) = window else {
+            drop(deferred);
+            return this
+                .ingest(content, event, partial, now)
+                .map(Captured::Stored);
+        };
+        let generation = this.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        let shared = this.clone();
+        let timer = std::thread::Builder::new()
+            .name("history-deferred".into())
+            .spawn(move || {
+                std::thread::sleep(window);
+                let mut deferred = shared.deferred.lock().unwrap();
+                if deferred
+                    .as_ref()
+                    .is_some_and(|pending| pending.generation == generation)
+                {
+                    let pending = deferred.take().unwrap();
+                    shared.commit_deferred(pending);
+                }
+            });
+        let pending = Deferred {
+            content,
+            event,
+            partial,
+            previous,
+            generation,
+        };
+        if timer.is_err() {
+            // 起不了计时线程就直接写，不能让内容一直留在内存里。
+            drop(deferred);
+            let Deferred {
+                content,
+                event,
+                partial,
+                ..
+            } = pending;
+            return this
+                .ingest(content, event, partial, now)
+                .map(Captured::Stored);
+        }
+        *deferred = Some(pending);
+        Ok(Captured::Deferred)
+    }
+    pub fn flush_deferred(&self) {
+        let mut deferred = self.deferred.lock().unwrap();
+        if let Some(pending) = deferred.take() {
+            self.commit_deferred(pending);
+        }
+    }
+    // 调用方持有 deferred 锁。
+    fn commit_deferred(&self, pending: Deferred) {
+        let source_path = pending.event.source_path.clone();
+        let held_ms = pending.event.observed.elapsed().as_secs_f64() * 1000.0;
+        let result = self.ingest(
+            pending.content,
+            pending.event,
+            pending.partial,
+            Instant::now(),
+        );
+        self.logger.event("capture_commit", json!({
+            "held_ms":held_ms,"outcome":result.as_ref().ok().map(|r| r.outcome),"reason":result.as_ref().ok().and_then(|r| r.reason),
+            "record_id":result.as_ref().ok().and_then(|r| r.record_id),"kind":result.as_ref().ok().and_then(|r| r.kind.clone()),
+            "copy_count":result.as_ref().ok().and_then(|r| r.copy_count),"write_ms":result.as_ref().ok().map(|r| r.write_ms),
+            "error_code":result.as_ref().err()
+        }));
+        if let Ok(Ingest {
+            record_id: Some(_), ..
+        }) = result
+        {
+            if !source_path.is_empty()
+                && let Some(refresher) = self.refresh.lock().unwrap().as_ref()
+            {
+                refresher.refresh(&source_path);
+            }
+            let changed = self.changed.lock().unwrap().clone();
+            if let Some(changed) = changed {
+                changed();
+            }
+        }
+    }
     // 仅在采集、搜索或粘贴工作线程调用；界面用 snapshot，绝不读 BLOB。
     pub fn get(&self, id: usize) -> Result<Option<Arc<Content>>, String> {
         if let Some(store) = self.store() {
@@ -442,6 +610,7 @@ impl Shared {
         };
         if found {
             *self.last_write.lock().unwrap() = Some(now);
+            *self.last_seen.lock().unwrap() = Some(written);
         }
         found
     }
@@ -838,5 +1007,135 @@ mod startup_tests {
             assert!(!shared.undo_delete(removed));
             assert!(shared.get(kept).unwrap().is_some());
         }
+    }
+}
+
+#[cfg(test)]
+mod deferred_tests {
+    use super::*;
+    use crate::settings::{Directories, tests::Directory};
+    use std::sync::atomic::AtomicUsize;
+
+    const WINDOW: Duration = Duration::from_millis(200);
+
+    fn history(directory: &Directory) -> History {
+        let directories = Directories {
+            settings_file: directory.0.join("settings.json"),
+            data: directory.0.join("data"),
+            logs: directory.0.join("logs"),
+            data_source: "设置文件指定",
+            test_data_dir: false,
+        };
+        let logger = Logger::with_settings(&directories, 20).unwrap();
+        let history = History::new(nianlai_store::hash::sha256, logger);
+        history.initialize();
+        assert!(history.0.store().is_some());
+        history
+    }
+
+    fn capture(history: &History, text: &str, sequence: u32, window: Option<Duration>) -> Captured {
+        let now = Instant::now();
+        Shared::capture(
+            &history.0,
+            Content::text(text, nianlai_store::hash::sha256).unwrap(),
+            CopyEvent {
+                time_ms: now_ms() + sequence as u64,
+                sequence,
+                source_process: "expander.exe".into(),
+                source_path: String::new(),
+                owner_process: "expander.exe".into(),
+                owner_pid: 1,
+                observed: now,
+            },
+            false,
+            now,
+            window,
+        )
+        .unwrap()
+    }
+
+    fn previews(history: &History) -> Vec<(String, usize)> {
+        history
+            .snapshot()
+            .items
+            .into_iter()
+            .map(|item| (item.preview, item.copy_count))
+            .collect()
+    }
+
+    #[test]
+    fn restored_clipboard_drops_the_borrowed_content_without_writing_it() {
+        let directory = Directory::new();
+        let history = history(&directory);
+        assert!(matches!(
+            capture(&history, "原来的内容", 1, None),
+            Captured::Stored(_)
+        ));
+        assert!(matches!(
+            capture(&history, "展开的地址-7f3a", 2, Some(WINDOW)),
+            Captured::Deferred
+        ));
+        assert!(matches!(
+            capture(&history, "原来的内容", 3, Some(WINDOW)),
+            Captured::Transient
+        ));
+        std::thread::sleep(WINDOW * 2);
+        history.flush_deferred();
+        assert_eq!(previews(&history), [("原来的内容".to_owned(), 1)]);
+        assert!(history.search("展开的地址", 1).unwrap().items.is_empty());
+    }
+
+    #[test]
+    fn content_that_stays_is_written_after_the_window() {
+        let directory = Directory::new();
+        let history = history(&directory);
+        let notified = Arc::new(AtomicUsize::new(0));
+        let counter = notified.clone();
+        history.set_changed(Arc::new(move || {
+            counter.fetch_add(1, Ordering::Relaxed);
+        }));
+        assert!(matches!(
+            capture(&history, "留下的内容", 1, Some(WINDOW)),
+            Captured::Deferred
+        ));
+        assert!(previews(&history).is_empty());
+        std::thread::sleep(WINDOW * 3);
+        assert_eq!(previews(&history), [("留下的内容".to_owned(), 1)]);
+        assert_eq!(notified.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn a_new_copy_or_flush_writes_the_pending_one_in_order() {
+        let directory = Directory::new();
+        let history = history(&directory);
+        capture(&history, "第一条", 1, Some(WINDOW));
+        capture(&history, "第二条", 2, Some(WINDOW));
+        // 新复制到来时先写入上一条；呼出面板时立刻写入暂存的这条。
+        assert_eq!(previews(&history), [("第一条".to_owned(), 1)]);
+        history.flush_deferred();
+        assert_eq!(
+            previews(&history),
+            [("第二条".to_owned(), 1), ("第一条".to_owned(), 1)]
+        );
+        // 计时线程到期时已经没有暂存内容，不会重复写入。
+        std::thread::sleep(WINDOW * 2);
+        assert_eq!(previews(&history).len(), 2);
+    }
+
+    #[test]
+    fn copying_the_same_content_again_is_not_transient() {
+        let directory = Directory::new();
+        let history = history(&directory);
+        capture(&history, "A", 1, None);
+        capture(&history, "B", 2, Some(WINDOW));
+        assert!(matches!(
+            capture(&history, "B", 3, Some(WINDOW)),
+            Captured::Deferred
+        ));
+        history.flush_deferred();
+        assert_eq!(
+            previews(&history),
+            [("B".to_owned(), 2), ("A".to_owned(), 1)]
+        );
     }
 }
