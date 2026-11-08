@@ -65,6 +65,62 @@ fn set_ignore_next(ignore: bool) {
     capture::rules::gate().set_ignore_next(ignore);
 }
 
+#[derive(serde::Serialize)]
+struct SnapshotState {
+    items: Vec<nianlai_store::SnapshotInfo>,
+    keep: usize,
+    // 本次启动时执行的恢复；设置页据此提示成功或失败。
+    restored: Option<history::snapshots::Restored>,
+    // 是否由守护者拉起：不是的话恢复后不会自动重启，需要手动打开。
+    relaunch: bool,
+}
+
+fn store_directory() -> Result<std::path::PathBuf, String> {
+    history::active()
+        .and_then(|history| history.store_directory())
+        .ok_or_else(|| "历史库未打开，暂时不能使用快照".to_owned())
+}
+
+#[tauri::command]
+fn get_snapshots() -> Result<SnapshotState, String> {
+    Ok(SnapshotState {
+        items: history::snapshots::list(&store_directory()?)?,
+        keep: nianlai_store::SNAPSHOT_KEEP,
+        restored: history::snapshots::last_restore(),
+        relaunch: recovery::is_child(),
+    })
+}
+
+#[tauri::command]
+async fn create_snapshot(app: AppHandle) -> Result<(), String> {
+    let directory = store_directory()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        history::snapshots::manual(&directory, &app.state::<Controller>().logger)
+    })
+    .await
+    .map_err(|_| "快照任务未完成，请重试".to_owned())?
+}
+
+#[tauri::command]
+async fn restore_snapshot(app: AppHandle, name: String) -> Result<(), String> {
+    let directory = store_directory()?;
+    let handle = app.clone();
+    // 完整校验可能要几秒，不能占着主线程。
+    tauri::async_runtime::spawn_blocking(move || {
+        history::snapshots::schedule_restore(
+            &directory,
+            &name,
+            &handle.state::<Controller>().logger,
+        )
+    })
+    .await
+    .map_err(|_| "恢复任务未完成，请重试".to_owned())??;
+    app.state::<Controller>()
+        .logger
+        .event("quit_source", json!({"source":"snapshot_restore"}));
+    panel::dispatch(&app, Action::Relaunch)
+}
+
 #[tauri::command]
 fn get_history(app: AppHandle) -> history::Snapshot {
     app.state::<Controller>().history_snapshot()
@@ -211,6 +267,9 @@ pub fn run() {
             hotkey::validate_hotkey,
             hotkey::get_hotkey_status,
             hotkey::pause_hotkey,
+            get_snapshots,
+            create_snapshot,
+            restore_snapshot,
             get_history,
             search_history,
             get_favorites,
@@ -261,6 +320,7 @@ pub fn run() {
             platform::webview::initialize(&window)?;
             let plan = autocycle::Plan::from_env(&logger);
             capture::rules::gate().apply(&resolved.settings.capture);
+            history::snapshots::set_limit(resolved.settings.snapshots.max_mb);
             let resuspend = resuspend::from_settings(&resolved.settings.memory, &logger);
             let experiments =
                 panel::Experiments::from_settings(&resolved.settings.experiments, &logger);

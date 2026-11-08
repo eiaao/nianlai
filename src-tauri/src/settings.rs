@@ -36,6 +36,7 @@ pub struct Settings {
     pub experiments: Experiments,
     pub log: Log,
     pub capture: Capture,
+    pub snapshots: Snapshots,
     #[serde(flatten)]
     unknown: Unknown,
 }
@@ -50,6 +51,7 @@ impl Default for Settings {
             experiments: Experiments::default(),
             log: Log::default(),
             capture: Capture::default(),
+            snapshots: Snapshots::default(),
             unknown: Unknown::new(),
         }
     }
@@ -95,6 +97,26 @@ impl Default for Capture {
             max_text_kb: MAX_TEXT_KB,
             transient: true,
             transient_ms: 1000,
+            unknown: Unknown::new(),
+        }
+    }
+}
+
+/// 自动快照（B18）占用的空间上限，单位 MB。份数固定为 7。
+pub const SNAPSHOT_MAX_MB: u64 = 1024;
+const SNAPSHOT_MB_RANGE: std::ops::RangeInclusive<u64> = 64..=102_400;
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Snapshots {
+    pub max_mb: u64,
+    #[serde(flatten)]
+    unknown: Unknown,
+}
+
+impl Default for Snapshots {
+    fn default() -> Self {
+        Self {
+            max_mb: SNAPSHOT_MAX_MB,
             unknown: Unknown::new(),
         }
     }
@@ -321,6 +343,14 @@ fn validate(mut value: Value) -> (Settings, Vec<Issue>) {
         "capture.transient_ms",
         json!(1000),
         |v| v.as_u64().is_some_and(|n| (200..=5000).contains(&n)),
+        &mut issues,
+    );
+    field(
+        section(object, "snapshots", &mut issues),
+        "max_mb",
+        "snapshots.max_mb",
+        json!(SNAPSHOT_MAX_MB),
+        |v| v.as_u64().is_some_and(|n| SNAPSHOT_MB_RANGE.contains(&n)),
         &mut issues,
     );
     // 已逐项规范所有已知字段；未知字段由各层 flatten 原样接收。
@@ -603,6 +633,21 @@ pub(crate) mod tests {
         assert_eq!(loaded.get(), updated);
         assert_eq!(updated.memory.resuspend_minutes, 0.5);
         assert!(updated.experiments.searchbox_focus);
+    }
+
+    #[test]
+    fn snapshot_limit_is_validated() {
+        let (settings, issues) = validate(json!({}));
+        assert!(issues.is_empty());
+        assert_eq!(settings.snapshots.max_mb, SNAPSHOT_MAX_MB);
+        let (settings, issues) = validate(json!({"snapshots":{"max_mb":2048}}));
+        assert!(issues.is_empty());
+        assert_eq!(settings.snapshots.max_mb, 2048);
+        for bad in [json!(0), json!(63), json!(102_401), json!("1G")] {
+            let (settings, issues) = validate(json!({"snapshots":{"max_mb":bad}}));
+            assert_eq!(issues.len(), 1);
+            assert_eq!(settings.snapshots.max_mb, SNAPSHOT_MAX_MB);
+        }
     }
 
     #[test]

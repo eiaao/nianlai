@@ -424,6 +424,94 @@ fn snapshots_online_retention_restore_lock_and_corruption_rejection() {
     assert_eq!(check(&temp.0).unwrap().contents, 1);
 }
 #[test]
+fn snapshot_reasons_listing_and_size_retention() {
+    let temp = Temp::new();
+    let store = temp.store();
+    ingest(&store, text("快照列表"), 1, Instant::now());
+    // 没有任何快照：先拍每日快照，不算升级。
+    assert_eq!(
+        snapshot_reason(&temp.0, "1.0").unwrap(),
+        Some(Reason::Daily)
+    );
+    let first = snapshot_with(
+        &temp.0,
+        Reason::Daily,
+        Some(Retention::default()),
+        Some("1.0"),
+    )
+    .unwrap();
+    assert_eq!(snapshot_reason(&temp.0, "1.0").unwrap(), None);
+    assert_eq!(
+        snapshot_reason(&temp.0, "1.1").unwrap(),
+        Some(Reason::Upgrade)
+    );
+    snapshot_with(
+        &temp.0,
+        Reason::Upgrade,
+        Some(Retention::default()),
+        Some("1.1"),
+    )
+    .unwrap();
+    assert_eq!(snapshot_reason(&temp.0, "1.1").unwrap(), None);
+    // 不轮换的快照不删旧文件。
+    let tight = Retention {
+        keep: 1,
+        max_bytes: u64::MAX,
+    };
+    let kept = snapshot_with(&temp.0, Reason::BeforeRestore, None, None).unwrap();
+    assert_eq!((kept.retained, kept.deleted), (3, 0));
+    let list = list_snapshots(&temp.0).unwrap();
+    assert_eq!(
+        list.iter().map(|s| s.reason).collect::<Vec<_>>(),
+        [
+            Some(Reason::BeforeRestore),
+            Some(Reason::Upgrade),
+            Some(Reason::Daily)
+        ]
+    );
+    assert!(list.iter().all(|s| s.bytes > 0 && s.created_ms > 0));
+    let name = first.file.file_name().unwrap().to_str().unwrap();
+    assert_eq!(snapshot_file(&temp.0, name), Some(first.file.clone()));
+    assert_eq!(snapshot_file(&temp.0, "../history.db"), None);
+    // 总大小上限比一份还小：只留最新的一份。
+    fs::write(temp.0.join("snapshots").join("history-x.pending"), b"half").unwrap();
+    let report = snapshot_with(
+        &temp.0,
+        Reason::Manual,
+        Some(Retention {
+            keep: 7,
+            max_bytes: 1,
+        }),
+        None,
+    )
+    .unwrap();
+    assert_eq!((report.retained, report.deleted), (1, 3));
+    assert_eq!(
+        list_snapshots(&temp.0).unwrap()[0].reason,
+        Some(Reason::Manual)
+    );
+    assert!(!temp.0.join("snapshots").join("history-x.pending").exists());
+    let report = snapshot_with(&temp.0, Reason::Daily, Some(tight), None).unwrap();
+    assert_eq!((report.retained, report.deleted), (1, 1));
+    // 旧版本没有原因后缀的文件名照样列出。
+    fs::copy(
+        &report.file,
+        temp.0
+            .join("snapshots")
+            .join("history-20200101-000000-000-1-0.db"),
+    )
+    .unwrap();
+    assert_eq!(list_snapshots(&temp.0).unwrap().len(), 2);
+    assert!(
+        list_snapshots(&temp.0)
+            .unwrap()
+            .iter()
+            .any(|s| s.reason.is_none())
+    );
+    validate_snapshot(&report.file).unwrap();
+    drop(store);
+}
+#[test]
 fn malformed_fts_is_rejected_without_modifying_original_database() {
     let temp = Temp::new();
     let store = temp.store();

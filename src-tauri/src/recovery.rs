@@ -33,6 +33,8 @@ use std::{
 };
 
 pub const CHILD_FLAG: &str = "--child";
+/// 应用主动要求重启（如恢复快照）时的退出码：守护者立刻拉起，不占异常重启的额度。
+pub const RELAUNCH_CODE: i32 = 75;
 const SWITCH: &str = "NIANLAI_GUARD";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,6 +79,7 @@ pub const POLICY: Policy = Policy {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Decision {
     Finished,
+    Relaunch,
     Restart { attempt: u32 },
     GiveUp { attempts: u32 },
 }
@@ -95,8 +98,10 @@ impl Budget {
     }
     // 子进程退出后决定下一步：退出码 0 → 结束；否则窗口内还有额度就重启，没有就放弃。
     pub fn decide(&mut self, code: Option<i32>, now: Instant) -> Decision {
-        if code == Some(0) {
-            return Decision::Finished;
+        match code {
+            Some(0) => return Decision::Finished,
+            Some(RELAUNCH_CODE) => return Decision::Relaunch,
+            _ => {}
         }
         while self
             .restarts
@@ -148,6 +153,7 @@ pub fn supervise(
         });
         match decision {
             Decision::Finished => return 0,
+            Decision::Relaunch => {}
             Decision::Restart { .. } => std::thread::sleep(policy.delay),
             Decision::GiveUp { .. } => return 1,
         }
@@ -211,6 +217,7 @@ impl Journal {
     fn record_at(&mut self, exit: Exit, time: u64) {
         let action = match exit.decision {
             Decision::Finished => "exit",
+            Decision::Relaunch => "relaunch",
             Decision::Restart { .. } => "restart",
             Decision::GiveUp { .. } => "stop",
         };
@@ -310,8 +317,12 @@ mod tests {
             budget.decide(Some(1), at(origin, 30)),
             Decision::GiveUp { attempts: 3 }
         );
-        // 正常退出不占额度，也不清零。
+        // 正常退出、主动重启都不占额度，也不清零；额度用完时主动重启照样拉起。
         assert_eq!(budget.decide(Some(0), at(origin, 40)), Decision::Finished);
+        assert_eq!(
+            budget.decide(Some(RELAUNCH_CODE), at(origin, 45)),
+            Decision::Relaunch
+        );
         assert_eq!(
             budget.decide(Some(1), at(origin, 50)),
             Decision::GiveUp { attempts: 3 }

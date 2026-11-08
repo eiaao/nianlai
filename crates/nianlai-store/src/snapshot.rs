@@ -131,8 +131,70 @@ pub struct SnapshotReport {
     pub retained: usize,
     pub deleted: usize,
 }
+
+/// 默认保留的快照份数（B18）。
+pub const SNAPSHOT_KEEP: usize = 7;
+const VERSION_FILE: &str = "version";
+
+/// 快照为什么生成；写在文件名末尾，列表里据此显示来历。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Reason {
+    Daily,
+    Upgrade,
+    Manual,
+    BeforeRestore,
+}
+impl Reason {
+    fn tag(self) -> &'static str {
+        match self {
+            Self::Daily => "daily",
+            Self::Upgrade => "upgrade",
+            Self::Manual => "manual",
+            Self::BeforeRestore => "before_restore",
+        }
+    }
+    fn parse(name: &str) -> Option<Self> {
+        let tag = name.strip_suffix(".db")?.rsplit_once('-')?.1;
+        [
+            Self::Daily,
+            Self::Upgrade,
+            Self::Manual,
+            Self::BeforeRestore,
+        ]
+        .into_iter()
+        .find(|reason| reason.tag() == tag)
+    }
+}
+
+/// 轮换规则：份数和总大小任一超出就从最旧的删起，但至少留下最新的一份。
+#[derive(Clone, Copy, Debug)]
+pub struct Retention {
+    pub keep: usize,
+    pub max_bytes: u64,
+}
+impl Default for Retention {
+    fn default() -> Self {
+        Self {
+            keep: SNAPSHOT_KEEP,
+            max_bytes: u64::MAX,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SnapshotInfo {
+    pub name: String,
+    pub bytes: u64,
+    pub created_ms: u64,
+    pub reason: Option<Reason>,
+}
+
+fn snapshot_directory(directory: &Path) -> PathBuf {
+    directory.join("snapshots")
+}
 fn snapshots(directory: &Path) -> Result<Vec<PathBuf>> {
-    let directory = directory.join("snapshots");
+    let directory = snapshot_directory(directory);
     if !directory.exists() {
         return Ok(Vec::new());
     }
@@ -145,9 +207,38 @@ fn snapshots(directory: &Path) -> Result<Vec<PathBuf>> {
             files.push(entry.path());
         }
     }
+    // 文件名以时间戳开头，按名字排序就是按时间从旧到新。
     files.sort();
     Ok(files)
 }
+
+/// 列出快照，最新的在前。
+pub fn list_snapshots(directory: &Path) -> Result<Vec<SnapshotInfo>> {
+    let mut list = Vec::new();
+    for file in snapshots(directory)?.into_iter().rev() {
+        let metadata = fs::metadata(&file)?;
+        let name = file.file_name().unwrap().to_string_lossy().into_owned();
+        list.push(SnapshotInfo {
+            reason: Reason::parse(&name),
+            bytes: metadata.len(),
+            created_ms: metadata
+                .modified()?
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis() as u64),
+            name,
+        });
+    }
+    Ok(list)
+}
+
+/// 按名字找快照文件；只接受快照目录里真实存在的文件名，不接受路径。
+pub fn snapshot_file(directory: &Path, name: &str) -> Option<PathBuf> {
+    snapshots(directory)
+        .ok()?
+        .into_iter()
+        .find(|file| file.file_name().is_some_and(|n| n == name))
+}
+
 pub fn snapshot_due(directory: &Path) -> Result<bool> {
     let files = snapshots(directory)?;
     let latest = files
@@ -160,21 +251,68 @@ pub fn snapshot_due(directory: &Path) -> Result<bool> {
         SystemTime::now().duration_since(at).unwrap_or_default() > Duration::from_secs(86400)
     }))
 }
+
+/// 现在该不该拍快照：版本号和上次拍快照时不同 → 升级快照；距上一份超过一天 → 每日快照。
+pub fn snapshot_reason(directory: &Path, version: &str) -> Result<Option<Reason>> {
+    let marked = fs::read_to_string(snapshot_directory(directory).join(VERSION_FILE)).ok();
+    if marked.as_deref().map(str::trim) != Some(version) && !snapshots(directory)?.is_empty() {
+        return Ok(Some(Reason::Upgrade));
+    }
+    Ok(snapshot_due(directory)?.then_some(Reason::Daily))
+}
+
 pub fn snapshot(directory: &Path) -> Result<SnapshotReport> {
+    snapshot_with(directory, Reason::Manual, Some(Retention::default()), None)
+}
+
+/// 拍一份快照。`retention` 为 None 时不轮换（恢复前的那一份，避免把要恢复的目标轮换掉）；
+/// `version` 给出时记下当前版本，用于判断下次是否升级。
+pub fn snapshot_with(
+    directory: &Path,
+    reason: Reason,
+    retention: Option<Retention>,
+    version: Option<&str>,
+) -> Result<SnapshotReport> {
     let started = Instant::now();
-    fs::create_dir_all(directory.join("snapshots"))?;
+    let folder = snapshot_directory(directory);
+    fs::create_dir_all(&folder)?;
     // 两个快照工具同时运行时不互相轮换正在生成的文件。
-    let _lock = write::lock(&directory.join("snapshots"))?;
-    let file = directory
-        .join("snapshots")
-        .join(format!("history-{}.db", stamp()));
+    let _lock = write::lock(&folder)?;
+    // 上次拍到一半被打断留下的暂存文件。
+    for entry in fs::read_dir(&folder)? {
+        let path = entry?.path();
+        if path.extension().is_some_and(|e| e == "pending") {
+            let _ = fs::remove_file(path);
+        }
+    }
+    let file = folder.join(format!("history-{}-{}.db", stamp(), reason.tag()));
     let c = schema::readonly(&directory.join("history.db"))?;
     copy_database(&c, &file)?;
     drop(c);
+    if let Some(version) = version {
+        fs::write(folder.join(VERSION_FILE), version)?;
+    }
     let files = snapshots(directory)?;
-    let deleted = files.len().saturating_sub(7);
-    for old in files.iter().take(deleted) {
-        fs::remove_file(old)?;
+    let mut sizes = files
+        .iter()
+        .map(|p| fs::metadata(p).map(|m| m.len()))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    let mut deleted = 0;
+    if let Some(retention) = retention {
+        let mut total: u64 = sizes.iter().sum();
+        for (index, old) in files.iter().enumerate() {
+            let remaining = files.len() - deleted;
+            if remaining <= 1 || (remaining <= retention.keep && total <= retention.max_bytes) {
+                break;
+            }
+            if *old == file {
+                continue;
+            }
+            fs::remove_file(old)?;
+            total -= sizes[index];
+            sizes[index] = 0;
+            deleted += 1;
+        }
     }
     Ok(SnapshotReport {
         bytes: fs::metadata(&file)?.len(),

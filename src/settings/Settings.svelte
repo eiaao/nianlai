@@ -3,6 +3,7 @@
   import * as ipc from "../lib/ipc";
   import HotkeyEditor from "./HotkeyEditor.svelte";
   import CapturePage from "./CapturePage.svelte";
+  import StoragePage from "./StoragePage.svelte";
   import type { AppSettings, CaptureSettings, SettingsUpdate } from "../lib/ipc";
   import {
     applyPreferences, DEFAULT_PREFERENCES, normalizePreferences,
@@ -20,6 +21,7 @@
   let preferences = $state<Preferences>({ ...DEFAULT_PREFERENCES });
   let hotkey = $state("Ctrl+`");
   let capture = $state<CaptureSettings | null>(null);
+  let snapshotMaxMb = $state(1024);
   let loading = $state(true);
   let saving = $state(false);
   let status = $state("正在读取设置…");
@@ -38,6 +40,7 @@
   function apply(settingsValue: AppSettings) {
     hotkey = settingsValue.hotkey ?? "Ctrl+`";
     capture = (settingsValue.capture as CaptureSettings | undefined) ?? null;
+    snapshotMaxMb = settingsValue.snapshots?.max_mb ?? 1024;
     preferences = normalizePreferences(settingsValue);
     applyPreferences(preferences);
   }
@@ -123,6 +126,8 @@
         </section>
       {:else if page === "record"}
         <CapturePage {capture} disabled={loading || saving} onsave={save} />
+      {:else if page === "storage"}
+        <StoragePage maxMb={snapshotMaxMb} disabled={loading || saving} onsave={save} />
       {:else}
         <section class="page placeholder">
           <h2>{pages.find((entry) => entry.id === page)?.label}</h2>
