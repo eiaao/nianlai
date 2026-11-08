@@ -26,8 +26,8 @@ tauri = { version = "2.12.5", features = ["tray-icon", "protocol-asset"] }
 tauri-plugin-log = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-single-instance = "2.5.4"
-# 此版本使用仅写 HKCU 的 auto-launch 0.5；后续版本的默认模式可能写入 HKLM。
-tauri-plugin-autostart = "=2.7.0"
+# 此版本使用仅写 HKCU 的 auto-launch 0.5；2.7.0 起改用 auto-launch 0.6，默认先写 HKLM（以管理员运行时生效），所以固定版本，dependabot 也已忽略。
+tauri-plugin-autostart = "=2.5.1"
 
 # 版本要和 Tauri 内部的 wry 对齐（wry 0.57 用 webview2-com 0.39、windows 0.62），
 # 否则从 with_webview 拿到的 WebView2 接口类型对不上。
