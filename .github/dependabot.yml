@@ -5,6 +5,9 @@ updates:
     directory: /
     schedule: { interval: weekly }
     open-pull-requests-limit: 5
+    ignore:
+      # 2.5.1 之后改用 auto-launch 0.6，默认先写 HKLM，且插件没有暴露改成仅当前用户的选项。
+      - dependency-name: tauri-plugin-autostart
     groups:
       cargo-patch:
         update-types: [patch]
