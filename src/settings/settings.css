@@ -26,3 +26,18 @@ button:disabled { cursor: default; }
   font-size: 11px;
   line-height: 1.6;
 }
+
+/* 各设置分区共用的版式（原在 Settings.svelte，拆出分区组件后改为全局）。 */
+.page { display: grid; gap: 20px; }
+h2 { margin: 0 0 6px; font: 600 18px var(--font-display); }
+.page-intro { margin: 0; color: var(--settings-muted); font-size: 11px; line-height: 1.7; }
+.group { display: grid; gap: 8px; }
+.group-title { color: var(--settings-muted); font-size: 11px; font-weight: 600; letter-spacing: .04em; }
+.card { border: 1px solid var(--settings-line); border-radius: var(--radius-md); background: var(--settings-card); }
+.setting { min-height: 64px; display: flex; align-items: center; gap: 18px; padding: 13px 16px; border-bottom: 1px solid var(--settings-line); }
+.setting:last-child { border-bottom: 0; }
+.setting-copy { min-width: 0; flex: 1; }
+.setting-copy strong { display: block; font-size: 13px; font-weight: 600; }
+.setting-copy small { display: block; margin-top: 4px; color: var(--settings-muted); font-size: 11px; line-height: 1.5; }
+select { min-width: 150px; min-height: 33px; padding: 5px 9px; border: 1px solid var(--settings-line); border-radius: var(--radius-sm); background: var(--settings-field); color: var(--settings-text); font-size: 11px; }
+select:disabled { opacity: .65; }

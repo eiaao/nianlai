@@ -468,6 +468,8 @@ impl Runtime {
         for issue in issues {
             issue.record(&controller.logger);
         }
+        // 采集规则即时生效：下一次复制就按新规则检查。
+        crate::capture::rules::gate().apply(&saved.capture);
         if update_hotkey {
             state.record(&controller.logger);
         }

@@ -17,8 +17,16 @@ export type AppSettings = {
   theme?: "system" | "light" | "dark";
   panel?: { layout?: "a" | "b" | "c"; density?: "compact" | "comfortable" };
   feedback?: { motion?: "none" | "soft" | "spring" };
+  capture?: Partial<CaptureSettings>;
   [key: string]: unknown;
 };
+export type CaptureSettings = {
+  excluded_apps: string[]; sensitive_off: string[];
+  text: boolean; rich_text: boolean; images: boolean; files: boolean;
+  max_text_kb: number; transient: boolean; transient_ms: number;
+};
+export type SensitiveRule = { id: string; label: string; example: string };
+export type CaptureState = { paused: boolean; ignore_next: boolean; rules: SensitiveRule[]; default_excluded_apps: string[] };
 export type SettingsUpdate = AppSettings;
 export type HotkeyValidation = {
   hotkey: string; key: string; control: boolean; alt: boolean; shift: boolean; win: boolean;
@@ -69,6 +77,10 @@ export const getHotkeyStatus = () => invoke<HotkeyStatus>("get_hotkey_status");
 // 设置页录制新组合键期间暂时注销呼出键（后端 30 秒后自动恢复兜底）。
 export const pauseHotkey = (paused: boolean) => invoke<void>("pause_hotkey", { paused });
 export const openSettings = () => invoke("open_settings");
+// 采集规则（A07–A11）：暂停和“忽略下一次”只在内存里，重启后恢复记录。
+export const getCaptureState = () => invoke<CaptureState>("get_capture_state");
+export const setCapturePaused = (paused: boolean) => invoke<void>("set_capture_paused", { paused });
+export const setIgnoreNext = (ignore: boolean) => invoke<void>("set_ignore_next", { ignore });
 export const frontendReady = () => invoke("frontend_ready");
 export const startSearch = (session: number) => invoke("start_search", { session });
 export const retryActivation = (session: number) => invoke("retry_activation", { session });
@@ -97,3 +109,4 @@ export const onPanelTiming = on<Timing>("panel:timing");
 export const onPanelError = on<PanelError>("panel:error");
 export const onPasteResult = on<PasteResult>("panel:paste-result");
 export const onSettingsChanged = on<AppSettings>("settings:changed");
+export const onCaptureChanged = on<{ paused: boolean; ignore_next: boolean }>("capture:changed");

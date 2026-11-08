@@ -36,6 +36,35 @@ async fn set_settings(
     .map_err(|_| "设置保存任务未完成，请重试".to_owned())?
 }
 
+#[derive(serde::Serialize)]
+struct CaptureState {
+    paused: bool,
+    ignore_next: bool,
+    rules: &'static [capture::sensitive::Rule],
+    default_excluded_apps: [&'static str; 6],
+}
+
+#[tauri::command]
+fn get_capture_state() -> CaptureState {
+    let gate = capture::rules::gate();
+    CaptureState {
+        paused: gate.paused(),
+        ignore_next: gate.ignoring_next(),
+        rules: capture::sensitive::RULES,
+        default_excluded_apps: settings::DEFAULT_EXCLUDED_APPS,
+    }
+}
+
+#[tauri::command]
+fn set_capture_paused(paused: bool) {
+    capture::rules::gate().set_paused(paused);
+}
+
+#[tauri::command]
+fn set_ignore_next(ignore: bool) {
+    capture::rules::gate().set_ignore_next(ignore);
+}
+
 #[tauri::command]
 fn get_history(app: AppHandle) -> history::Snapshot {
     app.state::<Controller>().history_snapshot()
@@ -176,6 +205,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_settings,
             set_settings,
+            get_capture_state,
+            set_capture_paused,
+            set_ignore_next,
             hotkey::validate_hotkey,
             hotkey::get_hotkey_status,
             hotkey::pause_hotkey,
@@ -228,6 +260,7 @@ pub fn run() {
             platform::window::no_activate(&window, true)?;
             platform::webview::initialize(&window)?;
             let plan = autocycle::Plan::from_env(&logger);
+            capture::rules::gate().apply(&resolved.settings.capture);
             let resuspend = resuspend::from_settings(&resolved.settings.memory, &logger);
             let experiments =
                 panel::Experiments::from_settings(&resolved.settings.experiments, &logger);
