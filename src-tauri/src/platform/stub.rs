@@ -54,6 +54,7 @@ pub mod hook {
     pub fn supported(_: &Shortcut) -> bool {
         true
     }
+    pub fn set_preview_keys(_: bool) {}
 }
 pub mod dialog {
     pub fn error(text: &str) {
@@ -96,7 +97,7 @@ pub mod window {
     pub fn no_activate(_: &WebviewWindow, _: bool) -> Result<()> {
         Ok(())
     }
-    pub fn show(_: &WebviewWindow, _: &Target) -> Result<()> {
+    pub fn show(_: &WebviewWindow, _: &Target, _: super::PlacementMode) -> Result<()> {
         Err("G0 仅支持 Windows".into())
     }
     pub fn show_auto(_: &WebviewWindow) -> Result<()> {
@@ -194,6 +195,14 @@ pub mod image {
         _: &crate::history::content::Content,
         _: u32,
     ) -> Result<Vec<u8>, &'static str> {
+        Err("unsupported")
+    }
+    pub struct Rendered {
+        pub png: Vec<u8>,
+        pub width: u32,
+        pub height: u32,
+    }
+    pub fn render(_: &crate::history::content::Content, _: u32) -> Result<Rendered, &'static str> {
         Err("unsupported")
     }
 }

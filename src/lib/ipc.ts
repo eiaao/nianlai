@@ -35,9 +35,10 @@ export type AppSettings = {
   hotkey?: string;
   theme?: "system" | "light" | "dark";
   panel?: { layout?: "a" | "b" | "c"; density?: "compact" | "comfortable" };
-  feedback?: { motion?: "none" | "soft" | "spring" };
+  feedback?: { motion?: "none" | "soft" | "spring"; follow_system?: boolean };
   capture?: Partial<CaptureSettings>;
   snapshots?: { max_mb?: number };
+  interaction?: Partial<InteractionSettings>;
   [key: string]: unknown;
 };
 export type CaptureSettings = {
@@ -45,6 +46,9 @@ export type CaptureSettings = {
   text: boolean; rich_text: boolean; images: boolean; files: boolean;
   max_text_kb: number; transient: boolean; transient_ms: number;
 };
+export type Placement = "caret" | "mouse" | "center";
+export type ClickAction = "paste" | "copy" | "text" | "none";
+export type InteractionSettings = { placement: Placement; click: ClickAction; middle_click: ClickAction };
 export type SensitiveRule = { id: string; label: string; example: string };
 export type CaptureState = { paused: boolean; ignore_next: boolean; rules: SensitiveRule[]; default_excluded_apps: string[] };
 export type SnapshotReason = "daily" | "upgrade" | "manual" | "before_restore";
@@ -119,6 +123,13 @@ export const getThumbnail = (id: number) => invoke<string | null>("get_thumbnail
 export const cleanExports = () => invoke<StorageFiles>("clean_exports");
 export const cleanLeftovers = () => invoke<StorageFiles>("clean_leftovers");
 export const compactHistory = () => invoke<number>("compact_history");
+// 完整预览（M2-7）
+export type TextChunk = { text: string; total: number; shown: number };
+export type ImageView = { url: string; width: number; height: number; bytes: number };
+export const getFullText = (id: number, limit: number | null) => invoke<TextChunk | null>("get_full_text", { id, limit });
+export const getImage = (id: number, max: number | null) => invoke<ImageView | null>("get_image", { id, max });
+export const copySelection = (id: number, text: string) => invoke<void>("copy_selection", { id, text });
+export const setPreviewKeys = (open: boolean) => invoke<void>("set_preview_keys", { open });
 // 采集规则（A07–A11）：暂停和“忽略下一次”只在内存里，重启后恢复记录。
 export const getSnapshots = () => invoke<SnapshotState>("get_snapshots");
 export const createSnapshot = () => invoke<void>("create_snapshot");

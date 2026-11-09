@@ -37,6 +37,7 @@ pub struct Settings {
     pub log: Log,
     pub capture: Capture,
     pub snapshots: Snapshots,
+    pub interaction: Interaction,
     #[serde(flatten)]
     unknown: Unknown,
 }
@@ -52,6 +53,7 @@ impl Default for Settings {
             log: Log::default(),
             capture: Capture::default(),
             snapshots: Snapshots::default(),
+            interaction: Interaction::default(),
             unknown: Unknown::new(),
         }
     }
@@ -120,6 +122,33 @@ impl Default for Snapshots {
             unknown: Unknown::new(),
         }
     }
+}
+
+/// 交互（D12、G09）：面板呼出位置，以及鼠标单击 / 中键点击条目时做什么。
+/// placement：caret 输入光标旁（找不到光标退回鼠标旁）/ mouse 鼠标旁 / center 屏幕中央。
+/// click、middle_click：paste 粘贴 / copy 只复制 / text 纯文本粘贴 / none 不做额外操作。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Interaction {
+    pub placement: String,
+    pub click: String,
+    pub middle_click: String,
+    #[serde(flatten)]
+    unknown: Unknown,
+}
+
+impl Default for Interaction {
+    fn default() -> Self {
+        Self {
+            placement: "caret".into(),
+            click: "paste".into(),
+            middle_click: "text".into(),
+            unknown: Unknown::new(),
+        }
+    }
+}
+
+fn valid_click(value: &Value) -> bool {
+    matches!(value.as_str(), Some("paste" | "copy" | "text" | "none"))
 }
 
 fn valid_app(value: &Value) -> bool {
@@ -351,6 +380,31 @@ fn validate(mut value: Value) -> (Settings, Vec<Issue>) {
         "snapshots.max_mb",
         json!(SNAPSHOT_MAX_MB),
         |v| v.as_u64().is_some_and(|n| SNAPSHOT_MB_RANGE.contains(&n)),
+        &mut issues,
+    );
+    let interaction = section(object, "interaction", &mut issues);
+    field(
+        interaction,
+        "placement",
+        "interaction.placement",
+        json!("caret"),
+        |v| matches!(v.as_str(), Some("caret" | "mouse" | "center")),
+        &mut issues,
+    );
+    field(
+        interaction,
+        "click",
+        "interaction.click",
+        json!("paste"),
+        valid_click,
+        &mut issues,
+    );
+    field(
+        interaction,
+        "middle_click",
+        "interaction.middle_click",
+        json!("text"),
+        valid_click,
         &mut issues,
     );
     // 已逐项规范所有已知字段；未知字段由各层 flatten 原样接收。
@@ -648,6 +702,33 @@ pub(crate) mod tests {
             assert_eq!(issues.len(), 1);
             assert_eq!(settings.snapshots.max_mb, SNAPSHOT_MAX_MB);
         }
+    }
+
+    #[test]
+    fn interaction_defaults_and_validation() {
+        let (settings, issues) = validate(json!({}));
+        assert!(issues.is_empty());
+        assert_eq!(settings.interaction, Interaction::default());
+        assert_eq!(settings.interaction.placement, "caret");
+        assert_eq!(settings.interaction.click, "paste");
+        assert_eq!(settings.interaction.middle_click, "text");
+        let (settings, issues) = validate(
+            json!({"interaction":{"placement":"center","click":"none","middle_click":"copy"}}),
+        );
+        assert!(issues.is_empty());
+        assert_eq!(settings.interaction.placement, "center");
+        assert_eq!(settings.interaction.click, "none");
+        assert_eq!(settings.interaction.middle_click, "copy");
+        for bad in [json!("left"), json!(1), json!(null)] {
+            let (settings, issues) = validate(
+                json!({"interaction":{"placement":bad.clone(),"click":bad.clone(),"middle_click":"x"}}),
+            );
+            assert_eq!(issues.len(), 3);
+            assert_eq!(settings.interaction, Interaction::default());
+        }
+        // 只改一项时，其余字段保持原值（合并更新）。
+        let (settings, _) = validate(json!({"interaction":{"click":"copy"}}));
+        assert_eq!(settings.interaction.middle_click, "text");
     }
 
     #[test]

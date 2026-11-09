@@ -130,4 +130,5 @@ html[data-motion="none"] { --fade-duration: 0ms; }
   --accent-ink: var(--c-accent-ink); --selected: var(--c-hairline); --field: var(--c-raised);
   --star: var(--c-star); --danger: var(--c-danger);
 }
-@media (prefers-reduced-motion: reduce) { :root { --fade-duration: var(--duration-reduce); } }
+/* 只在设置里选了“跟随系统”且系统开了“减少动画效果”时生效（data-reduce-motion）。 */
+  :root[data-reduce-motion="true"] { --fade-duration: var(--duration-reduce); }

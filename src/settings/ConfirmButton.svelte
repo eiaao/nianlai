@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { reducedMotion } from "../lib/preferences";
   // 原地确认的清理按钮（M2-3）：
   //   点一下 → 按钮变宽、换成琥珀色“确认清理 N 条”，底部一条 4 秒的细线在缩短，走完自动恢复；
   //   再点 → 转圈 → 画出 ✓，同时一个“+N”小标签沿弧线飞向回收站那一行（flyTo），落下时调用 onlanded。
@@ -20,7 +21,7 @@
   let sizes: Record<string, HTMLSpanElement> = {};
   let width = $state<number | null>(null);
   let timer: ReturnType<typeof setTimeout> | null = null;
-  const reduced = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const reduced = reducedMotion;
 
   // 按钮宽度跟着文字平滑变化：每种状态的文字先在隐藏层里量好宽度。
   $effect(() => {
@@ -124,9 +125,8 @@
   @keyframes drain { from { transform: scaleX(1); } to { transform: scaleX(0); } }
   @keyframes spin { to { transform: rotate(360deg); } }
   @keyframes draw { to { stroke-dashoffset: 0; } }
-  @media (prefers-reduced-motion: reduce) {
-    .text, .drain, .spinner { animation: none; }
-    .check path { animation: none; stroke-dashoffset: 0; }
-    .confirm-button { transition: none; }
-  }
+  /* 只在设置里选了“跟随系统”且系统开了“减少动画效果”时生效（data-reduce-motion）。 */
+  :global(html[data-reduce-motion="true"]) .text, :global(html[data-reduce-motion="true"]) .drain, :global(html[data-reduce-motion="true"]) .spinner { animation: none; }
+  :global(html[data-reduce-motion="true"]) .check path { animation: none; stroke-dashoffset: 0; }
+  :global(html[data-reduce-motion="true"]) .confirm-button { transition: none; }
 </style>

@@ -20,7 +20,19 @@ function deleteLabel(item: HistoryItem) {
   const text = [...(item.preview || item.file_names[0] || "").replace(/\s+/g, " ").trim()];
   return text.length > 16 ? `${text.slice(0, 16).join("")}…` : text.join("") || "1 条记录";
 }
-const DEFAULT_PREFERENCES: Preferences = { layout: "a", theme: "system", motion: "soft", density: "compact" };
+// 鼠标点条目的行为（M2-8）；“none”只选中该条。本地实现，原因同 applySettings：单文件 Node 回归不经打包器。
+type MouseAction = PasteMode | "none";
+type MouseActions = { click: MouseAction; middle: MouseAction };
+const DEFAULT_MOUSE_ACTIONS: MouseActions = { click: "paste", middle: "text" };
+const isMouseAction = (value: unknown): value is MouseAction => value === "paste" || value === "copy" || value === "text" || value === "none";
+function normalizeMouseActions(interaction: import("./ipc").AppSettings["interaction"]): MouseActions {
+  return {
+    click: isMouseAction(interaction?.click) ? interaction.click : DEFAULT_MOUSE_ACTIONS.click,
+    middle: isMouseAction(interaction?.middle_click) ? interaction.middle_click : DEFAULT_MOUSE_ACTIONS.middle,
+  };
+}
+
+const DEFAULT_PREFERENCES: Preferences = { layout: "a", theme: "system", motion: "spring", density: "compact", followSystemMotion: false };
 
 export type PasteFeedback = {
   kind: "copied" | "failed"; title: string; detail: string; duration: number; startedAt: number;
@@ -52,10 +64,23 @@ export class PanelState {
   private undoTimer: ReturnType<typeof setTimeout> | null = null;
   preferences = $state<Preferences>({ ...DEFAULT_PREFERENCES });
   motion = $derived(this.preferences.motion);
+  // M2-8：鼠标单击 / 中键点击条目的行为，保存设置后即时更新；键盘不受影响。
+  mouseActions = $state<MouseActions>({ ...DEFAULT_MOUSE_ACTIONS });
   ctrlDown = $state(false);
   // 按住修饰键超过 HOLD_HINT_MS 才在页脚换成对应提示；快速组合键（Ctrl+D、Ctrl+Enter）不闪。
   heldModifier = $state<"" | "ctrl" | "shift">("");
-  previewOpen = $state(false);
+  // 完整预览：开关时通知钩子（预览开着时 Z、Ctrl+C 交给面板）；每次打开图片都从“适应”开始。
+  #previewOpen = $state(false);
+  get previewOpen() { return this.#previewOpen; }
+  set previewOpen(open: boolean) {
+    if (open === this.#previewOpen) return;
+    this.#previewOpen = open;
+    if (open) this.previewZoom = "fit";
+    void ipc.setPreviewKeys?.(open)?.catch(() => {});
+  }
+  previewZoom = $state<"fit" | "original">("fit");
+  // 完整预览里全文的字数（由预览组件取到全文后填上）。
+  fullChars = $state<number | null>(null);
   imeActive = $state(false);
   feedback = $state<PasteFeedback | null>(null);
   query = $state("");
@@ -193,15 +218,29 @@ export class PanelState {
     this.preferences = {
       layout: layout === "a" || layout === "b" || layout === "c" ? layout : "a",
       theme: settings.theme === "light" || settings.theme === "dark" || settings.theme === "system" ? settings.theme : "system",
-      motion: motion === "none" || motion === "spring" || motion === "soft" ? motion : "soft",
+      motion: motion === "none" || motion === "spring" || motion === "soft" ? motion : "spring",
       density: density === "comfortable" || density === "compact" ? density : "compact",
+      followSystemMotion: settings.feedback?.follow_system === true,
     };
+    this.mouseActions = normalizeMouseActions(settings.interaction);
     // 与 preferences.ts 保持同一映射；本地实现让 G0 的单文件 Node 回归无需打包器。
     document.documentElement.dataset.layout = this.preferences.layout;
     document.documentElement.dataset.theme = this.preferences.theme;
     document.documentElement.dataset.motion = this.preferences.motion;
+    // 系统“减少动画效果”只在选了“跟随系统”时生效（与 preferences.ts 的 data-reduce-motion 一致）。
+    this.syncReduceMotion();
     document.documentElement.dataset.density = "compact";
   };
+
+  private reduceMedia: MediaQueryList | null = null;
+  private syncReduceMotion() {
+    if (typeof matchMedia !== "function" || typeof document === "undefined") return;
+    if (!this.reduceMedia) {
+      this.reduceMedia = matchMedia("(prefers-reduced-motion: reduce)");
+      this.reduceMedia.addEventListener?.("change", () => this.syncReduceMotion());
+    }
+    document.documentElement.dataset.reduceMotion = this.preferences.followSystemMotion && this.reduceMedia.matches ? "true" : "false";
+  }
 
   refreshFavorites = async () => {
     const session = this.session;
@@ -369,6 +408,25 @@ export class PanelState {
       if (session === this.session && this.visible) this.message = "撤销失败，请重试。";
     }
   };
+
+  /** 完整预览里 Ctrl+C：只复制选中的文字（面板不关，页脚提示）。 */
+  copySelection = async () => {
+    const item = this.currentItem;
+    const text = window.getSelection?.()?.toString() ?? "";
+    if (!item || !this.previewOpen) return;
+    if (!text) { this.message = "先用鼠标选中要复制的文字。"; return; }
+    try {
+      await ipc.copySelection?.(item.id, text);
+      this.message = "";
+      this.notice = `已复制选中的 ${[...text].length} 字`;
+      if (this.noticeTimer) clearTimeout(this.noticeTimer);
+      this.noticeTimer = setTimeout(() => { this.notice = ""; this.noticeTimer = null; }, 2500);
+    } catch {
+      this.message = "复制没有完成，请重试。";
+    }
+  };
+  notice = $state("");
+  private noticeTimer: ReturnType<typeof setTimeout> | null = null;
 
   togglePreview = () => {
     if (!this.visible || !this.interactive || this.busy || this.awaitingRelease || this.mode !== "quick") return;
@@ -641,9 +699,9 @@ export class PanelState {
       const key = event as KeyboardEvent;
       if (key.repeat || key.isComposing || key.keyCode === 229 || key.altKey || key.metaKey) return null;
       if (!(key.key === "Enter" && !(key.ctrlKey && key.shiftKey)) && !(key.ctrlKey && /^[1-9]$/.test(key.key))) return null;
-    } else if (event.type === "click") {
+    } else if (event.type === "click" || event.type === "auxclick") {
       const pointer = event as MouseEvent;
-      if (pointer.button !== 0 || pointer.detail <= 0) return null;
+      if (pointer.button !== (event.type === "click" ? 0 : 1) || pointer.detail <= 0) return null;
     } else return null;
     if (!Number.isSafeInteger(this.selectionNonce + 1)) return null;
     return { revision: snapshot.revision, nonce: ++this.selectionNonce };
@@ -691,6 +749,16 @@ export class PanelState {
     this.selected = Math.max(0, Math.min(this.filtered.length - 1, this.selected + offset));
   };
 
+  // 鼠标取用入口：按设置把左键 / 中键换成粘贴模式，再走与键盘相同的 choose；“不做额外操作”只选中该条。
+  chooseByMouse = (index: number, event: MouseEvent) => {
+    const action = event.button === 1 ? this.mouseActions.middle : this.mouseActions.click;
+    if (action === "none") {
+      if (this.visible && this.interactive && !this.busy && this.filtered[index]) this.selected = index;
+      return;
+    }
+    void this.choose(index, action, event);
+  };
+
   choose = async (index = this.selected, pasteMode: PasteMode = "paste", event?: KeyboardEvent | MouseEvent) => {
     if (!this.visible || !this.interactive || this.busy || this.pendingDom || !this.filtered[index]) return;
     // 第一次 await 之前固定全部请求字段；绝不在 IPC/读库返回后换用更新的条目或 revision。
@@ -713,7 +781,8 @@ export class PanelState {
         this.armDomChoice({ session, panelMode: this.mode, id, mode, selection, code: this.domCode(key), downAt: key.timeStamp, released: false });
         return;
       }
-      if (event.type !== "click" || (event as MouseEvent).button !== 0 || (event as MouseEvent).detail <= 0 || this.composing
+      if ((event.type !== "click" || (event as MouseEvent).button !== 0) && (event.type !== "auxclick" || (event as MouseEvent).button !== 1)
+        || (event as MouseEvent).detail <= 0 || this.composing
         || performance.now() - this.compositionEnded < 50 || event.timeStamp - this.compositionEnded < 50) return;
       this.observeModifiers(event as MouseEvent);
       if (this.heldDomKeys.size) {
@@ -727,8 +796,34 @@ export class PanelState {
     await this.command(() => ipc.pasteItem(session, id, mode, selection), session);
   };
 
+  /** 完整预览开着时方向键、翻页键用来滚动预览（M2-7）；返回是否已处理。 */
+  private scrollPreview(key: string) {
+    const keys = ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "PageUp", "PageDown", "Home", "End"];
+    if (!this.previewOpen || !keys.includes(key)) return false;
+    if (typeof document === "undefined" || typeof document.querySelector !== "function") return true;
+    // 看原尺寸图片时滚动的是图片区，其余滚动整个预览。
+    const box = document.querySelector<HTMLElement>(".preview-overlay .image-stage.original")
+      ?? document.querySelector<HTMLElement>(".preview-overlay .overlay-scroll");
+    if (!box) return true;
+    const line = 56, page = Math.max(line, box.clientHeight * 0.85);
+    const behavior: ScrollBehavior = this.motion === "none" ? "auto" : "smooth";
+    const by = (left: number, top: number) => box.scrollBy({ left, top, behavior });
+    switch (key) {
+      case "ArrowUp": by(0, -line); break;
+      case "ArrowDown": by(0, line); break;
+      case "ArrowLeft": by(-line, 0); break;
+      case "ArrowRight": by(line, 0); break;
+      case "PageUp": by(0, -page); break;
+      case "PageDown": by(0, page); break;
+      case "Home": box.scrollTo({ top: 0, left: 0, behavior }); break;
+      case "End": box.scrollTo({ top: box.scrollHeight, behavior }); break;
+    }
+    return true;
+  }
+
   navigate = (key: string, event?: KeyboardEvent) => {
     if (!this.visible || !this.interactive) return;
+    if (this.scrollPreview(key)) return;
     switch (key) {
       case "Space": this.togglePreview(); break;
       case "ArrowUp": this.move(-1); break;
@@ -747,6 +842,8 @@ export class PanelState {
       case "Delete:down": if (this.mode === "quick") this.pressDelete(); break;
       case "Delete": if (this.mode === "quick") this.releaseDelete(); break;
       case "Ctrl+Z": void this.undoDelete(); break;
+      case "Z": if (this.previewOpen) this.previewZoom = this.previewZoom === "fit" ? "original" : "fit"; break;
+      case "Ctrl+C": if (this.previewOpen) void this.copySelection(); break;
       case "Escape":
         if (this.previewOpen) { this.previewOpen = false; break; }
         if (this.interaction === "activated" && event) this.armDomChoice({ session: this.session, panelMode: this.mode,
@@ -806,6 +903,10 @@ export class PanelState {
           ? "Ctrl+D"
           : ctrlOnly && event.key.toLowerCase() === "z"
           ? "Ctrl+Z"
+          : this.previewOpen && ctrlOnly && event.key.toLowerCase() === "c"
+          ? "Ctrl+C"
+          : this.previewOpen && unmodified && event.key.toLowerCase() === "z"
+          ? "Z"
           : unmodified && event.key === "Delete"
           ? "Delete:down"
           : event.key === "Enter" && !event.altKey && !event.metaKey && !(event.ctrlKey && event.shiftKey)

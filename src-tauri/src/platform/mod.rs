@@ -9,6 +9,26 @@ pub mod key_state;
 pub const REPLAY_WAIT: Duration = Duration::from_millis(800);
 pub const REPLAY_CAPACITY: usize = 32;
 
+/// 面板呼出位置（设置 interaction.placement）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum PlacementMode {
+    /// 输入光标旁；找不到光标时退回鼠标旁。
+    #[default]
+    Caret,
+    Mouse,
+    Center,
+}
+
+impl PlacementMode {
+    pub fn from_setting(value: &str) -> Self {
+        match value {
+            "mouse" => Self::Mouse,
+            "center" => Self::Center,
+            _ => Self::Caret,
+        }
+    }
+}
+
 pub type Result<T> = std::result::Result<T, String>;
 
 pub struct HookOptions {

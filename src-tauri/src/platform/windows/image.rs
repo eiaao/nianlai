@@ -185,8 +185,21 @@ fn image_source(content: &Content) -> Result<Vec<u8>, &'static str> {
     }
 }
 
+/// 渲染好的图片：PNG 字节和原图尺寸。
+pub struct Rendered {
+    pub png: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+}
+
 /// 存储管理里手动挑选截图用的缩略图（M2-3）：长边缩到 `max` 像素以内，在内存里编码成 PNG，不落盘。
 pub fn thumbnail(content: &Content, max: u32) -> Result<Vec<u8>, &'static str> {
+    render(content, max).map(|rendered| rendered.png)
+}
+
+/// 面板预览用的图片（M2-7）：长边缩到 `max` 以内（`u32::MAX` 表示原尺寸），返回 PNG 和原图尺寸。
+/// 不需要缩小、原本就是 PNG 时直接返回原始字节，不重新编码。
+pub fn render(content: &Content, max: u32) -> Result<Rendered, &'static str> {
     let source = image_source(content)?;
     unsafe {
         let _com = CoInitializeEx(None, COINIT_MULTITHREADED)
@@ -203,11 +216,20 @@ pub fn thumbnail(content: &Content, max: u32) -> Result<Vec<u8>, &'static str> {
                 .GetFrame(0)
         })()
         .map_err(|_| "image_decode_failed")?;
-        (|| -> windows::core::Result<Vec<u8>> {
-            let (mut width, mut height) = (0, 0);
-            frame.GetSize(&mut width, &mut height)?;
-            let longest = width.max(height).max(1);
-            let scale = (max as f64 / longest as f64).min(1.0);
+        let (mut width, mut height) = (0, 0);
+        frame
+            .GetSize(&mut width, &mut height)
+            .map_err(|_| "image_decode_failed")?;
+        let longest = width.max(height).max(1);
+        let scale = (max as f64 / longest as f64).min(1.0);
+        if scale >= 1.0 && source.starts_with(b"\x89PNG\r\n\x1a\n") {
+            return Ok(Rendered {
+                png: source,
+                width,
+                height,
+            });
+        }
+        let png = (|| -> windows::core::Result<Vec<u8>> {
             let scaler = factory.CreateBitmapScaler()?;
             scaler.Initialize(
                 &frame,
@@ -241,7 +263,8 @@ pub fn thumbnail(content: &Content, max: u32) -> Result<Vec<u8>, &'static str> {
             bytes.truncate(read as usize);
             Ok(bytes)
         })()
-        .map_err(|_| "image_encode_failed")
+        .map_err(|_| "image_encode_failed")?;
+        Ok(Rendered { png, width, height })
     }
 }
 
@@ -355,6 +378,15 @@ mod tests {
         small.extend_from_slice(&[1, 2, 3, 4, 5, 6, 0, 0]);
         fs::write(&path, thumbnail(&image(DIB, small), 240).unwrap()).unwrap();
         assert_eq!(decode(&path, 0, 0).0, (2, 1));
+        // 原尺寸：带回原图尺寸；原本是 PNG 时直接用原始字节。
+        let mut dib = info_header(40, 300, 100, 24, 0, 0);
+        dib.extend(std::iter::repeat_n(90u8, 900 * 100));
+        let full = render(&image(DIB, dib), u32::MAX).unwrap();
+        assert_eq!((full.width, full.height), (300, 100));
+        let png = image(PNG, full.png.clone());
+        let again = render(&png, u32::MAX).unwrap();
+        assert_eq!(again.png, full.png);
+        assert_eq!((again.width, again.height), (300, 100));
         fs::remove_dir_all(&directory).unwrap();
     }
 
