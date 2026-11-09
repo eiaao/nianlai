@@ -48,9 +48,9 @@ export type CaptureSettings = {
 export type SensitiveRule = { id: string; label: string; example: string };
 export type CaptureState = { paused: boolean; ignore_next: boolean; rules: SensitiveRule[]; default_excluded_apps: string[] };
 export type SnapshotReason = "daily" | "upgrade" | "manual" | "before_restore";
-export type SnapshotInfo = { name: string; bytes: number; created_ms: number; reason: SnapshotReason | null };
+export type SnapshotInfo = { name: string; bytes: number; created_ms: number; reason: SnapshotReason | null; version: number | null };
 export type SnapshotState = {
-  items: SnapshotInfo[]; keep: number;
+  items: SnapshotInfo[]; keep: number; current_version: number;
   restored: { name: string; error: string | null } | null;
   relaunch: boolean;
 };

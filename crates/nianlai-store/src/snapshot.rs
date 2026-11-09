@@ -65,6 +65,7 @@ impl Drop for Temporary {
 }
 
 fn relational_check(c: &Connection) -> Result<Counts> {
+    // 调用方负责先把库升到最新；这里按最新结构校验。
     if schema::version(c)? != VERSION {
         return Err(Error::Invalid("schema_version"));
     }
@@ -89,10 +90,16 @@ fn relational_check(c: &Connection) -> Result<Counts> {
     }
     schema::counts(c)
 }
-fn checked_copy(source: &Path) -> Result<Counts> {
+// `allow_older` 为真时接受版本低于当前的库（快照校验）：先复制到临时副本，在副本上用迁移框架升到最新
+// （不备份、不碰源文件），再对升级后的副本做完整校验。比当前新的版本、版本号为 0 的文件始终拒绝。
+fn checked_copy(source: &Path, allow_older: bool) -> Result<Counts> {
     let temporary = Temporary::new()?;
     let candidate = temporary.0.join("candidate.db");
-    let c = schema::readonly(source)?;
+    let c = if allow_older {
+        schema::readonly_any(source)?
+    } else {
+        schema::readonly(source)?
+    };
     schema::pragma_check(&c, "integrity_check")?;
     // VACUUM INTO 从只读连接取得一个完整的 WAL 读快照，不修改源库。
     c.execute(
@@ -100,7 +107,11 @@ fn checked_copy(source: &Path) -> Result<Counts> {
         [candidate.to_str().ok_or(Error::Invalid("path_encoding"))?],
     )?;
     drop(c);
-    let c = writable(&candidate)?;
+    let mut c = writable(&candidate)?;
+    if allow_older {
+        // 副本是一次性的，迁移前不需要备份；失败则整份快照视为不可用。
+        migrations::migrate(&mut c, migrations::STEPS, &mut |_, _| Ok(()))?;
+    }
     let counts = relational_check(&c)?;
     // FTS 的校验命令是 INSERT；只在临时副本执行，rank=1 同时比对外部正文。
     c.execute(
@@ -110,7 +121,7 @@ fn checked_copy(source: &Path) -> Result<Counts> {
     Ok(counts)
 }
 pub fn check(directory: &Path) -> Result<Counts> {
-    checked_copy(&directory.join("history.db"))
+    checked_copy(&directory.join("history.db"), false)
 }
 pub fn validate_snapshot(path: &Path) -> Result<Counts> {
     let mut wal = path.as_os_str().to_os_string();
@@ -118,10 +129,8 @@ pub fn validate_snapshot(path: &Path) -> Result<Counts> {
     if fs::metadata(PathBuf::from(wal)).is_ok_and(|m| m.len() > 0) {
         return Err(Error::Invalid("snapshot_has_wal"));
     }
-    let c = schema::readonly(path)?;
-    relational_check(&c)?;
-    drop(c);
-    checked_copy(path)
+    // 快照可以比当前版本旧（恢复后启动时 Store::open 自动升级），不能更新。
+    checked_copy(path, true)
 }
 
 #[derive(Debug, Serialize)]
@@ -189,6 +198,8 @@ pub struct SnapshotInfo {
     pub bytes: u64,
     pub created_ms: u64,
     pub reason: Option<Reason>,
+    /// 快照里的库版本（user_version）；读不出来时为 None。低于当前版本的快照恢复后会自动升级。
+    pub version: Option<u32>,
 }
 
 fn snapshot_directory(directory: &Path) -> PathBuf {
@@ -213,6 +224,12 @@ fn snapshots(directory: &Path) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
+// 只读打开取 user_version；不校验内容，文件损坏时为 None。
+fn snapshot_version(file: &Path) -> Option<u32> {
+    let c = Connection::open_with_flags(file, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    migrations::user_version(&c).ok()
+}
+
 /// 列出快照，最新的在前。
 pub fn list_snapshots(directory: &Path) -> Result<Vec<SnapshotInfo>> {
     let mut list = Vec::new();
@@ -220,6 +237,7 @@ pub fn list_snapshots(directory: &Path) -> Result<Vec<SnapshotInfo>> {
         let metadata = fs::metadata(&file)?;
         let name = file.file_name().unwrap().to_string_lossy().into_owned();
         list.push(SnapshotInfo {
+            version: snapshot_version(&file),
             reason: Reason::parse(&name),
             bytes: metadata.len(),
             created_ms: metadata

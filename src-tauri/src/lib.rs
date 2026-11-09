@@ -69,6 +69,8 @@ fn set_ignore_next(ignore: bool) {
 struct SnapshotState {
     items: Vec<nianlai_store::SnapshotInfo>,
     keep: usize,
+    // 当前库版本；快照版本低于它的，恢复后会自动升级。
+    current_version: u32,
     // 本次启动时执行的恢复；设置页据此提示成功或失败。
     restored: Option<history::snapshots::Restored>,
     // 是否由守护者拉起：不是的话恢复后不会自动重启，需要手动打开。
@@ -86,6 +88,7 @@ fn get_snapshots() -> Result<SnapshotState, String> {
     Ok(SnapshotState {
         items: history::snapshots::list(&store_directory()?)?,
         keep: nianlai_store::SNAPSHOT_KEEP,
+        current_version: nianlai_store::VERSION,
         restored: history::snapshots::last_restore(),
         relaunch: recovery::is_child(),
     })
