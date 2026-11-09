@@ -647,6 +647,13 @@ impl Context {
 }
 thread_local! { static CONTEXT: RefCell<Option<Context>> = const { RefCell::new(None) }; }
 
+// 完整预览开着时（M2-7）：Z 切换图片的“适应 / 原尺寸”、Ctrl+C 复制预览里选中的文字，这两个键交给面板；
+// 预览关着时它们照旧（Z 开始打字搜索，Ctrl+C 放行给目标）。面板收起时清掉。
+static PREVIEW_KEYS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub fn set_preview_keys(open: bool) {
+    PREVIEW_KEYS.store(open, std::sync::atomic::Ordering::Release);
+}
+
 pub struct Hooks {
     id: u32,
     thread: Option<JoinHandle<()>>,
@@ -957,9 +964,20 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
             Some("Ctrl+D")
         } else if mods == Modifiers::CONTROL && vk == 0x5A {
             Some("Ctrl+Z")
+        } else if mods == Modifiers::CONTROL
+            && vk == 0x43
+            && PREVIEW_KEYS.load(std::sync::atomic::Ordering::Acquire)
+        {
+            Some("Ctrl+C")
         } else {
             None
         };
+        let navigation = navigation.or_else(|| {
+            (mods.is_empty()
+                && vk == 0x5A
+                && PREVIEW_KEYS.load(std::sync::atomic::Ordering::Acquire))
+            .then_some("Z")
+        });
         if let Some(name) = navigation {
             // 确认、关闭、预览开合与收藏等到抬起再投递：避免卸钩后把配对抬起漏给目标控件，
             // 也避免长按 Space 反复开合、长按 Ctrl+D 反复收藏/取消。
@@ -970,6 +988,8 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
                     | "Ctrl+Enter"
                     | "Ctrl+D"
                     | "Ctrl+Z"
+                    | "Ctrl+C"
+                    | "Z"
                     | "Delete"
                     | "Escape"
                     | "Space"

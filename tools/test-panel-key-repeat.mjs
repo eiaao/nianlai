@@ -33,7 +33,10 @@ let rejectNext = false;
 let rejectSearch = false;
 let pendingPaste = null;
 const handlers = new Map();
-export function reset() { calls.length = 0; rejectNext = false; rejectSearch = false; pendingPaste = null; handlers.clear();
+export const previewKeys = [];
+export async function setPreviewKeys(open) { previewKeys.push(open); }
+export async function copySelection(id, text) { calls.push({ command: "copySelection", id, text }); }
+export function reset() { calls.length = 0; previewKeys.length = 0; rejectNext = false; rejectSearch = false; pendingPaste = null; handlers.clear();
   store.history = null; store.favorites = []; store.deletable = true; store.undoable = null; }
 export function rejectNextPaste() { rejectNext = true; }
 export function rejectNextSearch() { rejectSearch = true; }
@@ -1138,6 +1141,60 @@ test("普通 Quick 的 Space 与 Esc 浮层分层键位", async (suite) => {
     assert.deepEqual(ipc.calls, [{ command: "hidePanel", session: 37 }]);
   });
 
+  await suite.test("完整预览开着时 Z 切换适应 / 原尺寸，钩子同步开关；关着时 Z 不起作用", async (context) => {
+    const { panel } = await createPanel(context, PanelState, ipc);
+    panel.mode = "quick";
+    ipc.emit("key", { session: 37, key: "Z" });
+    assert.equal(panel.previewZoom, "fit", "预览没开，Z 不起作用");
+    ipc.emit("key", { session: 37, key: "Space" });
+    assert.deepEqual(ipc.previewKeys, [true], "打开预览时通知钩子");
+    ipc.emit("key", { session: 37, key: "Z" });
+    assert.equal(panel.previewZoom, "original");
+    ipc.emit("key", { session: 37, key: "Z" });
+    assert.equal(panel.previewZoom, "fit");
+    ipc.emit("key", { session: 37, key: "Z" });
+    ipc.emit("key", { session: 37, key: "Escape" });
+    assert.deepEqual(ipc.previewKeys, [true, false], "关闭预览时通知钩子");
+    ipc.emit("key", { session: 37, key: "Space" });
+    assert.equal(panel.previewZoom, "fit", "重新打开从“适应”开始");
+  });
+
+  await suite.test("完整预览开着时方向键、翻页键用来滚动预览，不切换条目；关掉后照常切换", async (context) => {
+    const { panel } = await createPanel(context, PanelState, ipc);
+    panel.mode = "quick";
+    const start = panel.selected;
+    ipc.emit("key", { session: 37, key: "Space" });
+    for (const key of ["ArrowDown", "ArrowUp", "PageDown", "End", "Home"]) ipc.emit("key", { session: 37, key });
+    assert.equal(panel.selected, start, "预览开着时不切换条目");
+    assert.equal(panel.previewOpen, true);
+    ipc.emit("key", { session: 37, key: "Space" });
+    ipc.emit("key", { session: 37, key: "ArrowDown" });
+    assert.equal(panel.selected, start + 1, "关掉预览后方向键照常切换");
+  });
+
+  await suite.test("完整预览里 Ctrl+C 只复制选中的文字，面板不关；没选中时提示", async (context) => {
+    const { panel } = await createPanel(context, PanelState, ipc);
+    panel.mode = "quick";
+    const original = globalThis.window;
+    let selected = "";
+    globalThis.window = { ...(original ?? {}), getSelection: () => ({ toString: () => selected }) };
+    context.after(() => { globalThis.window = original; });
+    ipc.emit("key", { session: 37, key: "Ctrl+C" });
+    assert.deepEqual(ipc.calls, [], "预览没开时不处理");
+    ipc.emit("key", { session: 37, key: "Space" });
+    ipc.emit("key", { session: 37, key: "Ctrl+C" });
+    await flush();
+    assert.deepEqual(ipc.calls, []);
+    assert.match(panel.message, /先用鼠标选中/);
+    selected = "选中的字😀";
+    ipc.emit("key", { session: 37, key: "Ctrl+C" });
+    await flush();
+    assert.deepEqual(ipc.calls, [{ command: "copySelection", id: panel.currentItem.id, text: "选中的字😀" }]);
+    assert.equal(panel.notice, "已复制选中的 5 字");
+    assert.equal(panel.message, "");
+    assert.equal(panel.previewOpen, true, "复制后预览和面板都不关");
+  });
+
   await suite.test("搜索模式 Space 仍交给输入框，C 的左右键不改变其它布局", async (context) => {
     const { panel } = await createPanel(context, PanelState, ipc);
     const before = panel.selected;
@@ -1376,5 +1433,78 @@ test("交互优化：收藏不占槽位、本次呼出不挪位置、删除可�
     assert.match(panel.message, /可能没收到/);
     ipc.emit("paste-result", pasteResult({ paste_result: "confirmed", reason: null, as_text: { error: "x" } }));
     assert.match(panel.message, /转文字失败/);
+  });
+});
+
+test("鼠标点条目的行为按设置选择粘贴模式（M2-8）", async (suite) => {
+  const { PanelState, ipc, cleanup } = await compilePanel();
+  suite.after(cleanup);
+  const auxclick = (options = {}) => click({ type: "auxclick", button: 1, ...options });
+  const withSettings = async (context, interaction, harness = createPanel) => {
+    const created = await harness(context, PanelState, ipc);
+    // applySettings 会写 documentElement.dataset；替身 document 里补一个。
+    document.documentElement = { dataset: {} };
+    if (interaction !== undefined) created.panel.applySettings({ interaction });
+    return created;
+  };
+  // 每次点击后清掉 busy（真实流程里由粘贴结果清除），以便连续点击。
+  const pointer = (panel, index, event) => { panel.chooseByMouse(index, event); panel.busy = false; };
+  const modes = () => ipc.calls.filter((call) => call.command === "pasteItem").map((call) => call.mode);
+
+  await suite.test("默认：单击粘贴，中键纯文本粘贴", async (context) => {
+    const { panel } = await withSettings(context);
+    pointer(panel, 1, click());
+    pointer(panel, 2, auxclick());
+    assert.deepEqual(ipc.calls.map((call) => [call.id, call.mode]), [[102, "paste"], [103, "text"]]);
+  });
+
+  await suite.test("单击和中键各自跟随设置，包括只复制与纯文本", async (context) => {
+    const { panel } = await withSettings(context, { placement: "mouse", click: "copy", middle_click: "paste" });
+    pointer(panel, 1, click());
+    pointer(panel, 1, auxclick());
+    assert.deepEqual(modes(), ["copy", "paste"]);
+    ipc.calls.length = 0;
+    panel.applySettings({ interaction: { click: "text", middle_click: "copy" } });
+    pointer(panel, 1, click());
+    pointer(panel, 1, auxclick());
+    assert.deepEqual(modes(), ["text", "copy"]);
+  });
+
+  await suite.test("不做额外操作：只选中该条，不发任何命令", async (context) => {
+    const { panel } = await withSettings(context, { click: "none", middle_click: "none" });
+    panel.selected = 0;
+    panel.chooseByMouse(3, click());
+    assert.equal(panel.selected, 3);
+    panel.chooseByMouse(2, auxclick());
+    assert.equal(panel.selected, 2);
+    assert.deepEqual(ipc.calls, []);
+  });
+
+  await suite.test("无效或缺失的设置值回到默认", async (context) => {
+    const { panel } = await withSettings(context, { click: "double", middle_click: 7 });
+    assert.deepEqual({ ...panel.mouseActions }, { click: "paste", middle: "text" });
+    panel.applySettings({});
+    assert.deepEqual({ ...panel.mouseActions }, { click: "paste", middle: "text" });
+  });
+
+  await suite.test("键盘不受鼠标设置影响", async (context) => {
+    const { panel } = await withSettings(context, { click: "none", middle_click: "none" });
+    keydown(panel, { key: "Enter" });
+    keyup(panel, { key: "Enter" });
+    assert.deepEqual(modes(), ["paste"]);
+  });
+
+  await suite.test("Activated 搜索里中键同样走选择快照，鼠标事件类型 / 键位不符则拒绝", async (context) => {
+    const { panel } = await withSettings(context, undefined, activatedSearch);
+    panel.chooseByMouse(0, auxclick());
+    assert.deepEqual(ipc.calls, [{ command: "pasteItem", session: 37, id: 101, mode: "text", selection: { revision: 3, nonce: 1 } }]);
+  });
+
+  await suite.test("Activated 搜索里 auxclick 的键位必须是中键，非可信事件被忽略", async (context) => {
+    const { panel } = await withSettings(context, undefined, activatedSearch);
+    await panel.choose(0, "text", auxclick({ button: 2 }));
+    await panel.choose(0, "text", auxclick({ isTrusted: false }));
+    await panel.choose(0, "text", auxclick({ detail: 0 }));
+    assert.deepEqual(ipc.calls, []);
   });
 });

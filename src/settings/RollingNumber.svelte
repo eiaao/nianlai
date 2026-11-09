@@ -2,6 +2,7 @@
   // 数字变化时滚动过去（清理后“4 条 → 0 条”、回收站“4 → 8”），每一位像里程表一样上下滑动。
   // 减少动画时直接换成新值。bump() 让数字弹一下，用在“飞过来的标签落下”的那一刻。
   import { onDestroy } from "svelte";
+  import { reducedMotion } from "../lib/preferences";
 
   let { value }: { value: number } = $props();
 
@@ -10,11 +11,10 @@
   let initialized = false;
   let frame = 0;
   let root: HTMLElement;
-  const reduced = matchMedia("(prefers-reduced-motion: reduce)");
 
   $effect(() => {
     const target = value;
-    if (!initialized || reduced.matches) {
+    if (!initialized || reducedMotion()) {
       initialized = true;
       shown = target;
       return;
@@ -36,7 +36,7 @@
   });
 
   export function bump() {
-    if (reduced.matches || !root) return;
+    if (reducedMotion() || !root) return;
     root.animate([
       { transform: "scale(1)" },
       { transform: "scale(1.35)", offset: .35 },
@@ -62,5 +62,6 @@
   .digit.up { animation-name: from-below; }
   @keyframes from-above { from { transform: translateY(-70%); opacity: 0; } to { transform: none; opacity: 1; } }
   @keyframes from-below { from { transform: translateY(70%); opacity: 0; } to { transform: none; opacity: 1; } }
-  @media (prefers-reduced-motion: reduce) { .digit { animation: none; } }
+  /* 只在设置里选了“跟随系统”且系统开了“减少动画效果”时生效（data-reduce-motion）。 */
+  :global(html[data-reduce-motion="true"]) .digit { animation: none; }
 </style>

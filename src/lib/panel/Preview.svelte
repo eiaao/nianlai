@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onDestroy, tick } from "svelte";
   import * as ipc from "../ipc";
-  import type { HistoryItem, PathCheck } from "../ipc";
+  import type { HistoryItem, ImageView, PathCheck, TextChunk } from "../ipc";
   import { formatTime, type PanelState } from "../state.svelte";
   import { colorValue, linkParts, relativeTime, sourceName, visualKind } from "./content";
   import { SpringValue } from "./motion";
@@ -44,6 +44,85 @@
     void ipc.getFilePaths?.(id)?.then((result) => { if (pathsFor === id) paths = result; }).catch(() => {});
   });
   const mark = $derived(item?.file_state ?? null);
+
+  // 图片（M2-7）：常驻预览用长边 480 的缩略图；完整预览（expanded）用原图。切换条目时旧的结果作废。
+  let image = $state<ImageView | null>(null);
+  let imageFailed = $state(false);
+  let imageFor = "";
+  $effect(() => {
+    const key = item && kind === "image" ? `${item.id}:${expanded ? "full" : "thumb"}` : "";
+    if (key === imageFor) return;
+    imageFor = key;
+    image = null; imageFailed = false;
+    if (!key || !item) return;
+    void ipc.getImage?.(item.id, expanded ? null : 480)
+      ?.then((result) => { if (imageFor === key) { image = result; imageFailed = !result; } })
+      .catch(() => { if (imageFor === key) imageFailed = true; });
+  });
+  const fit = $derived(panel.previewZoom === "fit");
+  let stage = $state<HTMLDivElement>();
+  let stageSize = $state({ width: 0, height: 0 });
+  const scale = $derived(image && stageSize.width ? Math.min(1, stageSize.width / image.width, stageSize.height / image.height) : 1);
+  function measure(node: HTMLElement) {
+    const observer = new ResizeObserver(() => { stageSize = { width: node.clientWidth - 2, height: node.clientHeight - 2 }; });
+    observer.observe(node);
+    return { destroy: () => observer.disconnect() };
+  }
+  // 原尺寸时按住拖动平移。
+  function pan(node: HTMLElement) {
+    let start: { x: number; y: number; left: number; top: number } | null = null;
+    const down = (event: PointerEvent) => {
+      if (fit || event.button !== 0) return;
+      start = { x: event.clientX, y: event.clientY, left: node.scrollLeft, top: node.scrollTop };
+      node.setPointerCapture(event.pointerId);
+      event.preventDefault();
+    };
+    const move = (event: PointerEvent) => {
+      if (!start) return;
+      node.scrollLeft = start.left - (event.clientX - start.x);
+      node.scrollTop = start.top - (event.clientY - start.y);
+    };
+    const up = () => { start = null; };
+    node.addEventListener("pointerdown", down);
+    node.addEventListener("pointermove", move);
+    node.addEventListener("pointerup", up);
+    node.addEventListener("pointercancel", up);
+    return { destroy: () => { node.removeEventListener("pointerdown", down); node.removeEventListener("pointermove", move); node.removeEventListener("pointerup", up); node.removeEventListener("pointercancel", up); } };
+  }
+
+  // 全文（M2-7）：完整预览里先取前 2,000 字，滚到底再取其余。列表里的预览只有前 300 字。
+  const FIRST_CHUNK = 2000;
+  let full = $state<TextChunk | null>(null);
+  let fullFor = -1;
+  let loadingRest = false;
+  const textual = $derived(kind === "short" || kind === "long" || kind === "code" || kind === "rich" || kind === "link");
+  $effect(() => {
+    const id = expanded && item && textual ? item.id : -1;
+    if (id === fullFor) return;
+    fullFor = id; full = null; loadingRest = false;
+    if (id < 0) return;
+    void ipc.getFullText?.(id, FIRST_CHUNK)?.then((chunk) => { if (fullFor === id) full = chunk; }).catch(() => {});
+  });
+  // 完整预览的头部按全文的字数显示（列表里的字数只算了摘要）。
+  $effect(() => {
+    if (!expanded) return;
+    panel.fullChars = full?.total ?? null;
+  });
+  function loadRest(node: HTMLElement) {
+    const observer = new IntersectionObserver((entries) => {
+      const id = fullFor;
+      if (!entries.some((entry) => entry.isIntersecting) || !full || full.shown >= full.total || loadingRest) return;
+      loadingRest = true;
+      void ipc.getFullText?.(id, null)?.then((chunk) => { if (fullFor === id) full = chunk; }).catch(() => {}).finally(() => { loadingRest = false; });
+    });
+    observer.observe(node);
+    return { destroy: () => observer.disconnect() };
+  }
+  const count = (n: number) => n.toLocaleString("zh-CN");
+  function size(bytes: number) {
+    if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
+    return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  }
   const fileName = (path: string) => path.split(/[\\/]/).filter(Boolean).pop() ?? path;
 
   onDestroy(() => { y.destroy(); opacity.destroy(); });
@@ -62,12 +141,21 @@
     </div>
 
     {#if kind === "image"}
-      <div class="image-placeholder" role="img" aria-label={item.preview || "图片记录"}>
-        <svg viewBox="0 0 48 48" fill="none" aria-hidden="true"><rect x="5" y="7" width="38" height="34" stroke="currentColor"/><circle cx="17" cy="18" r="4" stroke="currentColor"/><path d="m8 36 11-11 8 8 6-6 8 9" stroke="currentColor"/></svg>
-        <strong>{item.preview || "图片"}</strong>
-        <span>当前数据只提供图片元信息，图像资源预览待后续接入。</span>
-      </div>
-      <div class="image-meta"><span>{sourceName(item)}</span><span>{formatTime(item.copied_ms)}</span></div>
+      {#if expanded}
+        <div class="image-stage" class:original={!fit} bind:this={stage} use:measure use:pan role="img" aria-label={item.preview || "图片记录"}>
+          {#if image}
+            <img src={image.url} alt="" draggable="false" style={fit ? `width:${image.width * scale}px;height:${image.height * scale}px` : `width:${image.width}px;height:${image.height}px`} />
+          {:else if imageFailed}
+            <span class="image-missing">这张图片没法显示</span>
+          {/if}
+        </div>
+        {#if image}<div class="image-meta"><span>{image.width} × {image.height} · {size(image.bytes)}</span><span>{fit ? `适应 · ${Math.round(scale * 100)}%` : "原尺寸 · 100%"} · Z 切换</span></div>{/if}
+      {:else}
+        <div class="image-frame" role="img" aria-label={item.preview || "图片记录"}>
+          {#if image}<img src={image.url} alt="" draggable="false" />{:else if imageFailed}<span class="image-missing">这张图片没法显示</span>{/if}
+        </div>
+        <div class="image-meta"><span>{image ? `${image.width} × ${image.height} · ${size(image.bytes)}` : item.preview}</span><span>{compact ? formatTime(item.copied_ms) : "Space 查看原图"}</span></div>
+      {/if}
     {:else if kind === "color" && color}
       <div class="color-block" role="img" style={`background-color: ${color.value}`} aria-label={`颜色 ${color.value}`}></div>
       <div class="color-value">{color.value}</div>
@@ -78,6 +166,12 @@
       <div class="link-url">{link.url.href}</div>
       <div class="link-rule"></div>
       <p class="preview-note">不会自动访问链接，也不会抓取网页标题。取用时粘贴原始网址。</p>
+    {:else if expanded && full && kind !== "link"}
+      {#if kind === "code"}<pre class="code-sheet selectable">{full.text}</pre>{:else}<p class="preview-text selectable">{full.text}</p>{/if}
+      {#if full.shown < full.total}
+        <div class="cut" use:loadRest>已显示前 {count(full.shown)} 字 · 滚到底自动加载其余 {count(full.total - full.shown)} 字</div>
+      {/if}
+      {#if kind === "rich"}<p class="preview-note">显示的是保存的纯文本，不还原富文本样式。</p>{/if}
     {:else if kind === "code"}
       <pre class="code-sheet">{item.preview || "（空文本）"}</pre>
     {:else if kind === "files"}
@@ -130,10 +224,20 @@
   .link-host { margin: 8px 0 12px; color: var(--accent); font: 600 27px/1.2 var(--font-display); overflow-wrap: anywhere; }
   .link-url { color: var(--muted); font: 12px/1.7 var(--font-mono); overflow-wrap: anywhere; }
   .link-rule { width: 46px; height: 3px; margin: 23px 0; background: var(--accent); }
-  .image-placeholder { min-height: 210px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: var(--space-3); padding: var(--space-5); border: 1px solid var(--line); background: var(--panel); color: var(--muted); text-align: center; }
-  .image-placeholder svg { width: 48px; height: 48px; color: var(--faint); }
-  .image-placeholder strong { color: var(--text); font-size: 14px; }
-  .image-placeholder span { max-width: 290px; font-size: 11px; line-height: 1.7; }
+  .image-frame { height: 210px; display: grid; place-items: center; overflow: hidden; border: 1px solid var(--line); background: repeating-conic-gradient(color-mix(in srgb, var(--line) 22%, transparent) 0 25%, transparent 0 50%) 0 0 / 14px 14px; }
+  .image-frame img { max-width: 100%; max-height: 100%; display: block; object-fit: contain; }
+  /* 留出头部、底栏和尺寸那一行，外层不再出现第二条滚动条。 */
+  .image-stage { height: max(160px, calc(100vh - 264px)); display: grid; place-items: center; overflow: hidden; border: 1px solid var(--line-soft); background: repeating-conic-gradient(color-mix(in srgb, var(--line) 22%, transparent) 0 25%, transparent 0 50%) 0 0 / 16px 16px; }
+  .image-stage img { display: block; max-width: none; user-select: none; }
+  /* 原尺寸：可以拖动或用方向键平移，不显示滚动条。 */
+  .image-stage.original { display: block; overflow: auto; cursor: grab; scrollbar-width: none; }
+  .image-stage.original::-webkit-scrollbar { display: none; }
+  .image-stage.original:active { cursor: grabbing; }
+  .image-missing { color: var(--faint); font-size: 11px; }
+  .selectable { user-select: text; cursor: text; }
+  .selectable::selection, .selectable *::selection { background: color-mix(in srgb, var(--accent) 30%, transparent); }
+  .cut { display: flex; align-items: center; gap: 10px; margin: 14px 0 0; color: var(--faint); font: 10px var(--font-mono); white-space: nowrap; }
+  .cut::before, .cut::after { content: ""; flex: 1; height: 1px; background: repeating-linear-gradient(90deg, var(--line) 0 4px, transparent 4px 8px); }
   .image-meta { display: flex; justify-content: space-between; gap: var(--space-2); margin-top: 10px; color: var(--muted); font: 10px var(--font-mono); }
   .color-block { height: 154px; border: 1px solid var(--line); }
   .color-value { margin-top: 13px; font: 600 26px var(--font-mono); overflow-wrap: anywhere; }
@@ -164,9 +268,7 @@
   .compact .link-host { margin: 0 0 6px; font-size: 20px; }
   .compact .link-url { font-size: 11px; }
   .compact .link-rule { margin: 10px 0; }
-  .compact .image-placeholder { min-height: 82px; padding: 10px; gap: 6px; }
-  .compact .image-placeholder svg { width: 30px; height: 30px; }
-  .compact .image-placeholder span { max-width: none; font-size: 10px; }
+  .compact .image-frame { height: 82px; }
   .compact .image-meta { margin-top: 6px; font-size: 9px; }
   .compact .color-block { height: 52px; }
   .compact .color-value { margin-top: 8px; font-size: 19px; }
@@ -181,6 +283,5 @@
     .preview-text { font-size: 13px; }
     .code-sheet { padding: var(--space-3); font-size: 11px; }
     .link-host { font-size: 22px; }
-    .image-placeholder { min-height: 180px; padding: var(--space-3); }
   }
 </style>

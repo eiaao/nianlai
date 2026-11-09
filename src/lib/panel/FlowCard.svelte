@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { PanelState } from "../state.svelte";
+  import * as ipc from "../ipc";
   import type { HistoryItem } from "../ipc";
   import { colorValue, linkParts, relativeTime, sourceName, typeLabel, visualKind } from "./content";
   import SourceIcon from "./SourceIcon.svelte";
@@ -10,6 +11,14 @@
   const kind = $derived(visualKind(item));
   const link = $derived(linkParts(item));
   const color = $derived(colorValue(item));
+  // 图片卡片用真实缩略图（M2-7），取不到就保留原来的示意图。
+  let thumb = $state<string | null>(null);
+  $effect(() => {
+    const id = item.id;
+    thumb = null;
+    if (kind !== "image") return;
+    void ipc.getImage?.(id, 480)?.then((result) => { if (item.id === id) thumb = result?.url ?? null; }).catch(() => {});
+  });
   const excerpt = $derived(kind === "code"
     ? item.preview.split("\n").slice(0, 8).join("\n")
     : [...(item.preview || "（空文本）")].slice(0, kind === "long" || kind === "rich" ? 126 : 84).join(""));
@@ -28,7 +37,9 @@
   out:leave={{ leaving: panel.leavingId === item.id, motion: panel.motion, collapse: false }}
   disabled={panel.busy || panel.awaitingRelease || !panel.interactive}
   onpointerdown={(event) => event.preventDefault()}
-  onclick={(event) => panel.choose(index, "paste", event)}
+  onclick={(event) => panel.chooseByMouse(index, event)}
+  onmousedown={(event) => { if (event.button === 1) event.preventDefault(); }}
+  onauxclick={(event) => { if (event.button === 1) { event.preventDefault(); panel.chooseByMouse(index, event); } }}
 >
   <span class="card-surface" class:link-surface={kind === "link"} class:color-surface={kind === "color" && !!color} class:image-surface={kind === "image"} style={kind === "color" && color ? `background-color: ${color.value}` : undefined}>
     <span class="card-topline"><span>{item.favorite ? "PIN · " : ""}{typeLabel(item).toUpperCase()}{#if item.file_state}<em class="file-tag" class:unknown={item.file_state.state === "unknown"}>{item.file_state.state === "missing" ? "已失效" : item.file_state.state === "partial" ? `${item.file_state.missing} 项失效` : "未确认"}</em>{/if}</span>{#if item.favorite}<svg class="card-fav" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path d="m10 2.8 2.15 4.35 4.8.7-3.47 3.38.82 4.77L10 13.74 5.7 16l.82-4.77L3.05 7.85l4.8-.7L10 2.8Z"/></svg>{/if}</span>
@@ -43,7 +54,7 @@
       {#if color.rgb}<span class="color-rgb">RGB {color.rgb.join(" / ")}</span>{/if}
     {:else if kind === "image"}
       <span class="image-art" role="img" aria-label={item.preview || "图片记录"}>
-        <svg viewBox="0 0 238 266" fill="none" aria-hidden="true"><rect width="238" height="266" fill="var(--c-card)"/><rect x="24" y="48" width="82" height="154" fill="var(--c-text)" opacity=".78"/><circle cx="166" cy="113" r="48" fill="var(--c-accent)" opacity=".78"/><path d="m88 213 91-119 43 119Z" fill="var(--c-star)" opacity=".72"/><path d="M34 66h48M34 78h35" stroke="var(--c-card)" stroke-width="3"/></svg>
+        {#if thumb}<img src={thumb} alt="" draggable="false" />{:else}<svg viewBox="0 0 238 266" fill="none" aria-hidden="true"><rect width="238" height="266" fill="var(--c-card)"/><rect x="24" y="48" width="82" height="154" fill="var(--c-text)" opacity=".78"/><circle cx="166" cy="113" r="48" fill="var(--c-accent)" opacity=".78"/><path d="m88 213 91-119 43 119Z" fill="var(--c-star)" opacity=".72"/><path d="M34 66h48M34 78h35" stroke="var(--c-card)" stroke-width="3"/></svg>{/if}
       </span>
       <span class="image-caption">{item.preview || "图片记录"}</span>
     {:else if kind === "files"}
@@ -91,6 +102,7 @@
   .color-rgb { position: absolute; left: 19px; bottom: 38px; font: 9px var(--font-mono); }
   .image-art { position: absolute; inset: 0; display: block; }
   .image-art svg { width: 100%; height: 100%; display: block; }
+  .image-art img { width: 100%; height: 100%; display: block; object-fit: cover; }
   .image-caption { position: absolute; z-index: 2; left: 0; right: 0; bottom: 38px; height: 34px; display: flex; align-items: center; padding: 0 14px; overflow: hidden; background: var(--c-raised); color: var(--c-text); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
   .file-symbol { position: absolute; left: 18px; top: 65px; width: 62px; height: 74px; color: var(--c-accent); }
   .file-names { position: absolute; left: 94px; right: 15px; top: 70px; display: grid; font: 12px/2 var(--font-ui); }

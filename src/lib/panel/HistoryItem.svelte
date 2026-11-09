@@ -31,7 +31,9 @@
     tabindex="-1"
     disabled={panel.busy || panel.awaitingRelease || !panel.interactive}
     onpointerdown={(event) => event.preventDefault()}
-    onclick={(event) => panel.choose(index, "paste", event)}
+    onclick={(event) => panel.chooseByMouse(index, event)}
+    onmousedown={(event) => { if (event.button === 1) event.preventDefault(); }}
+    onauxclick={(event) => { if (event.button === 1) { event.preventDefault(); panel.chooseByMouse(index, event); } }}
   >
     <span class="slot" aria-hidden="true">{panel.slotLabel(index) ?? (index < panel.favoriteCount ? "" : "·")}</span>
     <SourceIcon {item} />
@@ -136,9 +138,8 @@
     .command-row .row-main { font-size: 12px; }
     .command-row .row-time { font-size: 8px; }
   }
-  @media (prefers-reduced-motion: reduce) {
-    /* 进度是信息（还要按多久），减少动画时保留；只去掉星标晃动。 */
-    .holding .row-star { animation: none; }
-    .command-row .slot { transition: opacity var(--duration-reduce) linear; transform: none; }
-  }
+  /* 只在设置里选了“跟随系统”且系统开了“减少动画效果”时生效（data-reduce-motion）。 */
+  /* 进度是信息（还要按多久），减少动画时保留；只去掉星标晃动。 */
+  :global(html[data-reduce-motion="true"]) .holding .row-star { animation: none; }
+  :global(html[data-reduce-motion="true"]) .command-row .slot { transition: opacity var(--duration-reduce) linear; transform: none; }
 </style>

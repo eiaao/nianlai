@@ -1,4 +1,4 @@
-use crate::platform::{Caret, FocusResult, ForegroundResult, Result, Target};
+use crate::platform::{Caret, FocusResult, ForegroundResult, PlacementMode, Result, Target};
 use std::{mem::size_of, path::Path};
 use tauri::WebviewWindow;
 use windows::{
@@ -250,22 +250,70 @@ pub fn no_activate(panel: &WebviewWindow, enabled: bool) -> Result<()> {
     }
 }
 
-pub fn show(panel: &WebviewWindow, target: &Target) -> Result<()> {
+/// 摆放方式：光标矩形旁 / 以指针点为零高度锚点 / 工作区居中。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Anchor {
+    Rect { x: i32, top: i32, bottom: i32 },
+    Center,
+}
+
+/// 按呼出位置设置决定锚点，以及用哪个点选屏幕（纯函数，便于测试）。
+/// 鼠标旁、屏幕中央总在指针所在屏；输入光标旁在光标所在屏，找不到光标时退回鼠标旁。
+fn resolve_anchor(
+    mode: PlacementMode,
+    caret: Option<Caret>,
+    pointer: (i32, i32),
+) -> (Anchor, (i32, i32)) {
+    match (mode, caret) {
+        (PlacementMode::Caret, Some(caret)) => (
+            Anchor::Rect {
+                x: caret.left,
+                top: caret.top,
+                bottom: caret.bottom,
+            },
+            (caret.left, caret.top),
+        ),
+        (PlacementMode::Center, _) => (Anchor::Center, pointer),
+        _ => (
+            Anchor::Rect {
+                x: pointer.0,
+                top: pointer.1,
+                bottom: pointer.1,
+            },
+            pointer,
+        ),
+    }
+}
+
+/// 屏幕中央：在工作区内水平垂直居中。
+fn place_center(work: &RECT, width: i32, height: i32) -> Placement {
+    Placement {
+        x: work.left + ((work.right - work.left - width) / 2).max(0),
+        y: work.top + ((work.bottom - work.top - height) / 2).max(0),
+        width,
+        height,
+    }
+}
+
+fn place(work: &RECT, anchor: Anchor, gap: i32, width: i32, height: i32) -> Placement {
+    match anchor {
+        Anchor::Rect { x, top, bottom } => {
+            place_near_anchor(work, x, top, bottom, gap, width, height)
+        }
+        Anchor::Center => place_center(work, width, height),
+    }
+}
+
+pub fn show(panel: &WebviewWindow, target: &Target, mode: PlacementMode) -> Result<()> {
     no_activate(panel, true)?;
     unsafe {
-        // 无光标目标时以光标点为零高度锚点，走同一套下方优先 → 上方 → 贴顶规则。
-        let (anchor_x, anchor_top, anchor_bottom) = match target.caret {
-            Some(caret) => (caret.left, caret.top, caret.bottom),
-            None => {
-                let mut point = POINT::default();
-                GetCursorPos(&mut point).map_err(|e| e.to_string())?;
-                (point.x, point.y, point.y)
-            }
-        };
+        let mut point = POINT::default();
+        GetCursorPos(&mut point).map_err(|e| e.to_string())?;
+        let (anchor, probe) = resolve_anchor(mode, target.caret, (point.x, point.y));
         let monitor = MonitorFromPoint(
             POINT {
-                x: anchor_x,
-                y: anchor_top,
+                x: probe.0,
+                y: probe.1,
             },
             MONITOR_DEFAULTTONEAREST,
         );
@@ -282,15 +330,7 @@ pub fn show(panel: &WebviewWindow, target: &Target) -> Result<()> {
         let (width, height) = panel_size(&work, dpi_x, dpi_y);
         // 保持原整数截断语义（125% 缩放下 gap 与旧行为一致）。
         let gap = PANEL_GAP * (dpi_y as i32) / 96;
-        let placement = place_near_anchor(
-            &work,
-            anchor_x,
-            anchor_top,
-            anchor_bottom,
-            gap,
-            width,
-            height,
-        );
+        let placement = place(&work, anchor, gap, width, height);
         present(
             panel,
             placement.x,
@@ -746,5 +786,106 @@ mod tests {
         assert_eq!(p.y, 1079 - 6 - 520); // 上方刚好放下
         let p = place_near_anchor(&work_area, 800, 1050, 1050, 6, 680, 520);
         assert_eq!(p.y, 1050 - 6 - 520); // 较矮锚点同样放上方
+    }
+
+    #[test]
+    fn mouse_mode_anchors_at_pointer_even_with_caret() {
+        let caret = Some(Caret {
+            left: 100,
+            top: 200,
+            bottom: 216,
+        });
+        let (anchor, probe) = resolve_anchor(PlacementMode::Mouse, caret, (900, 500));
+        assert_eq!(
+            anchor,
+            Anchor::Rect {
+                x: 900,
+                top: 500,
+                bottom: 500
+            }
+        );
+        assert_eq!(probe, (900, 500));
+        let work_area = work(0, 0, 1920, 1080);
+        let p = place(&work_area, anchor, 6, 680, 520);
+        assert_eq!((p.x, p.y), (900, 506));
+    }
+
+    #[test]
+    fn caret_mode_uses_caret_and_falls_back_to_pointer() {
+        let caret = Some(Caret {
+            left: 100,
+            top: 200,
+            bottom: 216,
+        });
+        let (anchor, probe) = resolve_anchor(PlacementMode::Caret, caret, (900, 500));
+        assert_eq!(
+            anchor,
+            Anchor::Rect {
+                x: 100,
+                top: 200,
+                bottom: 216
+            }
+        );
+        assert_eq!(probe, (100, 200));
+        let (anchor, probe) = resolve_anchor(PlacementMode::Caret, None, (900, 500));
+        assert_eq!(
+            anchor,
+            Anchor::Rect {
+                x: 900,
+                top: 500,
+                bottom: 500
+            }
+        );
+        assert_eq!(probe, (900, 500));
+    }
+
+    #[test]
+    fn center_mode_centers_in_pointer_screen_work_area() {
+        let caret = Some(Caret {
+            left: 100,
+            top: 200,
+            bottom: 216,
+        });
+        let (anchor, probe) = resolve_anchor(PlacementMode::Center, caret, (2500, 300));
+        assert_eq!(anchor, Anchor::Center);
+        // 多屏：用指针所在屏（右侧副屏 1920..3840）的工作区，而不是光标所在屏。
+        assert_eq!(probe, (2500, 300));
+        let second = work(1920, 0, 3840, 1040);
+        let p = place(&second, anchor, 6, 680, 520);
+        assert_eq!((p.x, p.y), (1920 + 620, 260));
+        assert!(p.within_work(&second));
+    }
+
+    #[test]
+    fn center_mode_shrunk_panel_stays_inside_small_work_area() {
+        let small = work(0, 0, 500, 400);
+        let p = place_center(&small, 500, 400);
+        assert_eq!((p.x, p.y), (0, 0));
+        assert!(p.within_work(&small));
+        // 负坐标的左侧副屏。
+        let left = work(-1920, 0, 0, 1080);
+        let p = place_center(&left, 680, 520);
+        assert_eq!((p.x, p.y), (-1920 + 620, 280));
+        assert!(p.within_work(&left));
+    }
+
+    #[test]
+    fn mouse_mode_pulls_panel_back_in_at_screen_edges() {
+        let screen = work(0, 0, 1920, 1040);
+        // 右下角：右侧夹紧、下方放不下改放上方。
+        let (anchor, _) = resolve_anchor(PlacementMode::Mouse, None, (1915, 1035));
+        let p = place(&screen, anchor, 6, 680, 520);
+        assert!(p.within_work(&screen), "{p:?}");
+        assert_eq!(p.x, 1920 - 680);
+        assert_eq!(p.y, 1035 - 6 - 520);
+        // 左上角。
+        let (anchor, _) = resolve_anchor(PlacementMode::Mouse, None, (0, 0));
+        let p = place(&screen, anchor, 6, 680, 520);
+        assert!(p.within_work(&screen), "{p:?}");
+        // 副屏左边缘（负坐标）。
+        let left = work(-1920, 0, 0, 1080);
+        let (anchor, _) = resolve_anchor(PlacementMode::Mouse, None, (-5, 540));
+        let p = place(&left, anchor, 6, 680, 520);
+        assert!(p.within_work(&left), "{p:?}");
     }
 }

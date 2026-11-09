@@ -172,6 +172,12 @@ impl Experiments {
         json!({"searchBoxFocus":self.search_box_focus})
     }
 }
+/// 呼出位置每次呼出时现读设置，保存后下次呼出就按新位置。
+fn placement_mode(app: &AppHandle) -> platform::PlacementMode {
+    let store = app.state::<crate::settings::Store>();
+    platform::PlacementMode::from_setting(&store.get().interaction.placement)
+}
+
 // 保留旧开关解析的既有回归测试；运行时改用设置中的布尔值。
 #[cfg(test)]
 fn flag_enabled(value: Option<&str>) -> bool {
@@ -483,6 +489,28 @@ impl Controller {
         )?);
         Ok(())
     }
+    /// 完整预览里选中的文字复制到剪贴板（M2-7）：照“纯文本粘贴”的做法登记回声，不会被当成新复制记进历史。
+    #[cfg(windows)]
+    pub fn copy_selection(&self, id: usize, text: &str) -> Result<(), String> {
+        let content = self.history.get(id)?.ok_or("这条记录已不在历史里")?;
+        let copy = crate::history::content::Content::text(text, platform::hash::sha256)?;
+        self.clipboard
+            .write(
+                platform::clipboard::Record {
+                    id,
+                    fingerprint: content.fingerprint,
+                },
+                copy,
+                0,
+                false,
+            )
+            .map(drop)
+            .map_err(|error| error.to_string())
+    }
+    #[cfg(not(windows))]
+    pub fn copy_selection(&self, _: usize, _: &str) -> Result<(), String> {
+        Err("unsupported".into())
+    }
     pub fn history_snapshot(&self) -> Snapshot {
         self.history.snapshot()
     }
@@ -673,7 +701,7 @@ impl Panel {
             window::show_auto(&self.window)?;
         } else {
             self.mode = Mode::Quick;
-            window::show(&self.window, &self.target)?;
+            window::show(&self.window, &self.target, placement_mode(app))?;
         }
         let shown = Instant::now();
         self.shown = Some(shown);
@@ -774,7 +802,7 @@ impl Panel {
             self.session,
             self.memory.clone(),
         )?;
-        window::show(&self.window, &self.target)?;
+        window::show(&self.window, &self.target, placement_mode(app))?;
         self.shown_event(app);
         self.log(
             logger,
@@ -841,6 +869,7 @@ impl Panel {
         Ok(())
     }
     fn hide(&mut self, logger: &Logger) -> platform::Result<bool> {
+        platform::hook::set_preview_keys(false);
         if self.mode == Mode::Auto {
             self.hide_auto(logger, None)?;
             return Ok(false);

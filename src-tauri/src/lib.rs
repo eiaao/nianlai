@@ -252,6 +252,36 @@ async fn clean_leftovers() -> Result<history::storage::Files, String> {
 async fn compact_history() -> Result<u64, String> {
     blocking(|shared| shared.compact()).await
 }
+/// 完整预览的全文（M2-7）：`limit` 为空表示全部。
+#[tauri::command]
+async fn get_full_text(
+    id: usize,
+    limit: Option<usize>,
+) -> Result<Option<history::preview::TextChunk>, String> {
+    blocking(move |shared| shared.full_text(id, limit)).await
+}
+/// 预览用的图片：`max` 为长边上限，空表示原尺寸。
+#[tauri::command]
+async fn get_image(
+    id: usize,
+    max: Option<u32>,
+) -> Result<Option<history::preview::ImageView>, String> {
+    blocking(move |shared| shared.image(id, max)).await
+}
+/// 完整预览里选中的文字复制到剪贴板。
+#[tauri::command]
+async fn copy_selection(app: AppHandle, id: usize, text: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<Controller>().copy_selection(id, &text)
+    })
+    .await
+    .map_err(|_| "复制没有完成，请重试".to_owned())?
+}
+/// 完整预览开着时让钩子把 Z、Ctrl+C 交给面板。
+#[tauri::command]
+fn set_preview_keys(open: bool) {
+    platform::hook::set_preview_keys(open);
+}
 #[tauri::command]
 fn frontend_ready(app: AppHandle) -> Result<(), String> {
     panel::dispatch(&app, Action::FrontendReady)
@@ -380,6 +410,10 @@ pub fn run() {
             clean_exports,
             clean_leftovers,
             compact_history,
+            get_full_text,
+            get_image,
+            copy_selection,
+            set_preview_keys,
             frontend_ready,
             start_search,
             search_ready,

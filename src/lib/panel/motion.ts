@@ -1,4 +1,4 @@
-import type { MotionPreference } from "../preferences";
+import { reducedMotion, type MotionPreference } from "../preferences";
 import { COLLAPSE_AFTER_MS, shatter } from "./deleteEffect";
 
 // v7 的临界阻尼弹簧：积分不超过 1/120s，每帧只写 transform / opacity。
@@ -9,8 +9,6 @@ export class SpringValue {
   private frame = 0;
   private last = 0;
   private ratio = 1;
-  private readonly reduced = matchMedia("(prefers-reduced-motion: reduce)");
-  private readonly onReduced = () => this.reset(this.target);
 
   constructor(
     initial: number,
@@ -19,14 +17,13 @@ export class SpringValue {
     private readonly response = 0.3,
   ) {
     this.value = this.target = initial;
-    this.reduced.addEventListener("change", this.onReduced);
     this.render(initial);
   }
 
   to(target: number, ratio = 1) {
     this.target = target;
     this.ratio = ratio;
-    if (this.motion() === "none" || this.reduced.matches) {
+    if (this.motion() === "none" || reducedMotion()) {
       this.reset(target);
       return;
     }
@@ -57,7 +54,6 @@ export class SpringValue {
 
   destroy() {
     this.cancel();
-    this.reduced.removeEventListener("change", this.onReduced);
   }
 
   private tick(now: number) {
@@ -91,7 +87,7 @@ export function leave(node: HTMLElement, { leaving, motion, collapse }: { leavin
   // 旧标题留在原处，收起结束后两者在同一位置交接，不跳动。
   node.removeAttribute("data-history-index");
   node.classList.add("leaving");
-  if (motion === "none" || matchMedia("(prefers-reduced-motion: reduce)").matches) {
+  if (motion === "none" || reducedMotion()) {
     return { duration: 120, css: (t: number) => `opacity:${t}` };
   }
   shatter(node, node.closest<HTMLElement>(".panel-shell") ?? document.body);

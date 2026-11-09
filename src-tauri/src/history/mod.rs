@@ -1,6 +1,7 @@
 pub mod content;
 pub mod files;
 mod memory;
+pub mod preview;
 pub mod snapshots;
 pub mod storage;
 
@@ -1074,6 +1075,83 @@ mod startup_tests {
             assert!(shared.undo_delete().unwrap().is_none());
             assert!(shared.get(kept).unwrap().is_some());
         }
+    }
+
+    #[test]
+    fn full_text_comes_in_chunks_and_images_render_with_original_size() {
+        let directory = Directory::new();
+        let directories = directories(&directory);
+        let logger = Logger::with_settings(&directories, 20).unwrap();
+        let history = History::new(nianlai_store::hash::sha256, logger);
+        history.initialize();
+        let shared = &history.0;
+        let now = Instant::now();
+        let save = |content: Arc<Content>, sequence: u32| {
+            shared
+                .ingest(
+                    content,
+                    CopyEvent {
+                        time_ms: now_ms(),
+                        sequence,
+                        source_process: "preview-test.exe".into(),
+                        source_path: String::new(),
+                        owner_process: "preview-test.exe".into(),
+                        owner_pid: 1,
+                        observed: now,
+                    },
+                    false,
+                    now,
+                )
+                .unwrap()
+                .record_id
+                .unwrap()
+        };
+        // 3,750 字的长文（含 Emoji，按字符计）：完整预览先给前 2,000 字，再给全部。
+        let long: String = "长文😀".repeat(1250);
+        let text = save(
+            Content::text(&long, nianlai_store::hash::sha256).unwrap(),
+            1,
+        );
+        let first = shared.full_text(text, Some(2000)).unwrap().unwrap();
+        assert_eq!((first.shown, first.total), (2000, 3750));
+        assert_eq!(first.text.chars().count(), 2000);
+        let all = shared.full_text(text, None).unwrap().unwrap();
+        assert_eq!((all.shown, all.total), (3750, 3750));
+        assert_eq!(all.text, long);
+        assert!(
+            shared.image(text, Some(100)).unwrap().is_none(),
+            "文字不是图片"
+        );
+
+        // 300×100 的 24 位图：缩略图也带回原图尺寸。
+        let mut dib = vec![0u8; 40];
+        dib[..4].copy_from_slice(&40u32.to_le_bytes());
+        dib[4..8].copy_from_slice(&300i32.to_le_bytes());
+        dib[8..12].copy_from_slice(&100i32.to_le_bytes());
+        dib[12..14].copy_from_slice(&1u16.to_le_bytes());
+        dib[14..16].copy_from_slice(&24u16.to_le_bytes());
+        dib.extend(std::iter::repeat_n(120u8, 900 * 100));
+        let picture = save(
+            Content::new(
+                std::collections::BTreeMap::from([(
+                    content::DIB.to_owned(),
+                    content::Data::Bytes(dib.into()),
+                )]),
+                nianlai_store::hash::sha256,
+            )
+            .unwrap(),
+            2,
+        );
+        let thumb = shared.image(picture, Some(120)).unwrap().unwrap();
+        assert_eq!((thumb.width, thumb.height), (300, 100));
+        assert!(thumb.url.starts_with("data:image/png;base64,"));
+        let original = shared.image(picture, None).unwrap().unwrap();
+        assert!(original.url.len() > thumb.url.len(), "原尺寸比缩略图大");
+        assert!(
+            shared.full_text(picture, Some(10)).unwrap().is_none(),
+            "图片没有文字"
+        );
+        assert!(shared.image(9999, None).unwrap().is_none());
     }
 
     #[test]

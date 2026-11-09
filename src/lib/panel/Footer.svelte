@@ -18,7 +18,9 @@
     <div class="normal-footer">
       <!-- 平时左侧留空：记录正常、粘贴成功都不需要说；记录出问题时顶部横幅会出现。 -->
       <span class="record-status">
-        {#if panel.undo}
+        {#if panel.notice}
+          <span class="undo-chip notice" role="status" aria-live="polite"><span class="undo-text">{panel.notice}</span></span>
+        {:else if panel.undo}
           {#key panel.undo.startedAt}
             <!-- 删除后的撤销入口：页脚左侧的浅色小标签，倒计时条走完自动消失（与后端撤销窗口对齐）。 -->
             <span class="undo-chip" role="status" aria-live="polite">
@@ -92,10 +94,9 @@
     .key-help { gap: 7px; font-size: 9px; }
     .key-help span:nth-child(2) { display: none; }
   }
-  @media (prefers-reduced-motion: reduce) {
-    .result-footer { animation-duration: var(--duration-reduce); }
-    .result-line.animated { display: none; }
-    /* 倒计时条是信息（还剩多久能撤销），减少动画时保留；只缩短出现动画。 */
-    .undo-chip { animation-duration: var(--duration-reduce); }
-  }
+  /* 只在设置里选了“跟随系统”且系统开了“减少动画效果”时生效（data-reduce-motion）。 */
+  :global(html[data-reduce-motion="true"]) .result-footer { animation-duration: var(--duration-reduce); }
+  :global(html[data-reduce-motion="true"]) .result-line.animated { display: none; }
+  /* 倒计时条是信息（还剩多久能撤销），减少动画时保留；只缩短出现动画。 */
+  :global(html[data-reduce-motion="true"]) .undo-chip { animation-duration: var(--duration-reduce); }
 </style>

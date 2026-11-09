@@ -41,5 +41,6 @@
     .preview-head { padding: 0 12px; }
     .preview-body { padding-left: 13px; padding-right: 13px; }
   }
-  @media (prefers-reduced-motion: reduce) { .preview-drawer { animation-duration: var(--duration-reduce); } }
+  /* 只在设置里选了“跟随系统”且系统开了“减少动画效果”时生效（data-reduce-motion）。 */
+  :global(html[data-reduce-motion="true"]) .preview-drawer { animation-duration: var(--duration-reduce); }
 </style>
