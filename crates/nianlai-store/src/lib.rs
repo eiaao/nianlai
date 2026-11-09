@@ -12,7 +12,7 @@ pub use snapshot::{
     Reason, Retention, SNAPSHOT_KEEP, SnapshotInfo, SnapshotReport, check, list_snapshots, restore,
     snapshot, snapshot_due, snapshot_file, snapshot_reason, snapshot_with, validate_snapshot,
 };
-pub use write::Store;
+pub use write::{Store, clean_note, clean_title};
 
 use content::{Fingerprint, Hash};
 use rusqlite::{Connection, OpenFlags};
@@ -106,6 +106,9 @@ pub struct Metadata {
     // 来源应用（A06）：display_name 与图标文件名（icons 目录内的相对名，调用方拼绝对路径）。
     pub source_name: Option<String>,
     pub icon_file: Option<String>,
+    // 收藏的标题与备注（E03/E04）；不是收藏或没写时为空串。
+    pub title: String,
+    pub note: String,
     #[serde(skip)]
     pub sort_order: i64,
     #[serde(skip)]

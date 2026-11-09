@@ -38,6 +38,7 @@ pub struct Settings {
     pub capture: Capture,
     pub snapshots: Snapshots,
     pub interaction: Interaction,
+    pub history: History,
     #[serde(flatten)]
     unknown: Unknown,
 }
@@ -54,6 +55,7 @@ impl Default for Settings {
             capture: Capture::default(),
             snapshots: Snapshots::default(),
             interaction: Interaction::default(),
+            history: History::default(),
             unknown: Unknown::new(),
         }
     }
@@ -119,6 +121,23 @@ impl Default for Snapshots {
     fn default() -> Self {
         Self {
             max_mb: SNAPSHOT_MAX_MB,
+            unknown: Unknown::new(),
+        }
+    }
+}
+
+/// 历史（B10）：reuse_to_top 为真时，粘贴旧条目会把它移到列表最前；为假则保持原位。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct History {
+    pub reuse_to_top: bool,
+    #[serde(flatten)]
+    unknown: Unknown,
+}
+
+impl Default for History {
+    fn default() -> Self {
+        Self {
+            reuse_to_top: true,
             unknown: Unknown::new(),
         }
     }
@@ -405,6 +424,14 @@ fn validate(mut value: Value) -> (Settings, Vec<Issue>) {
         "interaction.middle_click",
         json!("text"),
         valid_click,
+        &mut issues,
+    );
+    field(
+        section(object, "history", &mut issues),
+        "reuse_to_top",
+        "history.reuse_to_top",
+        json!(true),
+        Value::is_boolean,
         &mut issues,
     );
     // 已逐项规范所有已知字段；未知字段由各层 flatten 原样接收。
@@ -729,6 +756,21 @@ pub(crate) mod tests {
         // 只改一项时，其余字段保持原值（合并更新）。
         let (settings, _) = validate(json!({"interaction":{"click":"copy"}}));
         assert_eq!(settings.interaction.middle_click, "text");
+    }
+
+    #[test]
+    fn history_defaults_and_validation() {
+        let (settings, issues) = validate(json!({}));
+        assert!(issues.is_empty());
+        assert!(settings.history.reuse_to_top);
+        let (settings, issues) = validate(json!({"history":{"reuse_to_top":false}}));
+        assert!(issues.is_empty());
+        assert!(!settings.history.reuse_to_top);
+        for bad in [json!("no"), json!(0), json!(null)] {
+            let (settings, issues) = validate(json!({"history":{"reuse_to_top":bad}}));
+            assert_eq!(issues.len(), 1);
+            assert!(settings.history.reuse_to_top);
+        }
     }
 
     #[test]

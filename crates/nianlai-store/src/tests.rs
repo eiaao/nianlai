@@ -984,3 +984,132 @@ fn storage_usage_file_lists_images_bulk_trash_and_compact() {
     );
     assert_eq!(store.cache().total, 3);
 }
+
+// E03/E04：重排只在未删除收藏现有的槽位里置换；回收站里的收藏保持原位；出错不改动。
+#[test]
+fn reorder_favorites_permutes_live_slots_and_rejects_bad_input() {
+    let temp = Temp::new();
+    let store = temp.store();
+    let at = Instant::now();
+    for i in 1..=4 {
+        ingest(&store, text(&format!("内容{i}")), i, at);
+    }
+    for id in [1, 2, 3, 4] {
+        store.set_favorite(id, true).unwrap().unwrap();
+    }
+    // 2 进回收站，占着槽位 2。
+    assert!(store.delete(2).unwrap());
+    let positions = |store: &Store| {
+        let tx = store.reader().unwrap();
+        tx.favorites()
+            .unwrap()
+            .into_iter()
+            .map(|item| (item.id, item.favorite_position.unwrap()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(positions(&store), vec![(1, 1), (3, 3), (4, 4)]);
+    let items = store.reorder_favorites(&[4, 1, 3]).unwrap();
+    assert_eq!(
+        items
+            .iter()
+            .map(|i| (i.id, i.favorite_position.unwrap()))
+            .collect::<Vec<_>>(),
+        vec![(4, 1), (1, 3), (3, 4)]
+    );
+    assert_eq!(positions(&store), vec![(4, 1), (1, 3), (3, 4)]);
+    // 恢复后 2 仍在槽位 2。
+    store.restore(2).unwrap();
+    assert_eq!(
+        store
+            .reader()
+            .unwrap()
+            .favorites()
+            .unwrap()
+            .iter()
+            .map(|i| i.id)
+            .collect::<Vec<_>>(),
+        vec![4, 2, 1, 3]
+    );
+    // 缓存里的收藏顺序也同步。
+    assert!(
+        store
+            .cache()
+            .items
+            .iter()
+            .any(|i| i.id == 4 && i.favorite_position == Some(1))
+    );
+    // 错误：重复、非收藏、缺项、多项；都不改变任何东西。
+    let before = positions(&store);
+    for bad in [
+        vec![4, 4, 1, 3],
+        vec![4, 2, 1, 99],
+        vec![4, 2, 1],
+        vec![4, 2, 1, 3, 3],
+        vec![],
+    ] {
+        assert!(store.reorder_favorites(&bad).is_err(), "{bad:?}");
+        assert_eq!(positions(&store), before);
+    }
+    check(&temp.0).unwrap();
+}
+
+// E03/E04：标题与备注的清理、上限、非收藏报错，以及 C09 搜索覆盖标题 / 备注。
+#[test]
+fn favorite_labels_are_cleaned_limited_and_searchable() {
+    let temp = Temp::new();
+    let store = temp.store();
+    let at = Instant::now();
+    ingest(&store, text("alpha 正文"), 1, at);
+    ingest(&store, text("beta 正文"), 2, at);
+    ingest(&store, text("gamma 正文"), 3, at);
+    store.set_favorite(1, true).unwrap().unwrap();
+    store.set_favorite(2, true).unwrap().unwrap();
+    // 不是收藏：报错。
+    assert!(store.set_favorite_label(3, "x", "y").is_err());
+    let item = store
+        .set_favorite_label(1, "  第一行\r\n第二行  ", "\n 备注一\n备注二 \n")
+        .unwrap();
+    assert_eq!(item.title, "第一行  第二行");
+    assert_eq!(item.note, "备注一\n备注二");
+    // 缓存同步，且 favorites() 带出标题与备注。
+    let cached = store.cache().items.iter().find(|i| i.id == 1).cloned();
+    assert_eq!(cached.unwrap().title, "第一行  第二行");
+    assert_eq!(
+        store.reader().unwrap().favorites().unwrap()[0].note,
+        "备注一\n备注二"
+    );
+    // 上限按字符数。
+    let item = store
+        .set_favorite_label(1, &"题".repeat(300), &"注".repeat(3000))
+        .unwrap();
+    assert_eq!(item.title.chars().count(), 200);
+    assert_eq!(item.note.chars().count(), 2000);
+    // 搜索：标题 / 备注命中，且大小写不敏感。
+    store
+        .set_favorite_label(1, "Invoice 发票", "needle 备忘")
+        .unwrap();
+    store.set_favorite_label(2, "", "").unwrap();
+    let reader = store.reader().unwrap();
+    let ids = |q: &str| {
+        reader
+            .search(q)
+            .unwrap()
+            .items
+            .into_iter()
+            .map(|i| i.id)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(ids("invoice"), vec![1]); // 长词，只在标题里
+    assert_eq!(ids("NEEDLE"), vec![1]); // 长词，只在备注里
+    assert_eq!(ids("发票"), vec![1]); // 短词
+    assert_eq!(ids("备忘 alpha"), vec![1]); // 短词（标题）+ 长词（正文）
+    assert_eq!(ids("invoice 正文"), vec![1]); // 标题命中 + 正文命中
+    assert_eq!(ids("invoice beta"), Vec::<usize>::new());
+    // 取消收藏后旧标签不再命中。
+    store.set_favorite(1, false).unwrap().unwrap();
+    let reader = store.reader().unwrap();
+    assert!(reader.search("invoice").unwrap().items.is_empty());
+    assert!(reader.search("发票").unwrap().items.is_empty());
+    assert_eq!(reader.search("alpha").unwrap().items.len(), 1);
+    check(&temp.0).unwrap();
+}

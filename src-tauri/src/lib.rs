@@ -153,6 +153,19 @@ fn set_favorite(id: usize, favorite: bool) -> Result<Option<history::Preview>, S
         .ok_or_else(|| "历史服务未就绪".to_owned())?
         .set_favorite(id, favorite)
 }
+// E03/E04 收藏整理：ids 是界面当前展示的全部收藏的新顺序。
+#[tauri::command]
+fn reorder_favorites(ids: Vec<usize>) -> Result<Vec<history::Preview>, String> {
+    history::active()
+        .ok_or_else(|| "历史服务未就绪".to_owned())?
+        .reorder_favorites(&ids)
+}
+#[tauri::command]
+fn set_favorite_label(id: usize, title: String, note: String) -> Result<history::Preview, String> {
+    history::active()
+        .ok_or_else(|| "历史服务未就绪".to_owned())?
+        .set_favorite_label(id, &title, &note)
+}
 #[tauri::command]
 fn delete_item(id: usize) -> Result<bool, String> {
     history::active()
@@ -394,6 +407,8 @@ pub fn run() {
             search_history,
             get_favorites,
             set_favorite,
+            reorder_favorites,
+            set_favorite_label,
             delete_item,
             undo_delete,
             get_trash,
@@ -459,6 +474,7 @@ pub fn run() {
             let plan = autocycle::Plan::from_env(&logger);
             capture::rules::gate().apply(&resolved.settings.capture);
             history::snapshots::set_limit(resolved.settings.snapshots.max_mb);
+            history::set_reuse_to_top(resolved.settings.history.reuse_to_top);
             let resuspend = resuspend::from_settings(&resolved.settings.memory, &logger);
             let experiments =
                 panel::Experiments::from_settings(&resolved.settings.experiments, &logger);

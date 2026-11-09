@@ -12,6 +12,9 @@ export type HistoryItem = {
   source_name: string | null; source_icon: string | null;
   // M2-3：文件条目的失效检查结论；文件都在时没有这个字段。
   file_state?: FileMark;
+  // M2-6：收藏的标题和备注（E04）；没有时不带。
+  title?: string;
+  note?: string;
 };
 export type FileMark = { state: "missing" | "partial" | "unknown"; missing: number; unknown: number; total: number; checked_ms: number };
 export type PathCheck = { path: string; state: "present" | "missing" | "unknown" };
@@ -39,6 +42,7 @@ export type AppSettings = {
   capture?: Partial<CaptureSettings>;
   snapshots?: { max_mb?: number };
   interaction?: Partial<InteractionSettings>;
+  history?: { reuse_to_top?: boolean };
   [key: string]: unknown;
 };
 export type CaptureSettings = {
@@ -98,6 +102,9 @@ export const getHistory = () => invoke<HistorySnapshot>("get_history");
 export const searchHistory = (query: string, requestId: number) => invoke<SearchReply>("search_history", { query, requestId });
 export const getFavorites = () => invoke<HistoryItem[]>("get_favorites");
 export const setFavorite = (id: number, favorite: boolean) => invoke<HistoryItem | null>("set_favorite", { id, favorite });
+// M2-6 整理：ids 是收藏区（不含回收站里的）想要的完整顺序；返回新的收藏列表。
+export const reorderFavorites = (ids: number[]) => invoke<HistoryItem[]>("reorder_favorites", { ids });
+export const setFavoriteLabel = (id: number, title: string, note: string) => invoke<HistoryItem>("set_favorite_label", { id, title, note });
 // Delete 先挂起、撤销窗口（后端 UNDO_WINDOW，4 秒）后才真删；收藏的返回 false。
 export const deleteItem = (id: number) => invoke<boolean>("delete_item", { id });
 export const undoDelete = () => invoke<HistoryItem | null>("undo_delete");

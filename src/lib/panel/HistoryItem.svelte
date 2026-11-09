@@ -13,6 +13,9 @@
   const hold = $derived(panel.holdDelete?.id === item.id ? panel.holdDelete : null);
   // M2-3：文件失效标记。
   const mark = $derived(item.file_state ?? null);
+  // M2-6：收藏有标题时第一行显示标题，原内容退到第二行。
+  const titled = $derived(item.favorite && !!item.title);
+  const originalLine = $derived(kind === "image" || kind === "files" ? typeLabel(item) : (item.preview || "（空文本）").replace(/\s+/g, " ").trim());
 </script>
 
 <li class:history-row={layout === "a"} class:command-row={layout === "b"} class:selected class:holding={hold?.phase === "holding"} class:file-missing={mark?.state === "missing"} data-history-index={index}
@@ -38,9 +41,11 @@
     <span class="slot" aria-hidden="true">{panel.slotLabel(index) ?? (index < panel.favoriteCount ? "" : "·")}</span>
     <SourceIcon {item} />
     <span class="row-copy">
-      <span class="row-main" class:code={kind === "code"}>
+      <span class="row-main" class:code={kind === "code" && !titled}>
         {#if mark?.state === "missing"}<span class="file-tag gone">已失效</span>{:else if mark?.state === "unknown"}<span class="file-tag unknown">未确认</span>{/if}
-        {#if kind === "link" && link}
+        {#if titled}
+          <span class="label-title">{#each panel.highlights(item.title ?? "") as part}{#if part.hit}<mark>{part.text}</mark>{:else}{part.text}{/if}{/each}</span>
+        {:else if kind === "link" && link}
           <span class="domain">{#each panel.highlights(link.host) as part}{#if part.hit}<mark>{part.text}</mark>{:else}{part.text}{/if}{/each}</span><span>{#each panel.highlights(link.url.href.slice(link.url.origin.length)) as part}{#if part.hit}<mark>{part.text}</mark>{:else}{part.text}{/if}{/each}</span>
         {:else}
           {#each panel.highlights(item.preview || "（空文本）") as part}{#if part.hit}<mark>{part.text}</mark>{:else}{part.text}{/if}{/each}
@@ -53,6 +58,8 @@
           <span class="row-sub">原文件已移走或删除</span>
         {:else if mark?.state === "unknown"}
           <span class="row-sub">网络位置暂时连不上</span>
+        {:else if titled}
+          <span class="row-sub original">{#each panel.highlights(originalLine) as part}{#if part.hit}<mark>{part.text}</mark>{:else}{part.text}{/if}{/each}</span>
         {:else}
         <span class="row-sub">{#if mark?.state === "partial"}<span class="file-tag gone">{mark.missing} 项失效</span>{/if}{sourceName(item)} · {typeLabel(item)}{item.copy_count > 1 ? ` · ${item.copy_count} 次` : ""}{item.partial ? " · 部分格式" : ""}</span>
         {/if}
@@ -88,6 +95,8 @@
   .row-main { overflow: hidden; color: var(--text); font-size: 12px; font-weight: 550; line-height: 1.25; text-overflow: ellipsis; white-space: nowrap; }
   .row-main.code { font-family: var(--font-mono); font-size: 11px; }
   .row-main .domain { font-weight: 650; }
+  /* 有标题的收藏：第二行是原内容，比来源说明稍醒目。 */
+  .row-sub.original { color: var(--muted); font-size: 10px; }
   .row-sub { overflow: hidden; color: var(--faint); font: 9px/1.25 var(--font-ui); text-overflow: ellipsis; white-space: nowrap; }
   .selected .row-sub, .selected .row-time { color: var(--muted); }
   .row-star { width: 20px; height: 24px; display: grid; place-items: center; padding: 0; border: 0; background: transparent; color: var(--star); opacity: 0; }

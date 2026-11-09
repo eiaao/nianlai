@@ -6,6 +6,7 @@
   import CapturePage from "./CapturePage.svelte";
   import StoragePage from "./StoragePage.svelte";
   import InteractionPage from "./InteractionPage.svelte";
+  import OrganizePage from "./OrganizePage.svelte";
   import type { AppSettings, CaptureSettings, InteractionSettings, SettingsUpdate } from "../lib/ipc";
   import {
     applyPreferences, DEFAULT_PREFERENCES, normalizePreferences,
@@ -16,6 +17,7 @@
     { id: "general", label: "通用" },
     { id: "record", label: "隐私与记录" },
     { id: "storage", label: "数据与备份" },
+    { id: "organize", label: "整理" },
     { id: "interaction", label: "交互" },
     { id: "about", label: "关于" },
   ];
@@ -47,6 +49,7 @@
   let capture = $state<CaptureSettings | null>(null);
   let snapshotMaxMb = $state(1024);
   let interaction = $state<InteractionSettings | null>(null);
+  let reuseToTop = $state(true);
   let loading = $state(true);
   let saving = $state(false);
   let status = $state("正在读取设置…");
@@ -67,6 +70,7 @@
     capture = (settingsValue.capture as CaptureSettings | undefined) ?? null;
     snapshotMaxMb = settingsValue.snapshots?.max_mb ?? 1024;
     interaction = (settingsValue.interaction as InteractionSettings | undefined) ?? null;
+    reuseToTop = settingsValue.history?.reuse_to_top !== false;
     preferences = normalizePreferences(settingsValue);
     applyPreferences(preferences);
   }
@@ -152,6 +156,8 @@
         <CapturePage {capture} disabled={loading || saving} onsave={save} />
       {:else if page === "storage"}
         <StoragePage maxMb={snapshotMaxMb} disabled={loading || saving} onsave={save} bind:view={storageView} />
+      {:else if page === "organize"}
+        <OrganizePage {reuseToTop} disabled={loading || saving} onsave={save} />
       {:else if page === "interaction"}
         <InteractionPage {interaction} disabled={loading || saving} onsave={save} />
       {:else}
@@ -202,5 +208,4 @@
     .setting { align-items: flex-start; flex-direction: column; gap: 9px; }
     select { width: 100%; }
   }
-  .switch { width: 34px; height: 18px; flex: none; accent-color: var(--settings-accent); }
 </style>
