@@ -167,6 +167,15 @@ pub mod paste {
         serde_json::json!({"paste_result":null,"clipboard_written":false,"reason":"unsupported"})
     }
 }
+pub mod disk {
+    pub fn is_remote(path: &str) -> bool {
+        path.starts_with("\\\\") || path.starts_with("//")
+    }
+    pub fn free_bytes(_directory: &std::path::Path) -> Option<u64> {
+        None
+    }
+}
+
 pub mod image {
     pub struct Saved {
         pub path: std::path::PathBuf,
@@ -179,6 +188,12 @@ pub mod image {
         _: &crate::history::content::Content,
         _: &std::path::Path,
     ) -> Result<Saved, &'static str> {
+        Err("unsupported")
+    }
+    pub fn thumbnail(
+        _: &crate::history::content::Content,
+        _: u32,
+    ) -> Result<Vec<u8>, &'static str> {
         Err("unsupported")
     }
 }

@@ -27,6 +27,11 @@
               <i class="undo-progress" style={`animation-duration: ${panel.undo.duration}ms`}></i>
             </span>
           {/key}
+        {:else if panel.interactive && panel.interaction !== "passive"}
+          <!-- 回收站入口：列表和管理都在设置里，面板只给一个入口（M2-D）。 -->
+          <button class="trash-link" type="button" tabindex="-1" title="在设置里查看回收站" onpointerdown={(event) => event.preventDefault()} onclick={panel.openTrash}>
+            <svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M4 5.5h12M8 5.5V3.8h4v1.7M5.6 5.5l.8 10.7h7.2l.8-10.7M8.5 8.5v5M11.5 8.5v5" stroke="currentColor" stroke-width="1.2"/></svg>回收站
+          </button>
         {/if}
       </span>
       <div class="key-help">
@@ -69,6 +74,9 @@
   .result-line.animated { animation-name: countdown; animation-timing-function: linear; animation-fill-mode: forwards; }
   button { flex: none; margin-left: auto; padding: 3px 0 3px 8px; border: 0; background: transparent; color: inherit; text-decoration: underline; font-size: 10px; }
   .message { max-height: 32px; margin: 0 0 6px; overflow: auto; color: var(--state-critical); font-size: 10px; line-height: 1.5; }
+  .trash-link { display: inline-flex; align-items: center; gap: 4px; margin: 0; padding: 2px 4px; color: var(--faint); text-decoration: none; }
+  .trash-link:hover { color: var(--text); }
+  .trash-link svg { width: 13px; height: 13px; }
   .undo-chip { position: relative; min-width: 0; display: inline-flex; align-items: center; gap: 6px; padding: 3px 8px 4px; overflow: hidden; border-radius: var(--radius-sm); background: color-mix(in srgb, var(--accent) 13%, transparent); color: var(--accent); animation: appear var(--fade-duration) linear; }
   .undo-text { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
   .undo-label { color: var(--muted); }

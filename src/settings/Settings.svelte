@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { listen } from "@tauri-apps/api/event";
   import * as ipc from "../lib/ipc";
   import HotkeyEditor from "./HotkeyEditor.svelte";
   import CapturePage from "./CapturePage.svelte";
@@ -12,12 +13,34 @@
 
   const pages = [
     { id: "general", label: "通用" },
-    { id: "record", label: "记录" },
-    { id: "storage", label: "历史与存储" },
+    { id: "record", label: "隐私与记录" },
+    { id: "storage", label: "数据与备份" },
     { id: "interaction", label: "交互" },
     { id: "about", label: "关于" },
   ];
   let page = $state("general");
+  // “数据与备份”的子页面；面板里的回收站入口打开设置时带 #trash 直接跳过来。
+  let storageView = $state<"main" | "trash" | "snapshots" | "images">("main");
+
+  function navigate(target: string) {
+    if (target === "trash" || target === "snapshots" || target === "images") {
+      page = "storage";
+      storageView = target;
+    } else if (pages.some((entry) => entry.id === target)) {
+      page = target;
+      storageView = "main";
+    }
+  }
+
+  onMount(() => {
+    navigate(decodeURIComponent(location.hash.slice(1)));
+    let stop: (() => void) | undefined;
+    let disposed = false;
+    void listen<string>("settings:navigate", (event) => navigate(event.payload)).then((unlisten) => {
+      if (disposed) unlisten(); else stop = unlisten;
+    });
+    return () => { disposed = true; stop?.(); };
+  });
   let preferences = $state<Preferences>({ ...DEFAULT_PREFERENCES });
   let hotkey = $state("Ctrl+`");
   let capture = $state<CaptureSettings | null>(null);
@@ -81,7 +104,7 @@
   <nav class="nav" aria-label="设置分区">
     <div class="nav-brand"><span class="nav-mark">N</span><span><strong>拈来</strong><small>取历史之一缕，付当前之一键</small><em>SCOPE / SETTINGS</em></span></div>
     {#each pages as entry}
-      <button type="button" class:active={page === entry.id} aria-current={page === entry.id ? "page" : undefined} onclick={() => { page = entry.id; }}>{entry.label}</button>
+      <button type="button" class:active={page === entry.id} aria-current={page === entry.id ? "page" : undefined} onclick={() => navigate(entry.id)}>{entry.label}</button>
     {/each}
     <div class="nav-foot">本地设置<br>外观自动保存 · 快捷键确认保存</div>
   </nav>
@@ -127,7 +150,7 @@
       {:else if page === "record"}
         <CapturePage {capture} disabled={loading || saving} onsave={save} />
       {:else if page === "storage"}
-        <StoragePage maxMb={snapshotMaxMb} disabled={loading || saving} onsave={save} />
+        <StoragePage maxMb={snapshotMaxMb} disabled={loading || saving} onsave={save} bind:view={storageView} />
       {:else}
         <section class="page placeholder">
           <h2>{pages.find((entry) => entry.id === page)?.label}</h2>

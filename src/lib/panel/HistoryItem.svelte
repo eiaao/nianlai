@@ -11,9 +11,11 @@
   const kind = $derived(visualKind(item));
   const link = $derived(linkParts(item));
   const hold = $derived(panel.holdDelete?.id === item.id ? panel.holdDelete : null);
+  // M2-3：文件失效标记。
+  const mark = $derived(item.file_state ?? null);
 </script>
 
-<li class:history-row={layout === "a"} class:command-row={layout === "b"} class:selected class:holding={hold?.phase === "holding"} data-history-index={index}
+<li class:history-row={layout === "a"} class:command-row={layout === "b"} class:selected class:holding={hold?.phase === "holding"} class:file-missing={mark?.state === "missing"} data-history-index={index}
   out:leave={{ leaving: panel.leavingId === item.id, motion: panel.motion, collapse: true }}
   onoutroend={() => { panel.layoutRevision += 1; }}>
   {#if hold?.phase === "holding"}
@@ -35,6 +37,7 @@
     <SourceIcon {item} />
     <span class="row-copy">
       <span class="row-main" class:code={kind === "code"}>
+        {#if mark?.state === "missing"}<span class="file-tag gone">已失效</span>{:else if mark?.state === "unknown"}<span class="file-tag unknown">未确认</span>{/if}
         {#if kind === "link" && link}
           <span class="domain">{#each panel.highlights(link.host) as part}{#if part.hit}<mark>{part.text}</mark>{:else}{part.text}{/if}{/each}</span><span>{#each panel.highlights(link.url.href.slice(link.url.origin.length)) as part}{#if part.hit}<mark>{part.text}</mark>{:else}{part.text}{/if}{/each}</span>
         {:else}
@@ -44,7 +47,13 @@
       {#if hold}
         <span class="row-sub hold-sub" class:hint={hold.phase === "hint"} role="status" aria-live="polite">{#if hold.phase === "holding"}继续按住，删除收藏{:else}要按住 <kbd>{hold.keys}</kbd> 才删除{/if}</span>
       {:else}
-        <span class="row-sub">{sourceName(item)} · {typeLabel(item)}{item.copy_count > 1 ? ` · ${item.copy_count} 次` : ""}{item.partial ? " · 部分格式" : ""}</span>
+        {#if mark?.state === "missing"}
+          <span class="row-sub">原文件已移走或删除</span>
+        {:else if mark?.state === "unknown"}
+          <span class="row-sub">网络位置暂时连不上</span>
+        {:else}
+        <span class="row-sub">{#if mark?.state === "partial"}<span class="file-tag gone">{mark.missing} 项失效</span>{/if}{sourceName(item)} · {typeLabel(item)}{item.copy_count > 1 ? ` · ${item.copy_count} 次` : ""}{item.partial ? " · 部分格式" : ""}</span>
+        {/if}
       {/if}
     </span>
   </button>
@@ -85,6 +94,11 @@
   .row-star:disabled { cursor: default; }
   .row-time { align-self: start; padding-top: 14px; overflow: hidden; color: var(--faint); font: 9px var(--font-mono); text-align: right; white-space: nowrap; }
   li { position: relative; isolation: isolate; }
+  .file-tag { display: inline-block; margin-right: 5px; padding: 0 4px; border: 1px solid currentColor; border-radius: var(--radius-sm); font: 600 9px/14px var(--font-ui); vertical-align: 1px; }
+  .file-tag.gone { color: var(--state-caution); }
+  .file-tag.unknown { color: var(--faint); border-style: dashed; }
+  .row-sub .file-tag { padding: 0 3px; font-size: 8px; line-height: 12px; }
+  .file-missing .row-main { color: var(--muted); }
   .hold-fill { position: absolute; inset: 0; z-index: -1; background: color-mix(in srgb, var(--star) 14%, transparent); transform-origin: left; pointer-events: none; animation: hold-fill linear forwards; }
   .hold-sub, .selected .hold-sub { color: var(--star); animation: hold-sub var(--fade-duration) linear; }
   .hold-sub.hint, .selected .hold-sub.hint { color: var(--muted); }

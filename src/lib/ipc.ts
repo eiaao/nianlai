@@ -10,7 +10,25 @@ export type HistoryItem = {
   id: number; kind: string; preview: string; file_names: string[]; source: string; copied_ms: number;
   copy_count: number; partial: boolean; favorite: boolean; favorite_position: number | null;
   source_name: string | null; source_icon: string | null;
+  // M2-3：文件条目的失效检查结论；文件都在时没有这个字段。
+  file_state?: FileMark;
 };
+export type FileMark = { state: "missing" | "partial" | "unknown"; missing: number; unknown: number; total: number; checked_ms: number };
+export type PathCheck = { path: string; state: "present" | "missing" | "unknown" };
+export type StorageFiles = { count: number; bytes: number };
+export type StorageOverview = {
+  database_bytes: number;
+  kinds: { kind: string; count: number; bytes: number }[];
+  trashed: StorageFiles;
+  reclaimable_bytes: number;
+  snapshots: StorageFiles;
+  exports: StorageFiles;
+  leftovers: StorageFiles;
+  free_bytes: number | null;
+  files: { missing: number; partial: number; unknown: number; checked_ms: number | null };
+  images: { all: StorageFiles; older_30: StorageFiles; older_90: StorageFiles };
+};
+export type ImageItem = { id: number; bytes: number; copied_ms: number; favorite: boolean };
 export type TrashItem = HistoryItem & { deleted_ms: number };
 export type HistorySnapshot = { items: HistoryItem[]; total: number; recording: boolean; last_recorded_ms: number | null; store_status: string | null };
 export type AppSettings = {
@@ -88,7 +106,19 @@ export const validateHotkey = (value: string) => invoke<HotkeyValidation>("valid
 export const getHotkeyStatus = () => invoke<HotkeyStatus>("get_hotkey_status");
 // 设置页录制新组合键期间暂时注销呼出键（后端 30 秒后自动恢复兜底）。
 export const pauseHotkey = (paused: boolean) => invoke<void>("pause_hotkey", { paused });
-export const openSettings = () => invoke("open_settings");
+export const openSettings = (page?: string) => invoke("open_settings", { page: page ?? null });
+// 存储管理（M2-3）
+export const getFilePaths = (id: number) => invoke<PathCheck[] | null>("get_file_paths", { id });
+export const getStorage = () => invoke<StorageOverview>("get_storage");
+export const checkFiles = () => invoke<void>("check_files");
+export const cleanMissing = () => invoke<number>("clean_missing");
+export const cleanImages = (olderDays: number | null) => invoke<number>("clean_images", { olderDays });
+export const trashItems = (ids: number[]) => invoke<number>("trash_items", { ids });
+export const getImages = () => invoke<ImageItem[]>("get_images");
+export const getThumbnail = (id: number) => invoke<string | null>("get_thumbnail", { id });
+export const cleanExports = () => invoke<StorageFiles>("clean_exports");
+export const cleanLeftovers = () => invoke<StorageFiles>("clean_leftovers");
+export const compactHistory = () => invoke<number>("compact_history");
 // 采集规则（A07–A11）：暂停和“忽略下一次”只在内存里，重启后恢复记录。
 export const getSnapshots = () => invoke<SnapshotState>("get_snapshots");
 export const createSnapshot = () => invoke<void>("create_snapshot");

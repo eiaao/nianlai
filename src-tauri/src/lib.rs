@@ -184,6 +184,71 @@ fn purge_items(ids: Option<Vec<usize>>) -> Result<usize, String> {
         .ok_or_else(|| "历史服务未就绪".to_owned())?
         .purge(ids)
 }
+fn shared() -> Result<std::sync::Arc<history::Shared>, String> {
+    history::active().ok_or_else(|| "历史服务未就绪".to_owned())
+}
+/// 存储管理（M2-3）的命令都可能读写较多数据，放到阻塞线程池里跑，不卡主线程。
+async fn blocking<T: Send + 'static>(
+    job: impl FnOnce(std::sync::Arc<history::Shared>) -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    let shared = shared()?;
+    tauri::async_runtime::spawn_blocking(move || job(shared))
+        .await
+        .map_err(|_| "操作没有完成，请重试".to_owned())?
+}
+/// 文件条目的每个路径现在还在不在（预览用）；不是文件条目返回 None。
+#[tauri::command]
+async fn get_file_paths(id: usize) -> Result<Option<Vec<history::files::PathCheck>>, String> {
+    blocking(move |shared| shared.file_paths(id)).await
+}
+#[tauri::command]
+async fn get_storage() -> Result<history::storage::Overview, String> {
+    blocking(|shared| shared.storage_overview()).await
+}
+/// 立即全量检查文件条目（设置页“重新检查”）。
+#[tauri::command]
+async fn check_files() -> Result<(), String> {
+    blocking(|shared| {
+        if shared.check_files(None, "manual") {
+            shared.notify_changed();
+        }
+        Ok(())
+    })
+    .await
+}
+#[tauri::command]
+async fn clean_missing() -> Result<usize, String> {
+    blocking(|shared| shared.clean_missing()).await
+}
+/// 清理截图类图片：`older_days` 为空表示全部。
+#[tauri::command]
+async fn clean_images(older_days: Option<u64>) -> Result<usize, String> {
+    blocking(move |shared| shared.clean_images(older_days)).await
+}
+#[tauri::command]
+async fn trash_items(ids: Vec<usize>) -> Result<usize, String> {
+    blocking(move |shared| shared.trash_items(ids)).await
+}
+#[tauri::command]
+async fn get_images() -> Result<Vec<history::storage::ImageItem>, String> {
+    blocking(|shared| shared.images()).await
+}
+#[tauri::command]
+async fn get_thumbnail(id: usize) -> Result<Option<String>, String> {
+    blocking(move |shared| shared.thumbnail(id)).await
+}
+#[tauri::command]
+async fn clean_exports() -> Result<history::storage::Files, String> {
+    blocking(|shared| shared.clean_exports()).await
+}
+#[tauri::command]
+async fn clean_leftovers() -> Result<history::storage::Files, String> {
+    blocking(|shared| shared.clean_leftovers()).await
+}
+#[tauri::command]
+async fn compact_history() -> Result<u64, String> {
+    blocking(|shared| shared.compact()).await
+}
 #[tauri::command]
 fn frontend_ready(app: AppHandle) -> Result<(), String> {
     panel::dispatch(&app, Action::FrontendReady)
@@ -301,6 +366,17 @@ pub fn run() {
             get_trash,
             restore_item,
             purge_items,
+            get_file_paths,
+            get_storage,
+            check_files,
+            clean_missing,
+            clean_images,
+            trash_items,
+            get_images,
+            get_thumbnail,
+            clean_exports,
+            clean_leftovers,
+            compact_history,
             frontend_ready,
             start_search,
             search_ready,

@@ -2,6 +2,7 @@ pub mod apps;
 pub mod capture;
 pub mod clipboard;
 pub mod dialog;
+pub mod disk;
 mod foreground;
 pub mod formats;
 pub mod hash;

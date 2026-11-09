@@ -7,11 +7,12 @@ use std::{
 };
 use windows::{
     Win32::{
-        Foundation::GENERIC_WRITE,
+        Foundation::{GENERIC_WRITE, HGLOBAL},
         Graphics::Imaging::*,
         System::Com::{
             CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx,
-            CoUninitialize,
+            CoUninitialize, STATFLAG_NONAME, STREAM_SEEK_SET,
+            StructuredStorage::CreateStreamOnHGlobal,
         },
     },
     core::HSTRING,
@@ -169,6 +170,81 @@ fn encode(bitmap: &[u8], output: &Path) -> Result<(), &'static str> {
     }
 }
 
+/// 记录里的图片原样数据：优先 PNG，没有就把 DIB 补成 BMP 文件。
+fn image_source(content: &Content) -> Result<Vec<u8>, &'static str> {
+    match content
+        .raw(PNG)
+        .filter(|data| data.starts_with(b"\x89PNG\r\n\x1a\n"))
+    {
+        Some(png) => Ok(png.to_vec()),
+        None => content
+            .raw(DIBV5)
+            .or_else(|| content.raw(DIB))
+            .ok_or("no_image")
+            .and_then(bitmap_file),
+    }
+}
+
+/// 存储管理里手动挑选截图用的缩略图（M2-3）：长边缩到 `max` 像素以内，在内存里编码成 PNG，不落盘。
+pub fn thumbnail(content: &Content, max: u32) -> Result<Vec<u8>, &'static str> {
+    let source = image_source(content)?;
+    unsafe {
+        let _com = CoInitializeEx(None, COINIT_MULTITHREADED)
+            .is_ok()
+            .then_some(Com);
+        let factory: IWICImagingFactory =
+            CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)
+                .map_err(|_| "wic_unavailable")?;
+        let frame = (|| -> windows::core::Result<IWICBitmapFrameDecode> {
+            let input = factory.CreateStream()?;
+            input.InitializeFromMemory(&source)?;
+            factory
+                .CreateDecoderFromStream(&input, std::ptr::null(), WICDecodeMetadataCacheOnDemand)?
+                .GetFrame(0)
+        })()
+        .map_err(|_| "image_decode_failed")?;
+        (|| -> windows::core::Result<Vec<u8>> {
+            let (mut width, mut height) = (0, 0);
+            frame.GetSize(&mut width, &mut height)?;
+            let longest = width.max(height).max(1);
+            let scale = (max as f64 / longest as f64).min(1.0);
+            let scaler = factory.CreateBitmapScaler()?;
+            scaler.Initialize(
+                &frame,
+                ((width as f64 * scale).round() as u32).max(1),
+                ((height as f64 * scale).round() as u32).max(1),
+                WICBitmapInterpolationModeFant,
+            )?;
+            let stream = CreateStreamOnHGlobal(HGLOBAL::default(), true)?;
+            let encoder = factory.CreateEncoder(&GUID_ContainerFormatPng, std::ptr::null())?;
+            encoder.Initialize(&stream, WICBitmapEncoderNoCache)?;
+            let mut output = None;
+            let mut options = None;
+            encoder.CreateNewFrame(&mut output, &mut options)?;
+            let output = output.ok_or_else(windows::core::Error::empty)?;
+            output.Initialize(options.as_ref())?;
+            output.WriteSource(&scaler, std::ptr::null())?;
+            output.Commit()?;
+            encoder.Commit()?;
+            let mut stat = Default::default();
+            stream.Stat(&mut stat, STATFLAG_NONAME)?;
+            stream.Seek(0, STREAM_SEEK_SET, None)?;
+            let mut bytes = vec![0u8; stat.cbSize as usize];
+            let mut read = 0;
+            stream
+                .Read(
+                    bytes.as_mut_ptr().cast(),
+                    bytes.len() as u32,
+                    Some(&mut read),
+                )
+                .ok()?;
+            bytes.truncate(read as usize);
+            Ok(bytes)
+        })()
+        .map_err(|_| "image_encode_failed")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -261,6 +337,25 @@ mod tests {
             sha256,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn thumbnails_shrink_the_long_side_and_keep_small_images() {
+        // 300×100 的 24 位图，每行 900 字节正好 4 字节对齐。
+        let mut dib = info_header(40, 300, 100, 24, 0, 0);
+        dib.extend(std::iter::repeat_n(200u8, 900 * 100));
+        let png = thumbnail(&image(DIB, dib), 240).unwrap();
+        assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
+        let directory = temporary();
+        let path = directory.join("thumb.png");
+        fs::write(&path, &png).unwrap();
+        assert_eq!(decode(&path, 0, 0).0, (240, 80));
+        // 比上限小的不放大。
+        let mut small = info_header(40, 2, 1, 24, 0, 0);
+        small.extend_from_slice(&[1, 2, 3, 4, 5, 6, 0, 0]);
+        fs::write(&path, thumbnail(&image(DIB, small), 240).unwrap()).unwrap();
+        assert_eq!(decode(&path, 0, 0).0, (2, 1));
+        fs::remove_dir_all(&directory).unwrap();
     }
 
     #[test]

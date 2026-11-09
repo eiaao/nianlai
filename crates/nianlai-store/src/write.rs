@@ -343,6 +343,46 @@ impl Store {
             Ok(moved)
         })
     }
+    // 垃圾清理（M2-3）：一次把多条移进回收站，收藏的、已在回收站或不存在的跳过。返回实际移进去的。
+    pub fn trash_many(&self, ids: Vec<usize>) -> Result<Vec<usize>> {
+        self.call(move |w| {
+            let tx = w.connection.transaction()?;
+            let mut moved = Vec::new();
+            let now = now_ms() as i64;
+            for id in ids {
+                if tx.execute(
+                    "INSERT INTO trash(content_id,deleted_ms) SELECT c.id,?2 FROM contents c \
+                     WHERE c.id=?1 AND NOT EXISTS(SELECT 1 FROM favorites WHERE content_id=c.id) \
+                     ON CONFLICT(content_id) DO NOTHING",
+                    params![id as i64, now],
+                )? > 0
+                {
+                    moved.push(id);
+                }
+            }
+            tx.commit()?;
+            if !moved.is_empty() {
+                if w.last
+                    .as_ref()
+                    .is_some_and(|(last, _)| moved.contains(last))
+                {
+                    w.last = None;
+                }
+                let mut cache = w.cache.write().unwrap();
+                cache.items.retain(|item| !moved.contains(&item.id));
+                cache.total = cache.total.saturating_sub(moved.len());
+            }
+            Ok(moved)
+        })
+    }
+    // 压缩（M2-3）：把删除后空出来的页还给磁盘。VACUUM 期间写入线程忙，采集排队等它结束。
+    pub fn compact(&self) -> Result<()> {
+        self.call(|w| {
+            w.connection
+                .execute_batch("VACUUM; PRAGMA wal_checkpoint(TRUNCATE);")?;
+            Ok(())
+        })
+    }
     // 从回收站恢复：回到原来的位置（排序时间不变）。不在回收站里返回 None。
     pub fn restore(&self, id: usize) -> Result<Option<Metadata>> {
         self.call(move |w| {

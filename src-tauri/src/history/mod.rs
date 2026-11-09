@@ -1,6 +1,8 @@
 pub mod content;
+pub mod files;
 mod memory;
 pub mod snapshots;
+pub mod storage;
 
 use crate::log::{Logger, now_ms};
 use content::{Content, Fingerprint, Hash};
@@ -67,6 +69,9 @@ pub struct Preview {
     // A06：来源应用的显示名（FileDescription，缺省为文件名或进程名）与图标 PNG 的绝对路径。
     source_name: Option<String>,
     source_icon: Option<String>,
+    // M2-3：文件类条目的失效检查结论；文件都在（或不是文件条目）时不带。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file_state: Option<files::Mark>,
 }
 #[derive(Serialize)]
 pub struct Snapshot {
@@ -110,6 +115,7 @@ pub struct Shared {
     // 最近一次出现在剪贴板上的内容（含我们自己写回的）。
     last_seen: Mutex<Option<Fingerprint>>,
     changed: Mutex<Option<Changed>>,
+    files: files::Marks,
     hash: Hash,
     logger: Logger,
 }
@@ -139,6 +145,7 @@ impl History {
             generation: AtomicU64::new(0),
             last_seen: Mutex::new(None),
             changed: Mutex::new(None),
+            files: files::Marks::default(),
             hash,
             logger,
         });
@@ -237,6 +244,9 @@ impl History {
                 let Some(directory)=history.store_directory() else {return};
                 snapshots::automatic(&directory, &logger);
                 history.0.purge_expired();
+                if history.0.check_files_daily() {
+                    history.0.notify_changed();
+                }
                 std::thread::sleep(snapshots::CHECK_INTERVAL);
             }
         }).is_err() {self.0.logger.event("store_check_failed",json!({"error_code":"thread_start"}));}
@@ -382,6 +392,13 @@ impl Shared {
             favorite_position: item.favorite_position,
             source_name: item.source_name,
             source_icon: self.icon_path(item.icon_file.as_deref()),
+            file_state: None,
+        }
+    }
+    /// 给列表项带上文件失效结论（两种模式共用，内存模式的列表项不经过 preview）。
+    fn annotate(&self, items: &mut [Preview]) {
+        for item in items {
+            item.file_state = self.files.get(item.id);
         }
     }
     pub fn snapshot(&self) -> Snapshot {
@@ -401,6 +418,7 @@ impl Shared {
         } else {
             self.memory.lock().unwrap().snapshot()
         };
+        self.annotate(&mut snapshot.items);
         snapshot.recording = self.recording.load(Ordering::Acquire);
         snapshot.store_status = self.status.lock().unwrap().or_else(|| {
             crate::capture::rules::gate()
@@ -431,7 +449,10 @@ impl Shared {
         };
         self.logger.event("search",json!({"words":query.split_whitespace().count(),"characters":query.chars().count(),"mode":mode,
             "results":result.as_ref().map(Vec::len).ok(),"elapsed_ms":started.elapsed().as_secs_f64()*1000.0,"error_code":result.as_ref().err()}));
-        result.map(|items: Vec<Preview>| SearchReply { request_id, items })
+        result.map(|mut items: Vec<Preview>| {
+            self.annotate(&mut items);
+            SearchReply { request_id, items }
+        })
     }
     pub fn ingest(
         &self,
@@ -744,15 +765,17 @@ impl Shared {
         result
     }
     pub fn favorites(&self) -> Result<Vec<Preview>, String> {
-        if let Some(store) = self.store() {
+        let mut items: Vec<Preview> = if let Some(store) = self.store() {
             store
                 .reader()
                 .and_then(|r| r.favorites())
                 .map(|items| items.into_iter().map(|item| self.preview(item)).collect())
-                .map_err(|e| e.to_string())
+                .map_err(|e| e.to_string())?
         } else {
-            Ok(self.memory.lock().unwrap().favorites())
-        }
+            self.memory.lock().unwrap().favorites()
+        };
+        self.annotate(&mut items);
+        Ok(items)
     }
     pub fn set_favorite(&self, id: usize, favorite: bool) -> Result<Option<Preview>, String> {
         if let Some(store) = self.store() {
@@ -1051,6 +1074,99 @@ mod startup_tests {
             assert!(shared.undo_delete().unwrap().is_none());
             assert!(shared.get(kept).unwrap().is_some());
         }
+    }
+
+    #[test]
+    fn missing_files_are_marked_cleaned_into_trash_and_skipped_when_pasting() {
+        let directory = Directory::new();
+        let directories = directories(&directory);
+        let logger = Logger::with_settings(&directories, 20).unwrap();
+        let history = History::new(nianlai_store::hash::sha256, logger);
+        history.initialize();
+        let shared = &history.0;
+        let files = directory.0.join("files");
+        fs::create_dir_all(&files).unwrap();
+        let (kept, gone) = (files.join("在.txt"), files.join("不在.txt"));
+        fs::write(&kept, "a").unwrap();
+        fs::write(&gone, "b").unwrap();
+        let now = Instant::now();
+        let save = |paths: Vec<String>, sequence: u32| {
+            let content = Content::new(
+                std::collections::BTreeMap::from([(
+                    content::FILES.to_owned(),
+                    content::Data::Files(paths.into()),
+                )]),
+                nianlai_store::hash::sha256,
+            )
+            .unwrap();
+            shared
+                .ingest(
+                    content,
+                    CopyEvent {
+                        time_ms: now_ms(),
+                        sequence,
+                        source_process: "explorer.exe".into(),
+                        source_path: String::new(),
+                        owner_process: "explorer.exe".into(),
+                        owner_pid: 1,
+                        observed: now,
+                    },
+                    false,
+                    now,
+                )
+                .unwrap()
+                .record_id
+                .unwrap()
+        };
+        let path = |p: &std::path::Path| p.to_string_lossy().into_owned();
+        let both = save(vec![path(&kept), path(&gone)], 1);
+        let only_gone = save(vec![path(&gone)], 2);
+        assert!(!shared.check_files(None, "test"), "文件都在，没有变化");
+        fs::remove_file(&gone).unwrap();
+        assert!(shared.check_files(None, "test"));
+        let state = |id| {
+            shared
+                .snapshot()
+                .items
+                .into_iter()
+                .find(|item| item.id == id)
+                .and_then(|item| item.file_state)
+                .map(|mark| mark.state)
+        };
+        assert_eq!(state(both), Some("partial"));
+        assert_eq!(state(only_gone), Some("missing"));
+        let overview = shared.storage_overview().unwrap();
+        assert_eq!((overview.files.missing, overview.files.partial), (1, 1));
+        assert!(overview.files.checked_ms.is_some());
+
+        // 粘贴：部分不在只留还在的，全部不在就不粘贴。
+        match history.usable_files(&shared.get(both).unwrap().unwrap()) {
+            files::Usable::Partial(filtered, skipped) => {
+                assert_eq!(skipped, 1);
+                assert!(matches!(&filtered.formats[content::FILES].data,
+                    content::Data::Files(paths) if paths.to_vec() == [path(&kept)]));
+            }
+            _ => panic!("应该只粘贴还在的文件"),
+        }
+        assert!(matches!(
+            history.usable_files(&shared.get(only_gone).unwrap().unwrap()),
+            files::Usable::Nothing
+        ));
+
+        // 清理只清全部不在的，进回收站后不再算失效；恢复回来下次检查再标。
+        assert_eq!(shared.clean_missing().unwrap(), 1);
+        assert_eq!(state(both), Some("partial"));
+        let overview = shared.storage_overview().unwrap();
+        assert_eq!((overview.files.missing, overview.trashed.count), (0, 1));
+        shared.restore(only_gone).unwrap().unwrap();
+        assert!(shared.check_files(None, "test"));
+        assert_eq!(state(only_gone), Some("missing"));
+        let paths = shared.file_paths(both).unwrap().unwrap();
+        assert_eq!(
+            paths.iter().map(|p| p.state).collect::<Vec<_>>(),
+            [files::PathState::Present, files::PathState::Missing]
+        );
+        assert!(shared.file_paths(9999).unwrap().is_none());
     }
 }
 

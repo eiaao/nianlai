@@ -31,7 +31,7 @@
   onclick={(event) => panel.choose(index, "paste", event)}
 >
   <span class="card-surface" class:link-surface={kind === "link"} class:color-surface={kind === "color" && !!color} class:image-surface={kind === "image"} style={kind === "color" && color ? `background-color: ${color.value}` : undefined}>
-    <span class="card-topline"><span>{item.favorite ? "PIN · " : ""}{typeLabel(item).toUpperCase()}</span>{#if item.favorite}<svg class="card-fav" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path d="m10 2.8 2.15 4.35 4.8.7-3.47 3.38.82 4.77L10 13.74 5.7 16l.82-4.77L3.05 7.85l4.8-.7L10 2.8Z"/></svg>{/if}</span>
+    <span class="card-topline"><span>{item.favorite ? "PIN · " : ""}{typeLabel(item).toUpperCase()}{#if item.file_state}<em class="file-tag" class:unknown={item.file_state.state === "unknown"}>{item.file_state.state === "missing" ? "已失效" : item.file_state.state === "partial" ? `${item.file_state.missing} 项失效` : "未确认"}</em>{/if}</span>{#if item.favorite}<svg class="card-fav" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path d="m10 2.8 2.15 4.35 4.8.7-3.47 3.38.82 4.77L10 13.74 5.7 16l.82-4.77L3.05 7.85l4.8-.7L10 2.8Z"/></svg>{/if}</span>
 
     {#if kind === "link" && link}
       <svg class="link-arrow" viewBox="0 0 40 40" fill="none" aria-hidden="true"><path d="M8 32 32 8M13 8h19v19" stroke="currentColor" stroke-width="1.7"/></svg>
@@ -96,6 +96,8 @@
   .file-names { position: absolute; left: 94px; right: 15px; top: 70px; display: grid; font: 12px/2 var(--font-ui); }
   .file-names > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .file-size { position: absolute; left: 19px; bottom: 53px; color: var(--c-card-muted); font: 10px var(--font-mono); }
+  .file-tag { margin-left: 6px; padding: 0 4px; border: 1px solid currentColor; border-radius: var(--radius-xs); color: var(--state-caution); font: 600 9px/13px var(--font-ui); font-style: normal; letter-spacing: 0; }
+  .file-tag.unknown { border-style: dashed; color: var(--c-card-muted); }
   .hold-fill { position: absolute; inset: 0; z-index: 2; background: color-mix(in srgb, var(--c-star) 18%, transparent); transform-origin: left; pointer-events: none; animation: hold-fill linear forwards; }
   .hold-tip { position: absolute; z-index: 4; left: 14px; right: 14px; bottom: 34px; display: flex; align-items: center; justify-content: center; gap: 4px; padding: 5px 8px; border-radius: var(--radius-xs); background: var(--c-raised); box-shadow: 0 0 0 1px color-mix(in srgb, var(--c-star) 45%, transparent); color: var(--c-star); font: 11px var(--font-ui); white-space: nowrap; animation: hold-tip var(--fade-duration) linear; }
   .hold-tip.hint { box-shadow: 0 0 0 1px var(--c-line); color: var(--c-card-muted); }

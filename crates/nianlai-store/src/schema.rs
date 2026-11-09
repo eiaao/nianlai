@@ -2,7 +2,7 @@ use crate::{
     content::{Content, Data, Hash},
     *,
 };
-use rusqlite::{OptionalExtension, Row};
+use rusqlite::{OptionalExtension, Row, params};
 use std::{collections::BTreeMap, sync::Arc};
 
 pub fn version(c: &Connection) -> Result<u32> {
@@ -157,6 +157,79 @@ pub fn trash(c: &Connection) -> Result<Vec<(Metadata, u64)>> {
     }
     Ok(items)
 }
+/// 文件类内容的路径列表都存在 encoding=1 的格式里（JSON 数组）。
+pub fn file_lists(c: &Connection) -> Result<Vec<FileList>> {
+    let mut lists: Vec<FileList> = Vec::new();
+    let mut statement = c.prepare(&format!(
+        "SELECT f.content_id,fv.content_id IS NOT NULL,f.data FROM formats f \
+         JOIN contents c ON c.id=f.content_id LEFT JOIN favorites fv ON fv.content_id=c.id \
+         WHERE f.encoding=1 AND {LIVE} ORDER BY f.content_id"
+    ))?;
+    let rows = statement.query_map([], |r| {
+        Ok((number(r, 0)?, r.get::<_, bool>(1)?, r.get::<_, Vec<u8>>(2)?))
+    })?;
+    for row in rows {
+        let (id, favorite, data) = row?;
+        let paths: Vec<String> =
+            serde_json::from_slice(&data).map_err(|_| Error::Invalid("file_list"))?;
+        // 一条内容一般只有一个文件列表格式；有多个时合并去重。
+        match lists.last_mut() {
+            Some(last) if last.id == id => {
+                for path in paths {
+                    if !last.paths.contains(&path) {
+                        last.paths.push(path);
+                    }
+                }
+            }
+            _ => lists.push(FileList {
+                id,
+                favorite,
+                paths,
+            }),
+        }
+    }
+    Ok(lists)
+}
+pub fn usage(c: &Connection) -> Result<Usage> {
+    let kinds = c
+        .prepare(&format!(
+            "SELECT c.kind,count(*),coalesce(sum(c.bytes),0) FROM contents c WHERE {LIVE} \
+             GROUP BY c.kind ORDER BY 3 DESC"
+        ))?
+        .query_map([], |r| {
+            Ok(KindUsage {
+                kind: r.get(0)?,
+                count: number(r, 1)?,
+                bytes: r.get::<_, i64>(2)?.max(0) as u64,
+            })
+        })?
+        .collect::<std::result::Result<_, _>>()?;
+    let (trashed_count, trashed_bytes) = c.query_row(
+        "SELECT count(*),coalesce(sum(c.bytes),0) FROM trash t JOIN contents c ON c.id=t.content_id",
+        [],
+        |r| Ok((number(r, 0)?, r.get::<_, i64>(1)?.max(0) as u64)),
+    )?;
+    let free: i64 = c.pragma_query_value(None, "freelist_count", |r| r.get(0))?;
+    let page: i64 = c.pragma_query_value(None, "page_size", |r| r.get(0))?;
+    Ok(Usage {
+        kinds,
+        trashed_count,
+        trashed_bytes,
+        reclaimable_bytes: (free.max(0) * page.max(0)) as u64,
+    })
+}
+/// 存在库里的图片，按大小从大到小；收藏的也返回（界面上标出、不让选）。
+pub fn images(c: &Connection, before_ms: Option<u64>) -> Result<Vec<Metadata>> {
+    let before = before_ms.map_or(i64::MAX, |ms| ms.min(i64::MAX as u64) as i64);
+    Ok(c.prepare(&format!(
+        "SELECT {COLUMNS} {JOINS} WHERE {LIVE} AND c.kind=?1 AND c.sort_ms<?2 \
+             ORDER BY c.bytes DESC,c.id DESC LIMIT 2000"
+    ))?
+    .query_map(params![IMAGE_KIND, before], metadata_row)?
+    .collect::<std::result::Result<Vec<_>, _>>()?)
+}
+/// 图片内容的 kind（见 content.rs 的分类）。
+pub const IMAGE_KIND: &str = "图片";
 pub fn trashed(c: &Connection, id: usize) -> Result<bool> {
     Ok(c.query_row(
         "SELECT EXISTS(SELECT 1 FROM trash WHERE content_id=?1)",

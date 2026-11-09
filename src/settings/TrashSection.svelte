@@ -1,5 +1,5 @@
 <script lang="ts">
-  // 回收站（B12）：面板里删除的条目在这里保留 7 天，可以恢复或彻底删除。
+  // 回收站（B12）：删除和清理的条目在这里保留 7 天，可以恢复或彻底删除。“数据与备份”的子页面。
   import { onMount } from "svelte";
   import * as ipc from "../lib/ipc";
   import type { TrashItem } from "../lib/ipc";
@@ -60,8 +60,8 @@
   }
 </script>
 
-<div class="group"><span class="group-title">回收站</span><div class="card">
-  <p class="note">在面板里删除的记录先放在这里，保留 7 天后自动彻底删除。面板里按 Ctrl+Z 可以撤销最近的删除。</p>
+<div class="group"><div class="card">
+  <p class="note">在面板里删除、在“垃圾清理”里清理的记录先放在这里，保留 7 天后自动彻底删除。面板里按 Ctrl+Z 可以撤销最近的删除。</p>
   {#if error}<p class="note error">{error}</p>{/if}
   {#if items === null}
     {#if !error}<p class="note">正在读取…</p>{/if}
