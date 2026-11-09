@@ -60,7 +60,7 @@ pub fn structure(c: &Connection) -> Result<()> {
 }
 
 // 列表项统一带收藏状态和来源应用信息（A06/E01）；三个 JOIN 都是主键点查，不改变排序索引的驱动方式。
-pub const COLUMNS: &str = "c.id,c.fingerprint,c.kind,c.preview,c.file_names,c.bytes,c.partial,c.sort_ms,c.source,c.copy_count,c.sort_order,fv.position,sa.display_name,sa.icon_file";
+pub const COLUMNS: &str = "c.id,c.fingerprint,c.kind,c.preview,c.file_names,c.bytes,c.partial,c.sort_ms,c.source,c.copy_count,c.sort_order,fv.position,sa.display_name,sa.icon_file,fv.title,fv.note";
 /// 不在回收站里的内容（B12）。列表、收藏、搜索都只看这些。
 pub const LIVE: &str = "NOT EXISTS(SELECT 1 FROM trash t WHERE t.content_id=c.id)";
 pub const JOINS: &str = "FROM contents c LEFT JOIN favorites fv ON fv.content_id=c.id LEFT JOIN source_apps sa ON sa.id=c.source_app_id";
@@ -85,6 +85,8 @@ pub fn metadata_row(r: &Row<'_>) -> rusqlite::Result<Metadata> {
         favorite_position: favorite_position.map(|v| v as u64),
         source_name: r.get(12)?,
         icon_file: r.get(13)?,
+        title: r.get::<_, Option<String>>(14)?.unwrap_or_default(),
+        note: r.get::<_, Option<String>>(15)?.unwrap_or_default(),
         sort_order: r.get(10)?,
         formats: Vec::new(),
     })
@@ -159,7 +161,7 @@ pub fn trash(c: &Connection) -> Result<Vec<(Metadata, u64)>> {
             "SELECT {COLUMNS},t.deleted_ms {JOINS} JOIN trash t ON t.content_id=c.id \
              ORDER BY t.deleted_ms DESC,c.id DESC LIMIT 1000"
         ))?
-        .query_map([], |r| Ok((metadata_row(r)?, r.get::<_, i64>(14)? as u64)))?
+        .query_map([], |r| Ok((metadata_row(r)?, r.get::<_, i64>(16)? as u64)))?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     for (item, _) in &mut items {
         formats_meta(c, item)?;

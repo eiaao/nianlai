@@ -70,6 +70,11 @@ pub struct Preview {
     // A06：来源应用的显示名（FileDescription，缺省为文件名或进程名）与图标 PNG 的绝对路径。
     source_name: Option<String>,
     source_icon: Option<String>,
+    // M2-6：收藏的标题与备注；不是收藏或没写时为空，不序列化。
+    #[serde(skip_serializing_if = "String::is_empty")]
+    title: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    note: String,
     // M2-3：文件类条目的失效检查结论；文件都在（或不是文件条目）时不带。
     #[serde(skip_serializing_if = "Option::is_none")]
     file_state: Option<files::Mark>,
@@ -90,6 +95,23 @@ pub struct SearchReply {
 
 // 面板控制器（panel.rs）持有唯一的 History，但字段不对外公开；Tauri 命令（lib.rs）
 // 通过这里的进程注册表取当前实例。产品进程只有一个，测试不受影响。
+// B10：粘贴旧条目后是否把它移到列表最前；启动和保存设置时更新。
+static REUSE_TO_TOP: AtomicBool = AtomicBool::new(true);
+pub fn set_reuse_to_top(value: bool) {
+    REUSE_TO_TOP.store(value, Ordering::Release);
+}
+// 把存储层的错误码翻成给用户看的话。
+fn label_error(error: nianlai_store::Error) -> String {
+    match error {
+        nianlai_store::Error::Invalid("reorder_duplicate") => "收藏顺序里有重复的条目".into(),
+        nianlai_store::Error::Invalid("reorder_mismatch") => {
+            "收藏顺序与当前收藏不一致，请刷新后重试".into()
+        }
+        nianlai_store::Error::Invalid("not_favorite") => "只有收藏的条目才能设置标题和备注".into(),
+        other => other.to_string(),
+    }
+}
+
 static ACTIVE: Mutex<Vec<std::sync::Weak<Shared>>> = Mutex::new(Vec::new());
 pub fn active() -> Option<Arc<Shared>> {
     let mut entries = ACTIVE.lock().unwrap();
@@ -393,6 +415,8 @@ impl Shared {
             favorite_position: item.favorite_position,
             source_name: item.source_name,
             source_icon: self.icon_path(item.icon_file.as_deref()),
+            title: item.title,
+            note: item.note,
             file_state: None,
         }
     }
@@ -632,6 +656,9 @@ impl Shared {
         found
     }
     pub fn reuse(&self, id: usize) {
+        if !REUSE_TO_TOP.load(Ordering::Acquire) {
+            return;
+        }
         if let Some(store) = self.store() {
             if let Err(error) = store.reuse(id, now_ms()) {
                 self.logger.event(
@@ -786,6 +813,38 @@ impl Shared {
                 .map_err(|e| e.to_string())
         } else {
             Ok(self.memory.lock().unwrap().set_favorite(id, favorite))
+        }
+    }
+    /// 重排收藏：ids 是界面展示的全部收藏的新顺序。返回新的收藏列表。
+    pub fn reorder_favorites(&self, ids: &[usize]) -> Result<Vec<Preview>, String> {
+        let mut items: Vec<Preview> = if let Some(store) = self.store() {
+            store
+                .reorder_favorites(ids)
+                .map(|items| items.into_iter().map(|item| self.preview(item)).collect())
+                .map_err(label_error)?
+        } else {
+            self.memory.lock().unwrap().reorder_favorites(ids)?
+        };
+        self.annotate(&mut items);
+        Ok(items)
+    }
+    /// 修改收藏的标题与备注；不是收藏则报错。
+    pub fn set_favorite_label(
+        &self,
+        id: usize,
+        title: &str,
+        note: &str,
+    ) -> Result<Preview, String> {
+        if let Some(store) = self.store() {
+            store
+                .set_favorite_label(id, title, note)
+                .map(|item| self.preview(item))
+                .map_err(label_error)
+        } else {
+            self.memory
+                .lock()
+                .unwrap()
+                .set_favorite_label(id, title, note)
         }
     }
     pub fn summary(&self) {
@@ -975,6 +1034,118 @@ mod startup_tests {
             // 列表快照同样带收藏字段。
             let listed = shared.snapshot();
             assert!(listed.items.iter().all(|item| !item.favorite));
+        }
+    }
+
+    // M2-6：重排、标题备注（含搜索）与 reuse_to_top 开关，存储模式和内存模式行为一致。
+    #[test]
+    fn reorder_labels_search_and_reuse_switch_work_in_both_modes() {
+        for persistent in [false, true] {
+            let directory = Directory::new();
+            let directories = directories(&directory);
+            let logger = Logger::with_settings(&directories, 20).unwrap();
+            let history = History::new(nianlai_store::hash::sha256, logger);
+            if persistent {
+                history.initialize();
+            }
+            let shared = &history.0;
+            let now = Instant::now();
+            let mut ids = Vec::new();
+            for sequence in 1..=3u32 {
+                let saved = shared
+                    .ingest(
+                        Content::text(&format!("整理内容{sequence}"), nianlai_store::hash::sha256)
+                            .unwrap(),
+                        CopyEvent {
+                            time_ms: now_ms() + sequence as u64,
+                            sequence,
+                            source_process: "organize.exe".into(),
+                            source_path: String::new(),
+                            owner_process: "organize.exe".into(),
+                            owner_pid: 1,
+                            observed: now,
+                        },
+                        false,
+                        now,
+                    )
+                    .unwrap();
+                ids.push(saved.record_id.unwrap());
+            }
+            let (a, b, c) = (ids[0], ids[1], ids[2]);
+            for id in [a, b, c] {
+                shared.set_favorite(id, true).unwrap().unwrap();
+            }
+            let order = |shared: &Shared| {
+                shared
+                    .favorites()
+                    .unwrap()
+                    .into_iter()
+                    .map(|item| item.id)
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(order(shared), vec![a, b, c]);
+            // 重排：返回新列表并持久生效。
+            let reordered = shared.reorder_favorites(&[c, a, b]).unwrap();
+            assert_eq!(
+                reordered.iter().map(|i| i.id).collect::<Vec<_>>(),
+                vec![c, a, b]
+            );
+            assert_eq!(order(shared), vec![c, a, b]);
+            // 错误：重复、非收藏、缺项；不改变顺序，并给中文提示。
+            for bad in [vec![c, c, b], vec![c, a, 9999], vec![c, a]] {
+                let error = shared.reorder_favorites(&bad).err().unwrap();
+                assert!(error.contains("收藏"), "{error}");
+                assert_eq!(order(shared), vec![c, a, b]);
+            }
+            // 标题备注：清理、上限、非收藏报错。
+            let labeled = shared
+                .set_favorite_label(a, "  发票\n清单 ", "\n备注 xyzzy\n第二行\n")
+                .unwrap();
+            assert_eq!(labeled.title, "发票 清单");
+            assert_eq!(labeled.note, "备注 xyzzy\n第二行");
+            let long = shared
+                .set_favorite_label(b, &"t".repeat(300), &"n".repeat(3000))
+                .unwrap();
+            assert_eq!(long.title.chars().count(), 200);
+            assert_eq!(long.note.chars().count(), 2000);
+            shared.set_favorite_label(b, "", "").unwrap();
+            shared.set_favorite(c, false).unwrap().unwrap();
+            assert!(shared.set_favorite_label(c, "x", "y").is_err());
+            assert!(order(shared).iter().all(|id| *id != c));
+            // 列表项与收藏列表带标题备注；序列化时空串不输出。
+            let favorites = shared.favorites().unwrap();
+            let item = favorites.iter().find(|i| i.id == a).unwrap();
+            assert_eq!(item.title, "发票 清单");
+            let json = serde_json::to_value(&favorites[..]).unwrap();
+            let plain = json
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|v| v["id"] == b)
+                .unwrap();
+            assert!(plain.get("title").is_none() && plain.get("note").is_none());
+            // 搜索覆盖标题与备注。
+            let found = |shared: &Shared, query: &str| {
+                shared
+                    .search(query, 1)
+                    .unwrap()
+                    .items
+                    .into_iter()
+                    .map(|i| i.id)
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(found(shared, "XYZZY"), vec![a]);
+            assert_eq!(found(shared, "发票"), vec![a]);
+            // reuse_to_top：关闭时粘贴旧条目不挪位置，打开时挪到最前。
+            let newest = |shared: &Shared| shared.snapshot().items[0].id;
+            assert_eq!(newest(shared), c);
+            set_reuse_to_top(false);
+            shared.reuse(a);
+            let kept = newest(shared);
+            set_reuse_to_top(true);
+            assert_eq!(kept, c);
+            shared.reuse(a);
+            assert_eq!(newest(shared), a);
         }
     }
 

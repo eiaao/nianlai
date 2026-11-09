@@ -43,6 +43,7 @@
 >
   <span class="card-surface" class:link-surface={kind === "link"} class:color-surface={kind === "color" && !!color} class:image-surface={kind === "image"} style={kind === "color" && color ? `background-color: ${color.value}` : undefined}>
     <span class="card-topline"><span>{item.favorite ? "PIN · " : ""}{typeLabel(item).toUpperCase()}{#if item.file_state}<em class="file-tag" class:unknown={item.file_state.state === "unknown"}>{item.file_state.state === "missing" ? "已失效" : item.file_state.state === "partial" ? `${item.file_state.missing} 项失效` : "未确认"}</em>{/if}</span>{#if item.favorite}<svg class="card-fav" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path d="m10 2.8 2.15 4.35 4.8.7-3.47 3.38.82 4.77L10 13.74 5.7 16l.82-4.77L3.05 7.85l4.8-.7L10 2.8Z"/></svg>{/if}</span>
+    {#if item.favorite && item.title}<span class="card-title">{#each panel.highlights(item.title) as part}{#if part.hit}<mark>{part.text}</mark>{:else}{part.text}{/if}{/each}</span>{/if}
 
     {#if kind === "link" && link}
       <svg class="link-arrow" viewBox="0 0 40 40" fill="none" aria-hidden="true"><path d="M8 32 32 8M13 8h19v19" stroke="currentColor" stroke-width="1.7"/></svg>
@@ -120,4 +121,6 @@
     .card-source { max-width: 124px; }
     .card-source :global(.source-icon) { display: none; }
   }
+  /* M2-6：收藏的标题压在内容上方一行。 */
+  .card-title { display: block; overflow: hidden; margin: 2px 0 4px; color: var(--text); font-size: 12px; font-weight: 650; white-space: nowrap; text-overflow: ellipsis; }
 </style>

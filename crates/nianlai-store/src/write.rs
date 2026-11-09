@@ -321,6 +321,71 @@ impl Store {
             Ok(Some(item))
         })
     }
+    // 重排收藏（E03）：ids 是当前未在回收站的全部收藏的新顺序。
+    // 只在这些收藏现有的 position 槽位里置换，回收站里的收藏保持原位。
+    pub fn reorder_favorites(&self, ids: &[usize]) -> Result<Vec<Metadata>> {
+        let ids = ids.to_vec();
+        self.call(move |w| {
+            let tx = w.connection.transaction()?;
+            let live: Vec<(i64, i64)> = tx
+                .prepare(
+                    "SELECT fv.content_id,fv.position FROM favorites fv \
+                     WHERE NOT EXISTS(SELECT 1 FROM trash t WHERE t.content_id=fv.content_id) \
+                     ORDER BY fv.position",
+                )?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<std::result::Result<_, _>>()?;
+            let mut seen = std::collections::BTreeSet::new();
+            if !ids.iter().all(|id| seen.insert(*id)) {
+                return Err(Error::Invalid("reorder_duplicate"));
+            }
+            let mut expected: Vec<i64> = live.iter().map(|(id, _)| *id).collect();
+            expected.sort_unstable();
+            let given: Vec<i64> = seen.iter().map(|id| *id as i64).collect();
+            if expected != given {
+                return Err(Error::Invalid("reorder_mismatch"));
+            }
+            // position 有 UNIQUE 约束：先全部挪到负数，再写最终值。
+            for (id, position) in &live {
+                tx.execute(
+                    "UPDATE favorites SET position=?2 WHERE content_id=?1",
+                    params![id, -position],
+                )?;
+            }
+            for (id, (_, position)) in ids.iter().zip(&live) {
+                tx.execute(
+                    "UPDATE favorites SET position=?2 WHERE content_id=?1",
+                    params![*id as i64, position],
+                )?;
+            }
+            let items = schema::favorites(&tx)?;
+            tx.commit()?;
+            let mut cache = w.cache.write().unwrap();
+            for item in &items {
+                update_cached_item(&mut cache, item);
+            }
+            Ok(items)
+        })
+    }
+    // 修改收藏的标题与备注（E04）；不是收藏则报错。
+    pub fn set_favorite_label(&self, id: usize, title: &str, note: &str) -> Result<Metadata> {
+        let title = clean_title(title);
+        let note = clean_note(note);
+        self.call(move |w| {
+            let tx = w.connection.transaction()?;
+            if tx.execute(
+                "UPDATE favorites SET title=?2,note=?3,updated_ms=?4 WHERE content_id=?1",
+                params![id as i64, title, note, now_ms() as i64],
+            )? == 0
+            {
+                return Err(Error::Invalid("not_favorite"));
+            }
+            let item = schema::metadata(&tx, id)?;
+            tx.commit()?;
+            update_cached_item(&mut w.cache.write().unwrap(), &item);
+            Ok(item)
+        })
+    }
     // 删除一条历史（PRD 6.7 Delete）：放进回收站（B12），不物理删除；收藏的内容也可以（B13 由界面确认）。
     // 返回 false 表示内容不存在或已在回收站。
     pub fn delete(&self, id: usize) -> Result<bool> {
@@ -495,11 +560,28 @@ fn update_cache(cache: &mut Cache, item: Metadata, deleted: &[usize], delta: isi
     });
 }
 
+const TITLE_LIMIT: usize = 200;
+const NOTE_LIMIT: usize = 2000;
+// 标题：换行折成空格、去首尾空白，最多 200 个字符。
+pub fn clean_title(title: &str) -> String {
+    let folded: String = title
+        .chars()
+        .map(|c| if matches!(c, '\r' | '\n') { ' ' } else { c })
+        .collect();
+    folded.trim().chars().take(TITLE_LIMIT).collect()
+}
+// 备注：保留内部换行、去首尾空白，最多 2000 个字符。
+pub fn clean_note(note: &str) -> String {
+    note.trim().chars().take(NOTE_LIMIT).collect()
+}
+
 // 收藏状态变化只改缓存里这一项的字段，顺序和其余条目不动（愉悦标准：可预期）。
 fn update_cached_item(cache: &mut Cache, item: &Metadata) {
     if let Some(cached) = cache.items.iter_mut().find(|cached| cached.id == item.id) {
         cached.favorite = item.favorite;
         cached.favorite_position = item.favorite_position;
+        cached.title.clone_from(&item.title);
+        cached.note.clone_from(&item.note);
     }
 }
 

@@ -20,16 +20,9 @@ pub struct Search {
 pub fn search(c: &Connection, query: &str) -> Result<Search> {
     let started = Instant::now();
     let words: Vec<_> = query.split_whitespace().collect();
-    let mut indexed = Vec::new();
-    let mut short = Vec::new();
-    for word in &words {
-        if word.chars().count() >= 3 {
-            indexed.push(format!("\"{}\"", word.replace('"', "\"\"")));
-        } else {
-            short.push(word.to_ascii_lowercase());
-        }
-    }
-    let mode = match (indexed.is_empty(), short.is_empty()) {
+    let indexed = words.iter().filter(|w| w.chars().count() >= 3).count();
+    let short = words.len() - indexed;
+    let mode = match (indexed == 0, short == 0) {
         (true, true) => SearchMode::Recent,
         (false, true) => SearchMode::Index,
         (true, false) => SearchMode::Substring,
@@ -43,15 +36,21 @@ pub fn search(c: &Connection, query: &str) -> Result<Search> {
     );
     let mut predicates = vec![schema::LIVE.to_owned()];
     let mut params = Vec::new();
-    if !indexed.is_empty() {
-        predicates
-            .push("c.id IN (SELECT rowid FROM search_index WHERE search_index MATCH ?)".to_owned());
-        params.push(indexed.join(" AND "));
-    }
-    for word in short {
-        // instr 不把 %、_ 和反斜杠当成通配符；正文在写入时只折叠 ASCII 大小写。
-        predicates.push("instr(c.search_text,?) > 0".to_owned());
-        params.push(word);
+    // 每个词各有一个谓词：命中正文，或命中收藏的标题 / 备注（C09）。
+    // 标题 / 备注同样只折叠 ASCII 大小写；instr 不把 %、_ 和反斜杠当成通配符。
+    const LABEL: &str = "c.id IN (SELECT content_id FROM favorites WHERE instr(lower(title||char(10)||note),?) > 0)";
+    for word in &words {
+        let folded = word.to_ascii_lowercase();
+        if word.chars().count() >= 3 {
+            predicates.push(format!(
+                "(c.id IN (SELECT rowid FROM search_index WHERE search_index MATCH ?) OR {LABEL})"
+            ));
+            params.push(format!("\"{}\"", word.replace('"', "\"\"")));
+        } else {
+            predicates.push(format!("(instr(c.search_text,?) > 0 OR {LABEL})"));
+            params.push(folded.clone());
+        }
+        params.push(folded);
     }
     sql.push_str(&format!(" WHERE {}", predicates.join(" AND ")));
     sql.push_str(" ORDER BY c.sort_ms DESC,c.sort_order DESC LIMIT 300");

@@ -139,6 +139,13 @@
       <span>{sourceName(item)} / {relativeTime(item.copied_ms)}</span>
       <span>SNAPSHOT {String(item.id).padStart(3, "0")} / LOCAL</span>
     </div>
+    {#if item.favorite && (item.title || item.note)}
+      <!-- M2-6：收藏的标题和备注在设置“整理”页里编辑，这里只显示。 -->
+      <div class="label-block">
+        {#if item.title}<strong>{item.title}</strong>{/if}
+        {#if item.note}<p>{item.note}</p>{/if}
+      </div>
+    {/if}
 
     {#if kind === "image"}
       {#if expanded}
@@ -213,6 +220,9 @@
 </div>
 
 <style>
+  .label-block { display: grid; gap: 4px; margin: 0 0 12px; padding: 0 0 10px 10px; border-left: 2px solid var(--accent); border-bottom: 1px solid var(--line-soft); }
+  .label-block strong { color: var(--text); font-size: 13px; font-weight: 650; }
+  .label-block p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.6; white-space: pre-wrap; }
   .preview-swap { min-height: 100%; will-change: transform, opacity; }
   .preview-eyebrow { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-3); margin-bottom: 13px; color: var(--faint); font: 9px/1.5 var(--font-mono); letter-spacing: .05em; }
   .preview-eyebrow span:last-child { text-align: right; white-space: nowrap; }

@@ -400,3 +400,88 @@ fn memory_source_names_fall_back_to_file_stem_then_process() {
     assert_eq!(items[0].source_name.as_deref(), Some("source.exe"));
     assert_eq!(items[1].source_name.as_deref(), Some("The Editor"));
 }
+
+// E03/E04：内存模式重排只在未删除收藏的槽位里置换，回收站里的收藏保持原位；出错不改动。
+#[test]
+fn memory_reorder_keeps_trashed_slot_and_rejects_bad_input() {
+    let mut history = History::new(sha256);
+    let at = Instant::now();
+    for i in 1..=4u32 {
+        history
+            .ingest(
+                content(&[(TEXT, i.to_string().as_bytes())]),
+                event(i, at),
+                false,
+                at,
+            )
+            .unwrap();
+    }
+    for id in 1..=4 {
+        history.set_favorite(id, true).unwrap();
+    }
+    assert!(history.delete(2, 100));
+    let slots = |history: &History| {
+        history
+            .favorites()
+            .into_iter()
+            .map(|item| (item.id, item.favorite_position.unwrap()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(slots(&history), vec![(1, 1), (3, 3), (4, 4)]);
+    let items = history.reorder_favorites(&[4, 1, 3]).unwrap();
+    assert_eq!(
+        items
+            .iter()
+            .map(|i| (i.id, i.favorite_position.unwrap()))
+            .collect::<Vec<_>>(),
+        vec![(4, 1), (1, 3), (3, 4)]
+    );
+    // 恢复后被删的收藏仍在槽位 2。
+    history.restore(2).unwrap();
+    assert_eq!(
+        history
+            .favorites()
+            .into_iter()
+            .map(|i| i.id)
+            .collect::<Vec<_>>(),
+        vec![4, 2, 1, 3]
+    );
+    let before = slots(&history);
+    for bad in [vec![4, 4, 1, 3], vec![4, 2, 1, 99], vec![4, 2, 1], vec![]] {
+        assert!(history.reorder_favorites(&bad).is_err());
+        assert_eq!(slots(&history), before);
+    }
+}
+
+// E04/C09：内存模式的标题备注清理、上限、取消收藏后清空，以及搜索命中。
+#[test]
+fn memory_labels_are_cleaned_limited_cleared_and_searchable() {
+    let mut history = History::new(sha256);
+    let at = Instant::now();
+    history
+        .ingest(
+            Content::text("body", sha256).unwrap(),
+            event(1, at),
+            false,
+            at,
+        )
+        .unwrap();
+    assert!(history.set_favorite_label(1, "x", "y").is_err());
+    history.set_favorite(1, true).unwrap();
+    let item = history
+        .set_favorite_label(1, " Alpha\r\nBeta ", "\n line1\nline2 \n")
+        .unwrap();
+    assert_eq!(item.title, "Alpha  Beta");
+    assert_eq!(item.note, "line1\nline2");
+    let item = history
+        .set_favorite_label(1, &"题".repeat(300), &"注".repeat(3000))
+        .unwrap();
+    assert_eq!(item.title.chars().count(), 200);
+    assert_eq!(item.note.chars().count(), 2000);
+    history.set_favorite_label(1, "Needle", "").unwrap();
+    assert_eq!(history.search("needle").len(), 1);
+    assert_eq!(history.search("needle body").len(), 1);
+    assert!(history.search("needle nothing").is_empty());
+    history.set_favorite(1, false).unwrap();
+    assert!(history.search("needle").is_empty());
+}

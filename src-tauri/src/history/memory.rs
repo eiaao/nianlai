@@ -34,6 +34,9 @@ pub struct Record {
     // 收藏（E01）：顺序一经分配不再变化；被收藏的记录不参与容量淘汰（B03）。
     pub favorite: bool,
     pub favorite_position: Option<u64>,
+    // 收藏的标题与备注（M2-6）。
+    pub title: String,
+    pub note: String,
     observed: bool,
 }
 
@@ -166,7 +169,11 @@ impl History {
                     r.content.file_names.join("\n")
                 )
                 .to_ascii_lowercase();
-                words.iter().all(|word| text.contains(word))
+                // 收藏的标题与备注也参与搜索（C09）。
+                let label = format!("{}\n{}", r.title, r.note).to_ascii_lowercase();
+                words
+                    .iter()
+                    .all(|word| text.contains(word) || label.contains(word))
             })
             .map(|r| r.id)
             .collect();
@@ -203,8 +210,54 @@ impl History {
         } else if !favorite {
             record.favorite = false;
             record.favorite_position = None;
+            record.title.clear();
+            record.note.clear();
         }
         self.snapshot().items.into_iter().find(|item| item.id == id)
+    }
+
+    /// 重排收藏（E03/E04）：只在这些收藏现有的序号槽位里置换，回收站里的收藏不动。
+    pub fn reorder_favorites(&mut self, ids: &[usize]) -> Result<Vec<Preview>, String> {
+        let mut slots: Vec<(usize, u64)> = self
+            .records
+            .iter()
+            .filter(|r| r.favorite)
+            .map(|r| (r.id, r.favorite_position.unwrap_or(0)))
+            .collect();
+        let mut seen = ids.to_vec();
+        seen.sort_unstable();
+        if seen.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err("收藏顺序里有重复的条目".into());
+        }
+        let mut expected: Vec<usize> = slots.iter().map(|(id, _)| *id).collect();
+        expected.sort_unstable();
+        if expected != seen {
+            return Err("收藏顺序与当前收藏不一致，请刷新后重试".into());
+        }
+        slots.sort_by_key(|(_, position)| *position);
+        for (id, (_, position)) in ids.iter().zip(&slots) {
+            if let Some(record) = self.records.iter_mut().find(|r| r.id == *id) {
+                record.favorite_position = Some(*position);
+            }
+        }
+        Ok(self.favorites())
+    }
+
+    /// 修改收藏的标题与备注（E03/E04）；不是收藏则报错。
+    pub fn set_favorite_label(
+        &mut self,
+        id: usize,
+        title: &str,
+        note: &str,
+    ) -> Result<Preview, String> {
+        let record = self
+            .records
+            .iter_mut()
+            .find(|r| r.id == id && r.favorite)
+            .ok_or("只有收藏的条目才能设置标题和备注")?;
+        record.title = nianlai_store::clean_title(title);
+        record.note = nianlai_store::clean_note(note);
+        Ok(preview(record))
     }
 
     // 删除一条历史；收藏的不删（B03）。
@@ -372,6 +425,8 @@ impl History {
                 partial,
                 favorite: false,
                 favorite_position: None,
+                title: String::new(),
+                note: String::new(),
                 observed: true,
             }
         };
@@ -449,6 +504,8 @@ impl History {
                 partial: false,
                 favorite: false,
                 favorite_position: None,
+                title: String::new(),
+                note: String::new(),
                 observed: false,
             });
             self.next_id += 1;
@@ -478,6 +535,8 @@ fn preview(record: &Record) -> Preview {
             .then(|| source_name(event)),
         // 内存模式不做图标提取（无磁盘库可写缓存），图标字段留空。
         source_icon: None,
+        title: record.title.clone(),
+        note: record.note.clone(),
         file_state: None,
     }
 }

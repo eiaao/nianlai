@@ -471,6 +471,7 @@ impl Runtime {
         // 采集规则即时生效：下一次复制就按新规则检查。
         crate::capture::rules::gate().apply(&saved.capture);
         crate::history::snapshots::set_limit(saved.snapshots.max_mb);
+        crate::history::set_reuse_to_top(saved.history.reuse_to_top);
         if update_hotkey {
             state.record(&controller.logger);
         }
