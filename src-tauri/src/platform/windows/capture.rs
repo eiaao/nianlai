@@ -1,5 +1,8 @@
 mod reader;
 
+#[cfg(test)]
+mod fake_password_manager_tests;
+
 use super::clipboard;
 use crate::{
     capture::SelfCheck,
