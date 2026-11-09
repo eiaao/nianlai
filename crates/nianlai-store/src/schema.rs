@@ -23,6 +23,15 @@ pub fn readonly(path: &Path) -> Result<Connection> {
     }
     Ok(c)
 }
+/// 只读打开任意不高于当前版本的库（快照校验用）；版本比当前新（NewerSchema）或为 0 都拒绝。
+pub fn readonly_any(path: &Path) -> Result<Connection> {
+    let c = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    c.busy_timeout(std::time::Duration::from_secs(5))?;
+    if version(&c)? == 0 {
+        return Err(Error::Invalid("schema_version"));
+    }
+    Ok(c)
+}
 // 建表和升级都在 migrations 里；这里只负责“打开一个可写库”的固定流程。返回迁移前的版本（没迁移为 None）。
 pub fn initialize(c: &mut Connection, directory: &Path) -> Result<Option<u32>> {
     let migrated_from = migrations::migrate(c, migrations::STEPS, &mut |c, from| {

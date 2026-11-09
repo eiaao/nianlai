@@ -984,3 +984,127 @@ fn fixture_v2_opens_with_latest_code_and_trash_works() {
     assert!(store.restore(id).unwrap().is_some());
     check(&temp.0).unwrap();
 }
+
+// ---- 旧版本快照：能校验、能恢复、恢复后启动自动升级 ----
+
+// 把夹具放进 <目录>/snapshots/，当作旧版本拍的快照；目录里另有一份当前版本的库（带一条夹具里没有的记录）。
+fn directory_with_old_snapshot(version: u32) -> (Temp, PathBuf) {
+    let temp = Temp::new();
+    {
+        let store = Store::open(&temp.0, sha256).unwrap();
+        let origin = Instant::now();
+        store
+            .ingest(text("快照之后的新记录"), event(1, origin), false, origin)
+            .unwrap();
+    }
+    let folder = temp.0.join("snapshots");
+    fs::create_dir_all(&folder).unwrap();
+    let file = folder.join("history-20260101-000000-000-1-0-daily.db");
+    fs::copy(fixtures().join(format!("v{version}.db")), &file).unwrap();
+    (temp, file)
+}
+
+fn folder_listing(folder: &Path) -> Vec<String> {
+    let mut names: Vec<_> = fs::read_dir(folder)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn old_version_snapshots_validate_restore_and_upgrade_on_open() {
+    for version in 1..VERSION {
+        let manifest = load_manifest(version);
+        let (temp, file) = directory_with_old_snapshot(version);
+        // 列表里带着快照的库版本。
+        let list = list_snapshots(&temp.0).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].version, Some(version));
+        // 校验通过：内容数与夹具清单一致（在升级后的副本上统计）。
+        let counts = validate_snapshot(&file).unwrap();
+        assert_eq!(counts.contents, manifest.counts.contents);
+        // 恢复（替换文件）后库仍是旧版本，启动时 Store::open 才迁移，并照常备份。
+        restore(&temp.0, &file).unwrap();
+        let c = Connection::open_with_flags(
+            temp.0.join("history.db"),
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        assert_eq!(user_version(&c).unwrap(), version);
+        drop(c);
+        let store = Store::open(&temp.0, sha256).unwrap();
+        assert_eq!(store.report().version, VERSION);
+        assert_eq!(store.report().migrated_from, Some(version));
+        assert_eq!(store.cache().total, manifest.counts.contents);
+        assert_matches(&temp.0, &manifest);
+        check(&temp.0).unwrap();
+        let backed_up = backups(&temp.0);
+        assert_eq!(backed_up.len(), 1);
+        assert_valid_backup(&backed_up[0], version, &manifest);
+        // 升级后的库可正常使用回收站。
+        let id = store.cache().items[0].id;
+        assert!(store.delete(id).unwrap());
+        assert!(store.restore(id).unwrap().is_some());
+    }
+}
+
+#[test]
+fn snapshot_newer_than_current_is_still_rejected() {
+    let (temp, file) = directory_with_old_snapshot(2);
+    let c = writable(&file).unwrap();
+    c.execute_batch(&format!("PRAGMA user_version={};", VERSION + 1))
+        .unwrap();
+    drop(c);
+    assert_eq!(
+        list_snapshots(&temp.0).unwrap()[0].version,
+        Some(VERSION + 1)
+    );
+    let expected = Error::NewerSchema {
+        found: VERSION + 1,
+        supported: VERSION,
+    };
+    assert_eq!(validate_snapshot(&file).err(), Some(expected.clone()));
+    let before = fs::read(temp.0.join("history.db")).unwrap();
+    assert_eq!(restore(&temp.0, &file).err(), Some(expected));
+    assert_eq!(fs::read(temp.0.join("history.db")).unwrap(), before);
+    // 版本号为 0（不是拈来的库）也拒绝。
+    let c = writable(&file).unwrap();
+    c.execute_batch("PRAGMA user_version=0;").unwrap();
+    drop(c);
+    assert!(validate_snapshot(&file).is_err());
+}
+
+#[test]
+fn validating_old_snapshot_leaves_the_file_untouched() {
+    for version in 1..VERSION {
+        let (temp, file) = directory_with_old_snapshot(version);
+        let folder = temp.0.join("snapshots");
+        let (bytes, names) = (fs::read(&file).unwrap(), folder_listing(&folder));
+        validate_snapshot(&file).unwrap();
+        validate_snapshot(&file).unwrap();
+        assert_eq!(fs::read(&file).unwrap(), bytes);
+        // 没有留下 -wal / -shm / 暂存文件，版本号也没变。
+        assert_eq!(folder_listing(&folder), names);
+        assert_eq!(list_snapshots(&temp.0).unwrap()[0].version, Some(version));
+        // 校验过程不产生迁移备份。
+        assert!(backups(&temp.0).is_empty());
+    }
+}
+
+#[test]
+fn broken_old_snapshot_is_still_rejected() {
+    let (_temp, file) = directory_with_old_snapshot(2);
+    // v2 快照里有悬空的来源应用引用：升级后关系校验应当发现。
+    let c = writable(&file).unwrap();
+    c.execute_batch(
+        "PRAGMA foreign_keys=OFF; UPDATE copy_events SET source_app_id=9999 WHERE id=(SELECT min(id) FROM copy_events);",
+    )
+    .unwrap();
+    drop(c);
+    assert_eq!(
+        validate_snapshot(&file).err(),
+        Some(Error::Invalid("relational_integrity"))
+    );
+}

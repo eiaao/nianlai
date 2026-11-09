@@ -65,7 +65,8 @@
         <li>
           <div class="row">
             <span class="when">{time(item.created_ms)}</span>
-            <span class="tag">{item.reason ? REASONS[item.reason] : "自动"}</span>
+            <span class="tags"><span class="tag">{item.reason ? REASONS[item.reason] : "自动"}</span>
+            {#if item.version !== null && item.version < snapshots.current_version}<span class="tag" title="这份快照的库结构是 v{item.version}，当前是 v{snapshots.current_version}">旧版本，恢复后自动升级</span>{/if}</span>
             <span class="bytes">{size(item.bytes)}</span>
             <button type="button" disabled={!!busy || disabled} onclick={() => { confirming = confirming === item.name ? null : item.name; actionError = ""; }}>恢复</button>
           </div>
@@ -109,6 +110,7 @@
   .list li.empty { padding: 14px 16px; color: var(--settings-muted); font-size: 11px; }
   .row { display: grid; grid-template-columns: minmax(0, 1fr) auto 72px auto; align-items: center; gap: 12px; min-height: 44px; padding: 6px 16px; }
   .when { font: 12px var(--font-mono); }
+  .tags { display: flex; align-items: center; gap: 6px; }
   .tag { padding: 1px 7px; border: 1px solid var(--settings-line); border-radius: var(--radius-sm); color: var(--settings-muted); font-size: 10px; }
   .bytes { color: var(--settings-muted); font: 11px var(--font-mono); text-align: right; }
   button { min-height: 28px; padding: 3px 12px; border: 1px solid var(--settings-line); border-radius: var(--radius-sm); background: var(--settings-selected); font-size: 11px; }
