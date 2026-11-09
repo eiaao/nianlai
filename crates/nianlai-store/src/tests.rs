@@ -909,3 +909,78 @@ fn store_reopen_total(temp: &Temp, expected: usize) {
     drop(store);
     assert_eq!(temp.store().cache().total, expected - 1);
 }
+
+#[test]
+fn storage_usage_file_lists_images_bulk_trash_and_compact() {
+    let temp = Temp::new();
+    let store = temp.store();
+    let at = Instant::now();
+    let files = |paths: &[&str]| {
+        Content::new(
+            BTreeMap::from([(
+                FILES.into(),
+                Data::Files(
+                    paths
+                        .iter()
+                        .map(|p| p.to_string())
+                        .collect::<Vec<_>>()
+                        .into(),
+                ),
+            )]),
+            sha256,
+        )
+        .unwrap()
+    };
+    let image = |fill: u8, size: usize| {
+        Content::new(
+            BTreeMap::from([("PNG".into(), Data::Bytes(vec![fill; size].into()))]),
+            sha256,
+        )
+        .unwrap()
+    };
+    ingest(&store, text("普通文本"), 1, at);
+    ingest(&store, files(&["C:\\a.txt", "C:\\b.txt"]), 2, at);
+    ingest(&store, image(1, 300_000), 3, at);
+    ingest(&store, image(2, 100_000), 4, at);
+    ingest(&store, files(&["D:\\c.txt"]), 5, at);
+    store.set_favorite(4, true).unwrap().unwrap();
+    store.set_favorite(5, true).unwrap().unwrap();
+
+    let reader = store.reader().unwrap();
+    let lists = reader.file_lists().unwrap();
+    assert_eq!(lists.len(), 2);
+    assert_eq!(lists[0].id, 2);
+    assert_eq!(lists[0].paths, ["C:\\a.txt", "C:\\b.txt"]);
+    assert!(!lists[0].favorite && lists[1].favorite);
+
+    let usage = reader.usage().unwrap();
+    let image_usage = usage.kinds.iter().find(|k| k.kind == "图片").unwrap();
+    assert_eq!(image_usage.count, 2);
+    assert!(image_usage.bytes >= 400_000);
+    assert_eq!(usage.trashed_count, 0);
+
+    // 按大小从大到小，收藏的也在（界面上不让选）；时间筛选取不到未来以前的就为空。
+    let images: Vec<usize> = reader.images(None).unwrap().iter().map(|i| i.id).collect();
+    assert_eq!(images, [3, 4]);
+    assert!(reader.images(Some(0)).unwrap().is_empty());
+
+    // 批量清理跳过收藏、重复和不存在的。
+    let moved = store.trash_many(vec![2, 3, 4, 5, 3, 99]).unwrap();
+    assert_eq!(moved, [2, 3]);
+    assert_eq!(store.cache().total, 3);
+    let reader = store.reader().unwrap();
+    assert_eq!(reader.file_lists().unwrap().len(), 1, "回收站里的不再检查");
+    let usage = reader.usage().unwrap();
+    assert_eq!(usage.trashed_count, 2);
+    assert!(usage.trashed_bytes >= 300_000);
+
+    // 彻底删除后空出来的页可以压缩回收。
+    store.purge(None, u64::MAX).unwrap();
+    assert!(store.reader().unwrap().usage().unwrap().reclaimable_bytes > 0);
+    store.compact().unwrap();
+    assert_eq!(
+        store.reader().unwrap().usage().unwrap().reclaimable_bytes,
+        0
+    );
+    assert_eq!(store.cache().total, 3);
+}

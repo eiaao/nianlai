@@ -122,6 +122,7 @@ fn no_submission_message(result: &Value) -> &'static str {
             | "generic_clipboard_close_failed",
         ) => "剪贴板忙，本次未粘贴，请关闭面板后重新呼出",
         Some("record_missing") => "这条记录已不在历史里，本次未粘贴，请关闭面板后重新呼出",
+        Some("files_missing") => "原文件不在了，没有粘贴",
         Some(
             "request_cancelled"
             | "native_input_desktop_unavailable"
@@ -485,6 +486,10 @@ impl Controller {
     pub fn history_snapshot(&self) -> Snapshot {
         self.history.snapshot()
     }
+    /// 呼出后在后台检查看得到的文件条目是否还在（M2-3）。
+    pub fn check_visible_files(&self) {
+        self.history.check_visible_files();
+    }
     pub fn search(
         &self,
         query: &str,
@@ -578,7 +583,8 @@ impl Panel {
     fn shown_event(&self, app: &AppHandle) {
         if let (Some(started), Some(shown)) = (self.started, self.shown) {
             // 历史随呼出事件一起发：前端不用再取一次，呼出后马上按键也拿到的是最新列表。
-            let history = app.state::<Controller>().history_snapshot();
+            let controller = app.state::<Controller>();
+            let history = controller.history_snapshot();
             self.emit(
                 "panel:shown",
                 json!({"hotkeyToShowMs":shown.duration_since(started).as_secs_f64()*1000.0,"history":history,
@@ -586,6 +592,7 @@ impl Panel {
                     "terminal_feedback":self.interaction == Interaction::CloseOnly,
                     "foregroundRevision":self.monitor.as_ref().map_or(0, |monitor| monitor.revision())}),
             );
+            controller.check_visible_files();
         }
     }
     fn show(
@@ -1584,6 +1591,23 @@ impl Panel {
                     let drained = restricted || drain();
                     let read_started = Instant::now();
                     let loaded = history.get(id);
+                    // 文件条目粘贴前现查一遍（M2-3）：全部不在就不粘贴，部分不在只粘贴还在的。
+                    let mut files_skipped = 0;
+                    let mut files_missing = false;
+                    let loaded = match loaded {
+                        Ok(Some(content)) => match history.usable_files(&content) {
+                            crate::history::files::Usable::All => Ok(Some(content)),
+                            crate::history::files::Usable::Partial(filtered, skipped) => {
+                                files_skipped = skipped;
+                                Ok(Some(filtered))
+                            }
+                            crate::history::files::Usable::Nothing => {
+                                files_missing = true;
+                                Ok(None)
+                            }
+                        },
+                        other => other,
+                    };
                     let exports = history.exports();
                     let store_read_ms = read_started.elapsed().as_secs_f64()*1000.0;
                     let mut restored = None;
@@ -1605,6 +1629,7 @@ impl Panel {
                                 // 读库失败也要结束旧请求；主线程会再次检查会话，不能收起新的面板。
                                 let focus = restore(RestorePolicy::LegacyBeforeSubmit);
                                 let mut result = match missing {
+                                    Ok(None) if files_missing => json!({"clipboard_written":false,"reason":"files_missing"}),
                                     Ok(None) => json!({"clipboard_written":false,"reason":"record_missing"}),
                                     Err(code) => json!({"clipboard_written":false,"reason":"store_read_failed","error_code":code}),
                                     Ok(Some(_)) => unreachable!(),
@@ -1614,6 +1639,9 @@ impl Panel {
                             }
                         }
                     };
+                    if files_skipped > 0 && result["clipboard_written"] == true {
+                        result["files_skipped"] = json!(files_skipped);
+                    }
                     if !restricted {
                         result["input_cleanup"] = json!(if drained {
                             hooks.as_ref().map_or("unavailable", Hooks::input_release_evidence)
@@ -1739,6 +1767,8 @@ impl Panel {
                     {
                         let message = if result["reason"] == "record_missing" {
                             "这条记录已不在历史里"
+                        } else if result["reason"] == "files_missing" {
+                            "原文件不在了，没有粘贴"
                         } else if result["reason"] == "store_read_failed" {
                             "读取历史失败，未改写剪贴板。"
                         } else if result["reason"] == "clipboard_capture_busy" {

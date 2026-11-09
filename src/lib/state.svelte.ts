@@ -901,6 +901,14 @@ export class PanelState {
     void this.command(() => ipc.hidePanel(session), session);
   };
 
+  /** 面板里的回收站入口：收起面板，打开设置里的回收站（列表和管理都在设置里）。 */
+  openTrash = () => {
+    if (!this.visible) return;
+    const session = this.session;
+    void this.command(() => ipc.hidePanel(session), session);
+    void ipc.openSettings?.("trash")?.catch(() => {});
+  };
+
   startComposition = (event?: CompositionEvent) => {
     this.composing = true;
     this.imeActive = true;
@@ -1096,7 +1104,7 @@ export class PanelState {
           && (this.interaction !== "close_only" || payload.close_only === true)) {
           if (payload.close_only) this.setInteraction("close_only");
           this.message = payload.message; this.busy = false;
-          if (!payload.close_only && ["这条记录已不在历史里", "读取历史失败", "写入剪贴板失败"].some((text) => payload.message.includes(text))) {
+          if (!payload.close_only && ["这条记录已不在历史里", "读取历史失败", "写入剪贴板失败", "原文件不在了"].some((text) => payload.message.includes(text))) {
             this.showFailure(payload.message);
           }
         }

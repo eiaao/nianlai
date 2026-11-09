@@ -256,6 +256,11 @@ impl History {
     }
 
     // 收藏列表按收藏顺序返回（E01）。
+    /// 不在回收站里的记录（文件失效检查用）。
+    pub fn records(&self) -> impl Iterator<Item = &Record> {
+        self.records.iter()
+    }
+
     pub fn favorites(&self) -> Vec<Preview> {
         let mut items: Vec<Preview> = self
             .snapshot()
@@ -473,6 +478,7 @@ fn preview(record: &Record) -> Preview {
             .then(|| source_name(event)),
         // 内存模式不做图标提取（无磁盘库可写缓存），图标字段留空。
         source_icon: None,
+        file_state: None,
     }
 }
 

@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onDestroy, tick } from "svelte";
-  import type { HistoryItem } from "../ipc";
+  import * as ipc from "../ipc";
+  import type { HistoryItem, PathCheck } from "../ipc";
   import { formatTime, type PanelState } from "../state.svelte";
   import { colorValue, linkParts, relativeTime, sourceName, visualKind } from "./content";
   import { SpringValue } from "./motion";
@@ -29,6 +30,21 @@
       previousId = id;
     });
   });
+
+  // 文件条目：现查每个路径还在不在（M2-3）。切换条目时旧的结果作废。
+  let paths = $state<PathCheck[] | null>(null);
+  let pathsFor = -1;
+  $effect(() => {
+    const id = item?.id ?? -1;
+    const files = kind === "files";
+    if (id === pathsFor) return;
+    pathsFor = id;
+    paths = null;
+    if (!files) return;
+    void ipc.getFilePaths?.(id)?.then((result) => { if (pathsFor === id) paths = result; }).catch(() => {});
+  });
+  const mark = $derived(item?.file_state ?? null);
+  const fileName = (path: string) => path.split(/[\\/]/).filter(Boolean).pop() ?? path;
 
   onDestroy(() => { y.destroy(); opacity.destroy(); });
 </script>
@@ -65,15 +81,33 @@
     {:else if kind === "code"}
       <pre class="code-sheet">{item.preview || "（空文本）"}</pre>
     {:else if kind === "files"}
-      <h2 class="preview-title">{item.file_names.length} 个文件</h2>
+      <h2 class="preview-title">{item.file_names.length === 1 ? item.file_names[0] : `${item.file_names.length} 个文件`}</h2>
       <ul class="file-list">
-        {#each item.file_names as name}
-          <li><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M5 2.5h6l4 4v11H5v-15Z M11 2.5v4h4" stroke="currentColor"/></svg><span>{name}</span></li>
+        {#if paths}
+          {#each paths as entry}
+            <li class={entry.state}>
+              {#if entry.state === "missing"}<b class="file-state" aria-label="不在了">✕</b>{:else if entry.state === "unknown"}<b class="file-state" aria-label="未确认">?</b>{:else}<svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M5 2.5h6l4 4v11H5v-15Z M11 2.5v4h4" stroke="currentColor"/></svg>{/if}
+              <span class="file-copy"><span>{fileName(entry.path)}</span><code>{entry.path}</code></span>
+              {#if entry.state === "missing"}<small>不在了</small>{:else if entry.state === "unknown"}<small>未确认</small>{/if}
+            </li>
+          {/each}
         {:else}
-          <li><span>文件名称不可用</span></li>
-        {/each}
+          {#each item.file_names as name}
+            <li><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M5 2.5h6l4 4v11H5v-15Z M11 2.5v4h4" stroke="currentColor"/></svg><span>{name}</span></li>
+          {:else}
+            <li><span>文件名称不可用</span></li>
+          {/each}
+        {/if}
       </ul>
-      <p class="preview-note">这里记录文件引用，不复制文件内容。</p>
+      {#if mark?.state === "missing"}
+        <p class="file-note">原文件已被移走或删除，粘贴不了。</p>
+      {:else if mark?.state === "partial"}
+        <p class="file-note">有 {mark.missing} 个已不在，粘贴时只粘还在的 {mark.total - mark.missing} 个。</p>
+      {:else if mark?.state === "unknown"}
+        <p class="file-note neutral">网络位置连不上，暂时无法确认。</p>
+      {:else}
+        <p class="preview-note">这里记录文件引用，不复制文件内容。</p>
+      {/if}
     {:else if kind === "short"}
       <h2 class="preview-title">{item.preview || "（空文本）"}</h2>
     {:else}
@@ -107,6 +141,15 @@
   .file-list { margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--line); }
   .file-list li { display: flex; align-items: flex-start; gap: 8px; padding: 12px 0; border-bottom: 1px solid var(--line-soft); font-size: 12px; overflow-wrap: anywhere; }
   .file-list svg { width: 18px; height: 18px; flex: none; }
+  .file-state { width: 18px; flex: none; text-align: center; font: 600 13px/18px var(--font-mono); }
+  .file-list li.missing .file-state, .file-list li.missing small { color: var(--state-caution); }
+  .file-list li.unknown .file-state, .file-list li.unknown small { color: var(--faint); }
+  .file-list li.missing .file-copy > span { color: var(--muted); }
+  .file-copy { min-width: 0; flex: 1; display: grid; gap: 3px; }
+  .file-copy code { color: var(--faint); font: 10px/1.5 var(--font-mono); overflow-wrap: anywhere; }
+  .file-list small { flex: none; font-size: 10px; line-height: 18px; }
+  .file-note { margin: var(--space-4) 0 0; padding: 8px 10px; border-left: 2px solid var(--state-caution); background: color-mix(in srgb, var(--state-caution) 8%, transparent); color: var(--muted); font-size: 11px; line-height: 1.7; }
+  .file-note.neutral { border-left-color: var(--line); background: color-mix(in srgb, var(--line) 12%, transparent); }
   .partial { margin: var(--space-4) 0 0; color: var(--state-caution); font-size: 11px; line-height: 1.6; }
   .empty-preview { padding: var(--space-6) 0; color: var(--muted); line-height: 1.8; }
   .empty-preview strong { color: var(--text); font-size: 14px; }
@@ -129,6 +172,7 @@
   .compact .color-value { margin-top: 8px; font-size: 19px; }
   .compact .color-channels { margin-top: 3px; font-size: 10px; }
   .compact .file-list li { padding: 6px 0; }
+  .compact .file-note { margin-top: 8px; font-size: 10px; }
   .compact .empty-preview { padding: 8px 0; }
   .compact .partial { margin-top: 8px; }
   @media (max-width: 599px) {

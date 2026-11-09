@@ -133,6 +133,28 @@ pub struct Counts {
     // 回收站里的条数（v3 起）；contents 含这些，列表总数要减掉。
     pub trashed: usize,
 }
+/// 某一类内容的条数和字节数（存储管理，B05）。只算不在回收站里的。
+#[derive(Clone, Debug, Serialize)]
+pub struct KindUsage {
+    pub kind: String,
+    pub count: usize,
+    pub bytes: u64,
+}
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct Usage {
+    pub kinds: Vec<KindUsage>,
+    pub trashed_count: usize,
+    pub trashed_bytes: u64,
+    /// 数据库里已经空出来、要压缩（VACUUM）才还给磁盘的字节数。
+    pub reclaimable_bytes: u64,
+}
+/// 文件类条目的路径（B04 失效检查用）。
+#[derive(Clone, Debug)]
+pub struct FileList {
+    pub id: usize,
+    pub favorite: bool,
+    pub paths: Vec<String>,
+}
 #[derive(Clone, Default)]
 pub struct Cache {
     pub items: Vec<Metadata>,
@@ -219,6 +241,26 @@ impl Reader {
     pub fn trash(&self) -> Result<Vec<(Metadata, u64)>> {
         let tx = self.connection.unchecked_transaction()?;
         let items = schema::trash(&tx)?;
+        tx.commit()?;
+        Ok(items)
+    }
+    /// 不在回收站里的文件类条目和它们的路径。
+    pub fn file_lists(&self) -> Result<Vec<FileList>> {
+        let tx = self.connection.unchecked_transaction()?;
+        let lists = schema::file_lists(&tx)?;
+        tx.commit()?;
+        Ok(lists)
+    }
+    pub fn usage(&self) -> Result<Usage> {
+        let tx = self.connection.unchecked_transaction()?;
+        let usage = schema::usage(&tx)?;
+        tx.commit()?;
+        Ok(usage)
+    }
+    /// 存在库里的图片（没有源文件的截图等），`before_ms` 只取复制时间早于它的；按大小从大到小。
+    pub fn images(&self, before_ms: Option<u64>) -> Result<Vec<Metadata>> {
+        let tx = self.connection.unchecked_transaction()?;
+        let items = schema::images(&tx, before_ms)?;
         tx.commit()?;
         Ok(items)
     }
