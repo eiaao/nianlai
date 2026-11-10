@@ -23,10 +23,10 @@
   ];
   let page = $state("general");
   // “数据与备份”的子页面；面板里的回收站入口打开设置时带 #trash 直接跳过来。
-  let storageView = $state<"main" | "trash" | "snapshots" | "images">("main");
+  let storageView = $state<"main" | "trash" | "snapshots" | "images" | "export" | "import">("main");
 
   function navigate(target: string) {
-    if (target === "trash" || target === "snapshots" || target === "images") {
+    if (target === "trash" || target === "snapshots" || target === "images" || target === "export" || target === "import") {
       page = "storage";
       storageView = target;
     } else if (pages.some((entry) => entry.id === target)) {

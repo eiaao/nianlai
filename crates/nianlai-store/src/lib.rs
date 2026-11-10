@@ -1,3 +1,4 @@
+mod backup;
 pub mod content;
 pub mod hash;
 mod migrations;
@@ -6,6 +7,12 @@ mod search;
 mod snapshot;
 mod write;
 
+pub use backup::{
+    EXTENSION as BACKUP_EXTENSION, ExportReport, Inspection, MergePreview, MergeReport,
+    OverwritePreview, Step as InspectionStep, Summary as BackupSummary, apply_overwrite,
+    clean_stale as clean_stale_imports, discard as discard_import, export as export_backup,
+    inspect as inspect_backup, prepare_overwrite, summary as backup_summary,
+};
 pub use migrations::VERSION;
 pub use search::{Search, SearchMode};
 pub use snapshot::{
@@ -298,6 +305,8 @@ pub(crate) fn writable(path: &Path) -> Result<Connection> {
     Ok(c)
 }
 
+#[cfg(test)]
+mod backup_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

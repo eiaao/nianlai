@@ -60,6 +60,31 @@ pub mod dialog {
     pub fn error(text: &str) {
         eprintln!("{text}");
     }
+    pub fn choose_backup(_: usize, _: bool, _: &str) -> Result<Option<String>, String> {
+        Err("文件对话框仅支持 Windows".into())
+    }
+    pub fn reveal(_: &std::path::Path) -> Result<(), String> {
+        Ok(())
+    }
+}
+// 本地日期：非 Windows 没有时区接口，退回 UTC。
+pub mod time {
+    pub fn local_date() -> (u16, u8, u8) {
+        let days = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() / 86_400) as i64;
+        // civil_from_days（Howard Hinnant）。
+        let z = days + 719_468;
+        let era = z.div_euclid(146_097);
+        let doe = z.rem_euclid(146_097);
+        let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let day = doy - (153 * mp + 2) / 5 + 1;
+        let month = if mp < 10 { mp + 3 } else { mp - 9 };
+        let year = yoe + era * 400 + i64::from(month <= 2);
+        (year as u16, month as u8, day as u8)
+    }
 }
 // 输入法状态只在 Windows 上能查；这里只给出同样形状的 JSON。
 pub mod ime {
