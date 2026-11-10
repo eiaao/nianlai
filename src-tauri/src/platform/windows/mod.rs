@@ -12,6 +12,7 @@ pub mod ime;
 mod ime_association;
 pub mod memory;
 pub mod paste;
+pub mod time;
 pub mod uia;
 pub mod webview;
 pub mod window;

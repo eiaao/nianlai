@@ -17,6 +17,8 @@ use std::{
 };
 
 const PENDING_FILE: &str = "restore-pending";
+/// 登记文件内容以此开头表示导入备份覆盖，后面是临时目录令牌；快照文件名都以 history- 开头，不会混淆。
+const IMPORT_PREFIX: &str = "import:";
 const MIB: u64 = 1024 * 1024;
 /// 运行期间多久检查一次是否该拍每日快照。
 pub const CHECK_INTERVAL: Duration = Duration::from_secs(60 * 60);
@@ -27,7 +29,10 @@ static LAST_RESTORE: Mutex<Option<Restored>> = Mutex::new(None);
 /// 本次启动时执行的恢复结果，设置页据此提示。
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct Restored {
+    /// 快照文件名；导入备份覆盖时是被导入的备份令牌（`import:<令牌>`）。
     pub name: String,
+    /// "snapshot" 或 "import"（导入备份并覆盖，M2-4）。
+    pub kind: &'static str,
     pub error: Option<String>,
 }
 
@@ -112,6 +117,30 @@ pub fn schedule_restore(directory: &Path, name: &str, logger: &Logger) -> Result
     Ok(())
 }
 
+/// 登记“导入备份并覆盖”（M2-4）：临时目录里的库先完整校验，通过才登记；校验失败不改动任何东西。
+/// 重启后在 `apply_pending` 里和快照恢复走同一条路：先另拍“恢复前”快照，再换库、换图标。
+pub fn schedule_import(directory: &Path, token: &str, logger: &Logger) -> Result<(), String> {
+    if let Err(error) = nianlai_store::prepare_overwrite(directory, token) {
+        logger.event(
+            "backup_import_rejected",
+            json!({"error_code":error.to_string()}),
+        );
+        return Err("这份备份校验没有通过，不能用来覆盖".to_owned());
+    }
+    let folder = directory.join("snapshots");
+    fs::create_dir_all(&folder).map_err(|_| "覆盖没有登记成功，请重试".to_owned())?;
+    fs::write(folder.join(PENDING_FILE), format!("{IMPORT_PREFIX}{token}"))
+        .map_err(|_| "覆盖没有登记成功，请重试".to_owned())?;
+    logger.event("backup_import_scheduled", json!({}));
+    Ok(())
+}
+
+/// 这个令牌的临时目录是否正被登记的覆盖占用（此时不能清理）。
+pub fn import_pending(directory: &Path, token: &str) -> bool {
+    fs::read_to_string(directory.join("snapshots").join(PENDING_FILE))
+        .is_ok_and(|marker| marker.trim().strip_prefix(IMPORT_PREFIX) == Some(token))
+}
+
 /// 启动时、打开库之前调用：有登记的恢复就执行。登记文件无论成败都先删掉，避免反复重试。
 pub fn apply_pending(directory: &Path, logger: &Logger) {
     let marker = directory.join("snapshots").join(PENDING_FILE);
@@ -120,26 +149,46 @@ pub fn apply_pending(directory: &Path, logger: &Logger) {
     };
     let _ = fs::remove_file(&marker);
     let name = name.trim().to_owned();
+    let import = name.strip_prefix(IMPORT_PREFIX).map(str::to_owned);
     let result = (|| -> Result<(), String> {
-        let file = nianlai_store::snapshot_file(directory, &name).ok_or("snapshot_missing")?;
+        // 先确认要恢复的东西在，再动当前库。
+        let file = match &import {
+            Some(_) => None,
+            None => Some(nianlai_store::snapshot_file(directory, &name).ok_or("snapshot_missing")?),
+        };
         // 当前库先另拍一份，不参与轮换，避免把要恢复的那份删掉。
         if directory.join("history.db").exists() {
             nianlai_store::snapshot_with(directory, Reason::BeforeRestore, None, None)
                 .map_err(|error| format!("before_restore:{error}"))?;
         }
-        nianlai_store::restore(directory, &file).map_err(|error| error.to_string())?;
-        Ok(())
+        match (&import, file) {
+            (Some(token), _) => nianlai_store::apply_overwrite(directory, token),
+            (None, Some(file)) => nianlai_store::restore(directory, &file).map(drop),
+            (None, None) => unreachable!(),
+        }
+        .map_err(|error| error.to_string())
     })();
+    let kind = if import.is_some() {
+        "import"
+    } else {
+        "snapshot"
+    };
     logger.event(
-        if result.is_ok() {
-            "snapshot_restored"
-        } else {
-            "snapshot_restore_failed"
+        match (import.is_some(), result.is_ok()) {
+            (false, true) => "snapshot_restored",
+            (false, false) => "snapshot_restore_failed",
+            (true, true) => "backup_import_applied",
+            (true, false) => "backup_import_failed",
         },
-        json!({"name":name,"error_code":result.as_ref().err()}),
+        json!({"name":if import.is_some() {""} else {&name},"error_code":result.as_ref().err()}),
     );
+    // 覆盖用过的临时目录（无论成败）这里就清掉。
+    if let Some(token) = &import {
+        nianlai_store::discard_import(directory, token);
+    }
     *LAST_RESTORE.lock().unwrap() = Some(Restored {
         name,
+        kind,
         error: result.err(),
     });
 }
@@ -148,6 +197,9 @@ pub fn apply_pending(directory: &Path, logger: &Logger) {
 mod tests {
     use super::*;
     use crate::settings::{Directories, tests::Directory};
+
+    // 恢复结果记在进程级静态里，两条恢复测试不能同时跑。
+    static SERIAL: Mutex<()> = Mutex::new(());
 
     fn logger(directory: &Directory) -> Logger {
         Logger::with_settings(
@@ -165,6 +217,7 @@ mod tests {
 
     #[test]
     fn restore_is_validated_then_applied_at_startup_with_a_before_restore_snapshot() {
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let directory = Directory::new();
         let logger = logger(&directory);
         let data = directory.0.join("data");
@@ -202,11 +255,99 @@ mod tests {
             last_restore(),
             Some(Restored {
                 name: target.clone(),
+                kind: "snapshot",
                 error: None
             })
         );
         let reasons: Vec<_> = list(&data).unwrap().iter().map(|s| s.reason).collect();
         assert_eq!(reasons, [Some(Reason::BeforeRestore), Some(Reason::Manual)]);
+        nianlai_store::check(&data).unwrap();
+    }
+
+    #[test]
+    fn import_overwrite_is_validated_then_applied_at_startup_and_cleans_up() {
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let directory = Directory::new();
+        let logger = logger(&directory);
+        let backups = Directory::new();
+        // 源库：一条内容 + 一个图标，导出成备份。
+        let source = backups.0.join("source");
+        fs::create_dir_all(source.join("icons")).unwrap();
+        let hash = nianlai_store::hash::sha256;
+        let store = nianlai_store::Store::open(&source, hash).unwrap();
+        store
+            .seed(
+                nianlai_store::content::Content::text("来自备份", hash).unwrap(),
+                nianlai_store::CopyEvent {
+                    time_ms: 5,
+                    sequence: 1,
+                    source_process: "a.exe".into(),
+                    source_path: String::new(),
+                    owner_process: "a.exe".into(),
+                    owner_pid: 1,
+                    observed: std::time::Instant::now(),
+                },
+            )
+            .unwrap();
+        let file = backups.0.join("b.nianlai-backup");
+        nianlai_store::export_backup(&source, &file, "t").unwrap();
+        drop(store);
+
+        // 目标数据目录：另有一条本地内容和一个旧图标。
+        let data = directory.0.join("data");
+        {
+            let local = nianlai_store::Store::open(&data, hash).unwrap();
+            local
+                .seed(
+                    nianlai_store::content::Content::text("本地", hash).unwrap(),
+                    nianlai_store::CopyEvent {
+                        time_ms: 9,
+                        sequence: 1,
+                        source_process: "b.exe".into(),
+                        source_path: String::new(),
+                        owner_process: "b.exe".into(),
+                        owner_pid: 1,
+                        observed: std::time::Instant::now(),
+                    },
+                )
+                .unwrap();
+        }
+        fs::create_dir_all(data.join("icons")).unwrap();
+        fs::write(data.join("icons").join("old.png"), b"old").unwrap();
+        let inspection = nianlai_store::inspect_backup(&data, &file);
+        assert!(inspection.ok);
+        // 假令牌登记不上；真令牌登记后占用临时目录。
+        assert!(schedule_import(&data, "nope", &logger).is_err());
+        assert!(!import_pending(&data, &inspection.token));
+        schedule_import(&data, &inspection.token, &logger).unwrap();
+        assert!(import_pending(&data, &inspection.token));
+        apply_pending(&data, &logger);
+        assert_eq!(
+            last_restore(),
+            Some(Restored {
+                name: format!("import:{}", inspection.token),
+                kind: "import",
+                error: None
+            })
+        );
+        assert!(!data.join("snapshots").join(PENDING_FILE).exists());
+        assert!(!data.join("imports").join(&inspection.token).exists());
+        assert!(!data.join("icons").join("old.png").exists());
+        let reasons: Vec<_> = list(&data).unwrap().iter().map(|s| s.reason).collect();
+        assert_eq!(reasons, [Some(Reason::BeforeRestore)]);
+        let store = nianlai_store::Store::open(&data, hash).unwrap();
+        let items = store.cache().items;
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].preview, "来自备份");
+        drop(store);
+
+        // 登记后临时目录被删：应用时失败，库不动，登记已清掉。
+        let inspection = nianlai_store::inspect_backup(&data, &file);
+        schedule_import(&data, &inspection.token, &logger).unwrap();
+        nianlai_store::discard_import(&data, &inspection.token);
+        apply_pending(&data, &logger);
+        assert_eq!(last_restore().unwrap().kind, "import");
+        assert!(last_restore().unwrap().error.is_some());
         nianlai_store::check(&data).unwrap();
     }
 }

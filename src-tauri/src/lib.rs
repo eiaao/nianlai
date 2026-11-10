@@ -124,6 +124,83 @@ async fn restore_snapshot(app: AppHandle, name: String) -> Result<(), String> {
     panel::dispatch(&app, Action::Relaunch)
 }
 
+/// 备份与导入（M2-4）。
+#[tauri::command]
+async fn backup_summary() -> Result<history::backup::Summary, String> {
+    blocking(|shared| shared.backup_summary()).await
+}
+/// 原生“另存为”；归设置窗口所有。取消返回 None。
+#[tauri::command]
+async fn choose_backup_save(
+    app: AppHandle,
+    default_name: String,
+) -> Result<Option<String>, String> {
+    choose_backup(app, true, default_name).await
+}
+#[tauri::command]
+async fn choose_backup_open(app: AppHandle) -> Result<Option<String>, String> {
+    choose_backup(app, false, String::new()).await
+}
+async fn choose_backup(
+    app: AppHandle,
+    save: bool,
+    default_name: String,
+) -> Result<Option<String>, String> {
+    let owner = app
+        .get_webview_window(settings_window::LABEL)
+        .and_then(|window| platform::window::handle(&window).ok())
+        .unwrap_or(0);
+    // 只取文件名部分，防止默认名带路径。
+    let name = std::path::Path::new(&default_name)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    // 对话框会一直等到用户操作，不能占着主线程或异步线程。
+    tauri::async_runtime::spawn_blocking(move || {
+        platform::dialog::choose_backup(owner, save, &name)
+    })
+    .await
+    .map_err(|_| "文件对话框没有完成，请重试".to_owned())?
+}
+#[tauri::command]
+async fn export_backup(path: String) -> Result<history::backup::Exported, String> {
+    blocking(move |shared| shared.export_backup(&path)).await
+}
+#[tauri::command]
+async fn reveal_in_explorer(path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || history::backup::reveal(&path))
+        .await
+        .map_err(|_| "操作没有完成，请重试".to_owned())?
+}
+#[tauri::command]
+async fn inspect_backup(path: String) -> Result<nianlai_store::Inspection, String> {
+    blocking(move |shared| shared.inspect_backup(&path)).await
+}
+#[tauri::command]
+async fn import_backup(
+    app: AppHandle,
+    token: String,
+    mode: history::backup::Mode,
+) -> Result<history::backup::Imported, String> {
+    let imported = blocking(move |shared| shared.import_backup(&token, mode)).await?;
+    if imported.relaunch {
+        // 覆盖已登记：和恢复快照一样，退出并由守护者重启，启动时完成替换。
+        app.state::<Controller>()
+            .logger
+            .event("quit_source", json!({"source":"backup_import"}));
+        panel::dispatch(&app, Action::Relaunch)?;
+    }
+    Ok(imported)
+}
+#[tauri::command]
+async fn discard_import(token: String) -> Result<(), String> {
+    blocking(move |shared| {
+        shared.discard_import(&token);
+        Ok(())
+    })
+    .await
+}
+
 #[tauri::command]
 fn get_history(app: AppHandle) -> history::Snapshot {
     app.state::<Controller>().history_snapshot()
@@ -403,6 +480,14 @@ pub fn run() {
             get_snapshots,
             create_snapshot,
             restore_snapshot,
+            backup_summary,
+            choose_backup_save,
+            choose_backup_open,
+            export_backup,
+            reveal_in_explorer,
+            inspect_backup,
+            import_backup,
+            discard_import,
             get_history,
             search_history,
             get_favorites,

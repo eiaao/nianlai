@@ -1,3 +1,4 @@
+pub mod backup;
 pub mod content;
 pub mod files;
 mod memory;
@@ -307,6 +308,8 @@ impl Shared {
         let _ = self.directory.set(directory.clone());
         // 上次登记的快照恢复要在打开库之前完成。
         snapshots::apply_pending(&directory, &self.logger);
+        // 导入备份遗留的临时目录（覆盖要用的那份已在上一步用完）。
+        nianlai_store::clean_stale_imports(&directory);
         let opened = (|| {
             *self.application_guard.lock().unwrap() =
                 Some(nianlai_store::application_guard(&directory)?);

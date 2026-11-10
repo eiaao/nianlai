@@ -59,7 +59,7 @@ export type SnapshotReason = "daily" | "upgrade" | "manual" | "before_restore";
 export type SnapshotInfo = { name: string; bytes: number; created_ms: number; reason: SnapshotReason | null; version: number | null };
 export type SnapshotState = {
   items: SnapshotInfo[]; keep: number; current_version: number;
-  restored: { name: string; error: string | null } | null;
+  restored: { name: string; error: string | null; kind?: "snapshot" | "import" } | null;
   relaunch: boolean;
 };
 export type SettingsUpdate = AppSettings;
@@ -96,6 +96,18 @@ export type PasteResult = SessionEvent & {
   hint_dwell_ms?: number;
   hint_message?: string;
 };
+
+// M2-4 备份（B07）。
+export type BackupSummary = { items: number; favorites: number; icons: number; bytes: number; default_name: string };
+export type BackupExported = { path: string; bytes: number; items: number; favorites: number; icons: number };
+export type BackupStep = { id: "manifest" | "hashes" | "database"; ok: boolean; detail: string };
+export type BackupInspection = {
+  token: string; file_name: string; exported_ms: number; app_version: string; schema_version: number;
+  upgraded_from: number | null; steps: BackupStep[]; ok: boolean;
+  merge: { new_items: number; new_favorites: number } | null;
+  overwrite: { items: number } | null;
+};
+export type BackupImported = { mode: "merge" | "overwrite"; added_items: number; added_favorites: number; relaunch: boolean; auto_restart: boolean };
 
 // ---------- 命令 ----------
 export const getHistory = () => invoke<HistorySnapshot>("get_history");
@@ -173,3 +185,13 @@ export const onPanelError = on<PanelError>("panel:error");
 export const onPasteResult = on<PasteResult>("panel:paste-result");
 export const onSettingsChanged = on<AppSettings>("settings:changed");
 export const onCaptureChanged = on<{ paused: boolean; ignore_next: boolean }>("capture:changed");
+
+// ---------- M2-4 备份 ----------
+export const backupSummary = () => invoke<BackupSummary>("backup_summary");
+export const chooseBackupSave = (defaultName: string) => invoke<string | null>("choose_backup_save", { defaultName });
+export const chooseBackupOpen = () => invoke<string | null>("choose_backup_open");
+export const exportBackup = (path: string) => invoke<BackupExported>("export_backup", { path });
+export const revealInExplorer = (path: string) => invoke<void>("reveal_in_explorer", { path });
+export const inspectBackup = (path: string) => invoke<BackupInspection>("inspect_backup", { path });
+export const importBackup = (token: string, mode: "merge" | "overwrite") => invoke<BackupImported>("import_backup", { token, mode });
+export const discardImport = (token: string) => invoke<void>("discard_import", { token });

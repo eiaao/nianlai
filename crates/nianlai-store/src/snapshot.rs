@@ -64,7 +64,7 @@ impl Drop for Temporary {
     }
 }
 
-fn relational_check(c: &Connection) -> Result<Counts> {
+pub(crate) fn relational_check(c: &Connection) -> Result<Counts> {
     // 调用方负责先把库升到最新；这里按最新结构校验。
     if schema::version(c)? != VERSION {
         return Err(Error::Invalid("schema_version"));

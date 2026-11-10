@@ -5,12 +5,14 @@
   import TrashSection from "./TrashSection.svelte";
   import SnapshotSection from "./SnapshotSection.svelte";
   import ImagePicker from "./ImagePicker.svelte";
+  import BackupExport from "./BackupExport.svelte";
+  import BackupImport from "./BackupImport.svelte";
   import ConfirmButton from "./ConfirmButton.svelte";
   import RollingNumber from "./RollingNumber.svelte";
   import type { AppSettings, SettingsUpdate, SnapshotState, StorageOverview } from "../lib/ipc";
   import { count, message, shortTime, size, time } from "./format";
 
-  type StorageView = "main" | "trash" | "snapshots" | "images";
+  type StorageView = "main" | "trash" | "snapshots" | "images" | "export" | "import";
 
   let { maxMb, disabled, onsave, view = $bindable("main") }: {
     maxMb: number;
@@ -34,7 +36,7 @@
   let notices = $state<Record<string, string>>({});
   let errors = $state<Record<string, string>>({});
 
-  const TITLES: Record<StorageView, string> = { main: "", trash: "回收站", snapshots: "全部快照", images: "截图类图片" };
+  const TITLES: Record<StorageView, string> = { main: "", trash: "回收站", snapshots: "全部快照", images: "截图类图片", export: "导出备份", import: "导入备份" };
   // 占比色只用现有的强调色和状态色。
   const SEGMENTS = [
     { key: "文本", label: "文本", tone: "text" },
@@ -103,6 +105,10 @@
       <TrashSection {disabled} />
     {:else if view === "snapshots"}
       <SnapshotSection {snapshots} {maxMb} {disabled} {onsave} onchange={load} />
+    {:else if view === "export"}
+      <BackupExport {disabled} />
+    {:else if view === "import"}
+      <BackupImport {disabled} onchange={() => { void load(); }} />
     {:else}
       <ImagePicker {disabled} onchange={() => { void load(); }} />
     {/if}
@@ -111,9 +117,9 @@
 
     {#if snapshots?.restored}
       {#if snapshots.restored.error}
-        <p class="banner error">上次恢复没有成功，历史保持原样。</p>
+        <p class="banner error">{snapshots.restored.kind === "import" ? "上次用备份覆盖没有成功" : "上次恢复没有成功"}，历史保持原样。</p>
       {:else}
-        <p class="banner">已恢复到所选快照。恢复前的历史另存成了“恢复前”快照{restoredItem ? `（${time(restoredItem.created_ms)}）` : ""}，需要时可以在“全部快照”里恢复回去。</p>
+        <p class="banner">{snapshots.restored.kind === "import" ? "已用备份覆盖了历史。" : "已恢复到所选快照。"}恢复前的历史另存成了“恢复前”快照{restoredItem ? `（${time(restoredItem.created_ms)}）` : ""}，需要时可以在“全部快照”里恢复回去。</p>
       {/if}
     {/if}
     {#if loadError}<p class="banner error">{loadError}</p>{/if}
@@ -196,10 +202,10 @@
       </div>
     </div></div>
 
-    <div class="group later"><span class="group-title">备份</span><div class="card">
+    <div class="group"><span class="group-title split">备份<em>换电脑或重装前导出一份</em></span><div class="card">
       <div class="setting">
-        <span class="setting-copy"><strong>导出 / 导入备份</strong><small>历史库、图标和清单打成一个文件，不加密；导入前先校验。下个版本（beta.2）开放</small></span>
-        <button type="button" disabled>导出…</button><button type="button" disabled>导入…</button>
+        <span class="setting-copy"><strong>导出 / 导入备份</strong><small>历史库、来源图标和清单打成一个文件，不加密；导入前先校验，可以合并或覆盖</small></span>
+        <button type="button" onclick={() => { view = "export"; }}>导出…</button><button type="button" onclick={() => { view = "import"; }}>导入…</button>
       </div>
     </div></div>
   {/if}
@@ -240,6 +246,5 @@
   button { min-height: 28px; flex: none; padding: 3px 12px; border: 1px solid var(--settings-line); border-radius: var(--radius-sm); background: var(--settings-selected); font-size: 11px; white-space: nowrap; }
   button.ghost { background: transparent; }
   button:disabled { opacity: .6; }
-  .later { opacity: .55; }
   .trash-count { display: inline-block; }
 </style>

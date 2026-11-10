@@ -495,6 +495,40 @@ impl Store {
             Ok(targets.len())
         })
     }
+    // 合并备份（M2-4）：把已检查通过的临时目录里的备份并进现役库，一个事务，随后整体重载缓存。
+    pub fn import_merge(&self, token: &str) -> Result<MergeReport> {
+        let staging =
+            backup::staging(&self.0.directory, token).ok_or(Error::Invalid("import_missing"))?;
+        let icons = self.0.directory.join("icons");
+        self.call(move |w| {
+            std::fs::create_dir_all(&icons)?;
+            let (report, sort_order) = backup::merge_into(
+                &mut w.connection,
+                &staging.join("history.db"),
+                &staging.join("icons"),
+                &icons,
+                w.sort_order,
+            )?;
+            w.sort_order = sort_order;
+            if report.added_items > 0 || report.added_favorites > 0 {
+                let counts = schema::counts(&w.connection)?;
+                let items = schema::recent(&w.connection)?;
+                let last_recorded_ms = w
+                    .connection
+                    .query_row("SELECT max(time_ms) FROM copy_events", [], |r| {
+                        r.get::<_, Option<i64>>(0)
+                    })?
+                    .map(|v| v as u64);
+                let mut cache = w.cache.write().unwrap();
+                cache.items = items;
+                cache.total = counts.contents - counts.trashed;
+                cache.last_recorded_ms = last_recorded_ms;
+                drop(cache);
+                w.last = None;
+            }
+            Ok(report)
+        })
+    }
     // 后台刷新来源应用（A06）：更新显示名和图标缓存引用。图标文件由调用方先写好。
     pub fn refresh_source_app(
         &self,
