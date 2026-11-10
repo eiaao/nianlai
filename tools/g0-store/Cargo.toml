@@ -6,4 +6,5 @@ rust-version = "1.95"
 
 [dependencies]
 nianlai-store = { path = "../../crates/nianlai-store" }
+rusqlite = { version = "0.41", features = ["bundled"] }
 serde_json = "1.0"

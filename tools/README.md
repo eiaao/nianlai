@@ -26,3 +26,4 @@
 - `g0_log_report.py`：把样机的诊断日志汇总成 Markdown 报告（采集、监听、粘贴、呼出、错误）。运行 `python tools/g0_log_report.py --log <panel-log.jsonl>`。
 - `g0-store`：历史库的压测和维护工具，命令有 `fill`、`search-bench`、`writer`、`check`、`snapshot`、`restore` 等。运行 `cargo run --release -p g0-store -- <命令> --dir <数据目录>`。
 - `g0-crash-test.ps1`、`g0-store-validation.ps1`、`g0-smoke-test.ps1`：基于 `g0-store` 的故障注入（反复强杀写入进程再检查库）、存储压测汇总，以及正式版的冒烟测试。
+- `m2v-gates.ps1`（配 `m2v-cdp.mjs`）：M2-V 验收的六道自动化门槛（1 万次可控复制零丢失、强杀 30 次数据一致、旧库升级、备份导出导回一致、回收站全链路、被挡内容不留痕迹）。每道分两层：确定性层是 `cargo test` 里的 `gates_tests`（nianlai-store）和 `history::gate_tests`（nianlai），CI 里就跑；真实应用层（门槛 1、2、6）启动 release 样机（隔离数据目录、CDP 端口 9223）、驱动真实剪贴板再查库和文件。`-Gate all|1,2,…`、`-Quick`（小规模冒烟）、`-Headless`（只跑确定性层）、`-DataRoot`、`-ReportDir`；报告写到 `target\m2v\<时间>\m2v-report.json` 和 `m2v-summary.txt`。有任何 `nianlai.exe` 在运行时拒绝启动真实层（单实例插件会把启动转发给它）；只结束自己启动、路径含 `x86_64-pc-windows-msvc` 的样机；完整规模会长时间占用剪贴板。`g0-store texts` 供它核对库里的文字。

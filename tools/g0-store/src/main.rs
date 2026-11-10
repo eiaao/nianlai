@@ -178,6 +178,29 @@ fn writer(directory: &Path, seed: u64) -> Result<()> {
         output.flush()?;
     }
 }
+// M2-V：只读列出库里所有文字内容（不含回收站），可按前缀过滤；门槛脚本据此逐条核对有没有丢、有没有重复。
+fn texts(directory: &Path, prefix: &str) -> Result<Value> {
+    let connection = rusqlite::Connection::open_with_flags(
+        directory.join("history.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
+    let ids: Vec<i64> = connection
+        .prepare(
+            "SELECT c.id FROM contents c WHERE NOT EXISTS(SELECT 1 FROM trash t WHERE t.content_id=c.id) ORDER BY c.id",
+        )?
+        .query_map([], |r| r.get(0))?
+        .collect::<std::result::Result<_, _>>()?;
+    let reader = Reader::open(directory, sha256)?;
+    let mut texts = Vec::new();
+    for id in &ids {
+        if let Some(value) = reader.content(*id as usize)?.and_then(|c| c.text_value())
+            && value.starts_with(prefix)
+        {
+            texts.push(value);
+        }
+    }
+    Ok(json!({"command":"texts","contents":ids.len(),"count":texts.len(),"texts":texts}))
+}
 fn blob_bench(directory: &Path) -> Result<Value> {
     let db = Store::open(directory, sha256)?;
     let mut reports = Vec::new();
@@ -238,7 +261,8 @@ fn run() -> Result<()> {
             std::thread::sleep(std::time::Duration::from_millis(args.number("--hold-ms",0)?));return Ok(());
         }
         "blob-bench"=>blob_bench(&directory)?,
-        _=>return Err("commands: fill search-bench writer check snapshot restore open-bench blob-bench paste-fixture; --dir PATH is required".into()),
+        "texts"=>texts(&directory,args.options.get("--prefix").map_or("",String::as_str))?,
+        _=>return Err("commands: fill search-bench writer check snapshot restore open-bench blob-bench texts paste-fixture; --dir PATH is required".into()),
     };
     println!("{result}");
     Ok(())

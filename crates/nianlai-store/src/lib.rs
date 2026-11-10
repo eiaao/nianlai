@@ -308,6 +308,8 @@ pub(crate) fn writable(path: &Path) -> Result<Connection> {
 #[cfg(test)]
 mod backup_tests;
 #[cfg(test)]
+mod gates_tests;
+#[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod upgrade_tests;
