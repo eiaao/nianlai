@@ -863,6 +863,9 @@ impl Shared {
 }
 
 #[cfg(test)]
+mod gate_tests;
+
+#[cfg(test)]
 mod startup_tests {
     use super::*;
     use crate::settings::{Directories, tests::Directory};

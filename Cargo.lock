@@ -1230,6 +1230,7 @@ name = "g0-store"
 version = "0.1.0"
 dependencies = [
  "nianlai-store",
+ "rusqlite",
  "serde_json",
 ]
 

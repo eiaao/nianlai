@@ -1,4 +1,4 @@
-param(
+﻿param(
     [int]$Rounds = 30,
     [string]$Binary = (Join-Path $PSScriptRoot '../target/release/g0-store.exe'),
     [string]$Output = (Join-Path $PSScriptRoot '../target/g0-store/crash-results.json')
