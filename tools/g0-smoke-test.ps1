@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$DataDirectory,
     [string]$Binary = (Join-Path $PSScriptRoot '../target/release/nianlai.exe'),
     [string]$StoreBinary = (Join-Path $PSScriptRoot '../target/release/g0-store.exe'),

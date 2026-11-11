@@ -1,4 +1,4 @@
-# 仅供独立测试机 / 无日常样机的 Windows 登录会话手测使用；不会启动拈来或发送按键。
+﻿# 仅供独立测试机 / 无日常样机的 Windows 登录会话手测使用；不会启动拈来或发送按键。
 # 前台运行，按 Enter 释放；不创建后台服务，不终止任何进程。
 param(
     [ValidateRange(1, 15)][uint32]$Modifiers = 6, # MOD_CONTROL | MOD_SHIFT

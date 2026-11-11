@@ -18,11 +18,12 @@ async function compilePanel() {
   const temporary = mkdtempSync(join(temporaryBase, "nianlai-panel-key-repeat-"));
   const ipcPath = join(temporary, "ipc.mjs");
   const compiledPath = join(temporary, "state.svelte.mjs");
+  const preferencesPath = join(temporary, "preferences.mjs");
   const cleanup = () => {
     assert.equal(dirname(temporary), temporaryBase);
     assert.ok(basename(temporary).startsWith("nianlai-panel-key-repeat-"));
     // 只删除本次创建的两个文件和空目录，不递归清理任何路径。
-    for (const path of [compiledPath, ipcPath]) if (existsSync(path)) unlinkSync(path);
+    for (const path of [compiledPath, preferencesPath, ipcPath]) if (existsSync(path)) unlinkSync(path);
     rmdirSync(temporary);
     assert.equal(existsSync(temporary), false);
   };
@@ -73,6 +74,12 @@ export async function undoDelete() {
   calls.push({ command: "undoDelete" });
   return store.undoable ? { ...(store.history?.items.find((item) => item.id === store.undoable) ?? {}), id: store.undoable, favorite: false } : null;
 }
+// 面板里的其余 IPC 调用不再用 ?. 兜底，替身补全为无副作用的空实现。
+export async function getSettings() { return null; }
+export async function openSettings() {}
+export async function getFilePaths() { return null; }
+export async function getImage() { return null; }
+export async function getFullText() { return null; }
 export async function frontendReady() {}
 export async function reportPainted() {}
 export async function searchReady() {}
@@ -100,9 +107,14 @@ export function emit(name, payload) { return handlers.get(name)?.(payload); }
       ["svelte/internal/client", clientUrl],
       ["svelte", clientUrl],
       ["./ipc", pathToFileURL(ipcPath).href],
+      ["./preferences", pathToFileURL(preferencesPath).href],
     ]);
+    // 真实的 preferences.ts 一并转译，面板与设置页用同一份偏好映射。
+    writeFileSync(preferencesPath, ts.transpileModule(readFileSync(join(root, "src/lib/preferences.ts"), "utf8"), {
+      compilerOptions: { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.ESNext },
+    }).outputText);
     const compiled = compileModule(stripped, { filename: "state.svelte.js", generate: "client", dev: false }).js.code
-      .replace(/(from\s+)(["'])(svelte\/internal\/client|svelte|\.\/ipc)\2/g,
+      .replace(/(from\s+)(["'])(svelte\/internal\/client|svelte|\.\/ipc|\.\/preferences)\2/g,
         (_, prefix, _quote, specifier) => prefix + JSON.stringify(imports.get(specifier)));
     writeFileSync(compiledPath, compiled);
     const { PanelState } = await import(pathToFileURL(compiledPath).href);

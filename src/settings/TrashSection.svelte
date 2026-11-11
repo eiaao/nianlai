@@ -3,6 +3,7 @@
   import { onMount } from "svelte";
   import * as ipc from "../lib/ipc";
   import type { TrashItem } from "../lib/ipc";
+  import { message } from "./format";
 
   let { disabled }: { disabled: boolean } = $props();
 
@@ -13,10 +14,6 @@
   let notice = $state("");
 
   const DAY = 24 * 60 * 60 * 1000;
-
-  function message(value: unknown) {
-    return typeof value === "string" ? value : value instanceof Error ? value.message : "操作没有完成，请重试";
-  }
 
   function when(ms: number) {
     const d = new Date(ms);

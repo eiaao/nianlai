@@ -58,7 +58,7 @@ fn create_reopen_and_refuse_future_version_without_touching_file() {
     assert_eq!(store.report().version, VERSION);
     let c = store.reader().unwrap();
     assert_eq!(
-        c.connection
+        c.connection()
             .pragma_query_value(None, "journal_mode", |r| r.get::<_, String>(0))
             .unwrap(),
         "wal"
@@ -480,7 +480,7 @@ fn snapshot_reasons_listing_and_size_retention() {
         Reason::Manual,
         Some(Retention {
             keep: 7,
-            max_bytes: 1,
+            max_bytes: 2,
         }),
         None,
     )
@@ -947,11 +947,26 @@ fn storage_usage_file_lists_images_bulk_trash_and_compact() {
     store.set_favorite(5, true).unwrap().unwrap();
 
     let reader = store.reader().unwrap();
-    let lists = reader.file_lists().unwrap();
+    let lists = reader.file_lists(None).unwrap();
     assert_eq!(lists.len(), 2);
     assert_eq!(lists[0].id, 2);
     assert_eq!(lists[0].paths, ["C:\\a.txt", "C:\\b.txt"]);
     assert!(!lists[0].favorite && lists[1].favorite);
+    // 按 id 过滤的结果等于全量结果里挑出这些 id（含重复、不存在和非文件条目的 id）。
+    for pick in [vec![2], vec![5, 2, 2], vec![1, 3, 99], vec![], vec![2, 5]] {
+        let expected: Vec<_> = lists.iter().filter(|l| pick.contains(&l.id)).collect();
+        let got = reader.file_lists(Some(&pick)).unwrap();
+        assert_eq!(got.len(), expected.len(), "{pick:?}");
+        for (got, expected) in got.iter().zip(expected) {
+            assert_eq!(
+                (got.id, got.favorite, &got.paths),
+                (expected.id, expected.favorite, &expected.paths)
+            );
+        }
+    }
+    // 超过一批的 id 列表也要分批查全。
+    let many: Vec<usize> = (0..1200).collect();
+    assert_eq!(reader.file_lists(Some(&many)).unwrap().len(), lists.len());
 
     let usage = reader.usage().unwrap();
     let image_usage = usage.kinds.iter().find(|k| k.kind == "图片").unwrap();
@@ -969,7 +984,11 @@ fn storage_usage_file_lists_images_bulk_trash_and_compact() {
     assert_eq!(moved, [2, 3]);
     assert_eq!(store.cache().total, 3);
     let reader = store.reader().unwrap();
-    assert_eq!(reader.file_lists().unwrap().len(), 1, "回收站里的不再检查");
+    assert_eq!(
+        reader.file_lists(None).unwrap().len(),
+        1,
+        "回收站里的不再检查"
+    );
     let usage = reader.usage().unwrap();
     assert_eq!(usage.trashed_count, 2);
     assert!(usage.trashed_bytes >= 300_000);
@@ -1112,4 +1131,318 @@ fn favorite_labels_are_cleaned_limited_and_searchable() {
     assert!(reader.search("发票").unwrap().items.is_empty());
     assert_eq!(reader.search("alpha").unwrap().items.len(), 1);
     check(&temp.0).unwrap();
+}
+
+// 内存库：同一套表结构、迁移和搜索，只是不落盘。
+mod memory {
+    use super::*;
+
+    fn open() -> Store {
+        Store::open_memory(sha256, MemoryOptions::unbounded()).unwrap()
+    }
+
+    #[test]
+    fn writes_are_visible_to_readers_and_search_uses_the_same_index() {
+        let store = open();
+        assert!(store.is_memory());
+        assert_eq!(store.report().version, VERSION);
+        let at = Instant::now();
+        let saved = ingest(&store, text("内存库里的 needle-7731 正文"), 1, at);
+        assert_eq!(saved.outcome, "saved");
+        // 读连接就是写连接：刚提交的数据马上读得到，不用等任何刷新。
+        let reader = store.reader().unwrap();
+        assert_eq!(reader.recent().unwrap().len(), 1);
+        assert_eq!(reader.counts().unwrap().contents, 1);
+        let found = reader.search("needle-7731").unwrap();
+        assert_eq!(found.mode, SearchMode::Index);
+        assert_eq!(found.items.len(), 1);
+        assert_eq!(found.items[0].id, saved.record_id.unwrap());
+        assert_eq!(reader.search("ab").unwrap().items.len(), 0);
+        assert_eq!(reader.search("正文").unwrap().items.len(), 1);
+        assert!(
+            reader
+                .content(saved.record_id.unwrap())
+                .unwrap()
+                .is_some_and(|c| c.text_value().unwrap().contains("needle-7731"))
+        );
+        reader.quick_check().unwrap();
+        // 之后再写入，已有的读句柄也能看到。
+        ingest(&store, text("第二条 needle-7731"), 2, at);
+        assert_eq!(reader.search("needle-7731").unwrap().items.len(), 2);
+        assert_eq!(store.cache().total, 2);
+    }
+
+    #[test]
+    fn two_memory_stores_are_independent() {
+        let (left, right) = (open(), open());
+        let at = Instant::now();
+        ingest(&left, text("只在左边-4417"), 1, at);
+        assert_eq!(right.reader().unwrap().recent().unwrap().len(), 0);
+        assert!(
+            right
+                .reader()
+                .unwrap()
+                .search("只在左边-4417")
+                .unwrap()
+                .items
+                .is_empty()
+        );
+        ingest(&right, text("只在右边-9082"), 1, at);
+        assert!(
+            left.reader()
+                .unwrap()
+                .search("只在右边-9082")
+                .unwrap()
+                .items
+                .is_empty()
+        );
+        assert_eq!(left.cache().total, 1);
+        assert_eq!(right.cache().total, 1);
+    }
+
+    #[test]
+    fn data_is_gone_after_the_store_is_dropped_and_nothing_touches_disk() {
+        let before: Vec<_> = fs::read_dir(std::env::temp_dir())
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.file_name()))
+            .filter(|n| n.to_string_lossy().contains("history.db"))
+            .collect();
+        let store = open();
+        ingest(&store, text("关闭后消失-5521"), 1, Instant::now());
+        assert_eq!(store.directory(), Path::new(""));
+        drop(store);
+        let again = open();
+        assert_eq!(again.reader().unwrap().counts().unwrap().contents, 0);
+        assert!(again.cache().items.is_empty());
+        let after: Vec<_> = fs::read_dir(std::env::temp_dir())
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.file_name()))
+            .filter(|n| n.to_string_lossy().contains("history.db"))
+            .collect();
+        assert_eq!(before.len(), after.len());
+    }
+
+    #[test]
+    fn file_only_operations_are_skipped_or_refused() {
+        let store = open();
+        store.compact().unwrap();
+        assert_eq!(
+            store.import_merge("anything").err(),
+            Some(Error::Invalid("memory_store"))
+        );
+        let disk = Temp::new();
+        assert!(!disk.store().is_memory());
+    }
+
+    #[test]
+    fn id_floor_keeps_new_ids_apart_from_disk_ids() {
+        let store = Store::open_memory(
+            sha256,
+            MemoryOptions {
+                id_floor: 1 << 52,
+                ..MemoryOptions::unbounded()
+            },
+        )
+        .unwrap();
+        let at = Instant::now();
+        let first = ingest(&store, text("a-编号"), 1, at).record_id.unwrap();
+        let second = ingest(&store, text("b-编号"), 2, at).record_id.unwrap();
+        assert_eq!((first, second), ((1 << 52) + 1, (1 << 52) + 2));
+    }
+
+    #[test]
+    fn capacity_evicts_the_oldest_unfavorited_and_keeps_favorites() {
+        let store = Store::open_memory(
+            sha256,
+            MemoryOptions {
+                max_records: 3,
+                ..MemoryOptions::unbounded()
+            },
+        )
+        .unwrap();
+        let at = Instant::now();
+        let ids: Vec<usize> = (1..=3u32)
+            .map(|n| {
+                ingest(&store, text(&format!("容量-{n}")), n, at)
+                    .record_id
+                    .unwrap()
+            })
+            .collect();
+        store.set_favorite(ids[0], true).unwrap().unwrap();
+        // 第 4 条进来：最旧的是被收藏的 1，收藏不淘汰，轮到 2。
+        let fourth = ingest(&store, text("容量-4"), 4, at).record_id.unwrap();
+        let reader = store.reader().unwrap();
+        assert!(reader.content(ids[1]).unwrap().is_none());
+        assert!(reader.content(ids[0]).unwrap().is_some());
+        assert_eq!(store.cache().total, 3);
+        assert_eq!(
+            store.cache().items.iter().map(|i| i.id).collect::<Vec<_>>(),
+            [fourth, ids[2], ids[0]]
+        );
+        // 回收站不计数、不被淘汰。
+        assert!(store.delete(ids[2]).unwrap());
+        ingest(&store, text("容量-5"), 5, at);
+        ingest(&store, text("容量-6"), 6, at);
+        assert_eq!(reader.trash().unwrap().len(), 1);
+        assert_eq!(store.cache().total, 3);
+    }
+
+    #[test]
+    fn oversized_content_is_skipped_without_flushing_history() {
+        let store = Store::open_memory(
+            sha256,
+            MemoryOptions {
+                max_bytes: 2,
+                ..MemoryOptions::unbounded()
+            },
+        )
+        .unwrap();
+        let at = Instant::now();
+        let kept = ingest(&store, text("a"), 1, at).record_id.unwrap();
+        let skipped = ingest(&store, text("ab"), 2, at);
+        assert_eq!(
+            (skipped.outcome, skipped.reason),
+            ("skipped", Some("capacity"))
+        );
+        assert!(store.reader().unwrap().content(kept).unwrap().is_some());
+        assert_eq!(store.latest_sequence(), Some(2));
+    }
+}
+
+#[test]
+fn reader_connections_are_pooled_reused_and_see_new_writes() {
+    let temp = Temp::new();
+    let store = temp.store();
+    let now = Instant::now();
+    ingest(&store, text("第一条 pool"), 1, now);
+    let pool = store.pool().clone();
+    assert_eq!(pool.idle(), 0);
+    let first = store.reader().unwrap();
+    first
+        .connection()
+        .execute_batch("CREATE TEMP TABLE marker(x)")
+        .unwrap();
+    assert_eq!(first.recent().unwrap().len(), 1);
+    drop(first);
+    assert_eq!(pool.idle(), 1, "drop 时归还");
+    let second = store.reader().unwrap();
+    let marked: i64 = second
+        .connection()
+        .query_row(
+            "SELECT count(*) FROM sqlite_temp_master WHERE name='marker'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(marked, 1, "复用同一条连接（临时表标记还在）");
+    assert_eq!(pool.idle(), 0);
+    assert_eq!(second.recent().unwrap().len(), 1);
+    // 复用的连接不带过期快照：写入之后立刻读得到。
+    ingest(&store, text("第二条 pool"), 2, now);
+    assert_eq!(second.recent().unwrap().len(), 2);
+    assert_eq!(second.search("第二条").unwrap().items.len(), 1);
+    drop(second);
+    let third = store.reader().unwrap();
+    assert!(third.connection().is_autocommit());
+    assert_eq!(third.search("pool").unwrap().items.len(), 2);
+}
+
+#[test]
+fn pool_is_capped_and_idle_connections_expire() {
+    let temp = Temp::new();
+    let store = temp.store();
+    let pool = store.pool().clone();
+    let readers: Vec<_> = (0..6).map(|_| store.reader().unwrap()).collect();
+    drop(readers);
+    assert_eq!(pool.idle(), POOL_MAX, "超过上限的直接关闭");
+    pool.age_idle(POOL_IDLE + Duration::from_secs(1));
+    // 取用时丢弃过期的，新开一条；归还后池里只有它。
+    drop(store.reader().unwrap());
+    assert_eq!(pool.idle(), 1);
+}
+
+#[test]
+fn pool_is_cleared_by_compact_and_borrowed_connections_are_not_returned_after() {
+    let temp = Temp::new();
+    let store = temp.store();
+    ingest(&store, text("压缩前"), 1, Instant::now());
+    let pool = store.pool().clone();
+    drop(store.reader().unwrap());
+    let held = store.reader().unwrap();
+    drop(store.reader().unwrap());
+    assert!(pool.idle() >= 1);
+    store.compact().unwrap();
+    assert_eq!(pool.idle(), 0, "压缩后池被清空");
+    drop(held);
+    assert_eq!(pool.idle(), 0, "压缩前借出的连接不再收回");
+    assert_eq!(store.reader().unwrap().recent().unwrap().len(), 1);
+}
+
+#[test]
+fn release_idle_readers_closes_idle_connections_but_not_borrowed_ones() {
+    let temp = Temp::new();
+    let store = temp.store();
+    ingest(&store, text("释放空闲"), 1, Instant::now());
+    let pool = store.pool().clone();
+    let held = store.reader().unwrap();
+    drop(store.reader().unwrap());
+    drop(store.reader().unwrap());
+    assert!(pool.idle() >= 1);
+    store.release_idle_readers();
+    assert_eq!(pool.idle(), 0, "空闲连接全部关闭");
+    drop(held);
+    assert_eq!(pool.idle(), 1, "借出的连接照常归还");
+    assert_eq!(store.reader().unwrap().recent().unwrap().len(), 1);
+}
+
+#[test]
+fn reader_with_an_open_transaction_is_not_returned_to_the_pool() {
+    let temp = Temp::new();
+    let store = temp.store();
+    ingest(&store, text("未结束事务"), 1, Instant::now());
+    let pool = store.pool().clone();
+    let reader = store.reader().unwrap();
+    reader.connection().execute_batch("BEGIN").unwrap();
+    assert!(!reader.connection().is_autocommit());
+    drop(reader);
+    assert_eq!(pool.idle(), 0, "带着事务的连接直接关闭");
+    let next = store.reader().unwrap();
+    assert!(next.connection().is_autocommit());
+}
+
+#[test]
+fn pool_is_released_with_the_store_and_memory_store_has_none() {
+    let temp = Temp::new();
+    let store = temp.store();
+    let pool = store.pool().clone();
+    drop(store.reader().unwrap());
+    assert_eq!(pool.idle(), 1);
+    drop(store);
+    assert_eq!(pool.idle(), 0, "库关闭时池清空");
+    let memory = Store::open_memory(sha256, write::MemoryOptions::fallback()).unwrap();
+    assert_eq!(memory.pool().idle(), 0);
+    drop(memory.reader().unwrap());
+    assert_eq!(memory.pool().idle(), 0, "内存库不走池");
+}
+
+#[test]
+fn pooled_readers_work_across_threads() {
+    let temp = Temp::new();
+    let store = temp.store();
+    ingest(&store, text("跨线程 pool"), 1, Instant::now());
+    let handles: Vec<_> = (0..8)
+        .map(|_| {
+            let store = store.clone();
+            std::thread::spawn(move || {
+                for _ in 0..50 {
+                    let reader = store.reader().unwrap();
+                    assert_eq!(reader.search("跨线程").unwrap().items.len(), 1);
+                }
+            })
+        })
+        .collect();
+    for h in handles {
+        h.join().unwrap();
+    }
+    assert!(store.pool().idle() <= POOL_MAX);
 }

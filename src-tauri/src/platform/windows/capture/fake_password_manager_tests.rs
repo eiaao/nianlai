@@ -418,7 +418,7 @@ fn fake_password_manager_is_not_recorded_and_leaves_no_trace() {
     // 用默认采集规则（含默认排除名单），不依赖也不改动真实设置。
     gate().apply(&Capture::default());
     let _restore = RestoreClipboard(read_text());
-    let history = Arc::new(History::new(hash::sha256, logger.clone()));
+    let history = History::new(hash::sha256, logger.clone());
     history.initialize();
     let clipboard = clipboard::Service::start(logger.clone(), history.clone()).unwrap();
     let service = Service::start(

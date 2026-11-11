@@ -19,14 +19,18 @@ pub use snapshot::{
     Reason, Retention, SNAPSHOT_KEEP, SnapshotInfo, SnapshotReport, check, list_snapshots, restore,
     snapshot, snapshot_due, snapshot_file, snapshot_reason, snapshot_with, validate_snapshot,
 };
-pub use write::{Store, clean_note, clean_title};
+pub use write::{MemoryOptions, Store, clean_note, clean_title};
 
 use content::{Fingerprint, Hash};
 use rusqlite::{Connection, OpenFlags};
 use serde::Serialize;
 use std::{
-    path::Path,
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    path::{Path, PathBuf},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 pub const CACHE_LIMIT: usize = 300;
@@ -184,6 +188,13 @@ pub struct Ingest {
     pub transaction_ok: bool,
 }
 impl Ingest {
+    /// 这次写入合并进了已有的那一条（`record_id` 是它的 id，格式被重写过）。
+    pub fn merged(&self) -> bool {
+        matches!(
+            self.outcome,
+            "merged_same_observation" | "merged_late_formats"
+        )
+    }
     fn skipped(outcome: &'static str, reason: Option<&'static str>) -> Self {
         Self {
             outcome,
@@ -213,85 +224,231 @@ pub struct WriteStats {
     pub p95_ms: f64,
 }
 
+enum Source {
+    // 池里借出的读连接；Reader drop 时还回池里。
+    File(Option<Lease>),
+    // 内存库的连接只在写入线程里；读也交给那条连接做，读写看到的是同一份数据。
+    Memory(Store),
+}
+/// 借出的读连接，记着借出时池的代数；还回时代数变了（池被清空过）就直接关掉。
+struct Lease {
+    connection: Option<Connection>,
+    generation: u64,
+    pool: Arc<Pool>,
+}
+/// 磁盘库的读连接池。
+/// - 上限 `POOL_MAX`：面板一次呼出通常并发 1~2 个读（列表 + 搜索/预览），4 个已够，再多只是占内存。
+/// - 空闲超过 `POOL_IDLE` 的连接在下次存取池时关掉（不开后台线程）；连接带着 SQLite 页缓存，闲置久了该还给系统。
+///   调用方知道自己空闲下来的时刻（如面板隐藏）时，用 `release_idle` 立即关掉池里的空闲连接。
+/// - `clear` 用于压缩、换库等文件被整体改写的时刻：池里的连接全关，借出未还的也不再收回（代数不符）。
+pub(crate) struct Pool {
+    directory: PathBuf,
+    idle: Mutex<Vec<(Connection, Instant)>>,
+    generation: AtomicU64,
+}
+const POOL_MAX: usize = 4;
+const POOL_IDLE: Duration = Duration::from_secs(45);
+impl Pool {
+    pub(crate) fn new(directory: PathBuf) -> Arc<Self> {
+        Arc::new(Self {
+            directory,
+            idle: Mutex::new(Vec::new()),
+            generation: AtomicU64::new(0),
+        })
+    }
+    fn take(self: &Arc<Self>) -> Result<Lease> {
+        let generation = self.generation.load(Ordering::Acquire);
+        let reused = {
+            let mut idle = self.idle.lock().unwrap();
+            idle.retain(|(_, since)| since.elapsed() < POOL_IDLE);
+            idle.pop().map(|(connection, _)| connection)
+        };
+        let connection = match reused {
+            Some(connection) => connection,
+            None => schema::readonly(&self.directory.join("history.db"))?,
+        };
+        Ok(Lease {
+            connection: Some(connection),
+            generation,
+            pool: self.clone(),
+        })
+    }
+    /// 关掉池里所有空闲连接；借出的连接照常归还（不动代数）。
+    pub(crate) fn release_idle(&self) {
+        self.idle.lock().unwrap().clear();
+    }
+    pub(crate) fn clear(&self) {
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        self.idle.lock().unwrap().clear();
+    }
+    #[cfg(test)]
+    pub(crate) fn idle(&self) -> usize {
+        self.idle.lock().unwrap().len()
+    }
+    #[cfg(test)]
+    pub(crate) fn age_idle(&self, by: Duration) {
+        for (_, since) in self.idle.lock().unwrap().iter_mut() {
+            *since -= by;
+        }
+    }
+}
+impl Lease {
+    fn connection(&self) -> &Connection {
+        self.connection.as_ref().expect("连接只在 drop 时取走")
+    }
+}
+impl Drop for Lease {
+    fn drop(&mut self) {
+        let Some(connection) = self.connection.take() else {
+            return;
+        };
+        // 还有没结束的事务就不要放回去：复用的连接不能带着过期的读快照。
+        if !connection.is_autocommit() {
+            return;
+        }
+        let pool = &self.pool;
+        let mut idle = pool.idle.lock().unwrap();
+        // 代数在持锁时再查一次，和 clear 互斥。
+        if self.generation != pool.generation.load(Ordering::Acquire) {
+            return;
+        }
+        idle.retain(|(_, since)| since.elapsed() < POOL_IDLE);
+        if idle.len() < POOL_MAX {
+            idle.push((connection, Instant::now()));
+        }
+    }
+}
 pub struct Reader {
-    connection: Connection,
+    source: Source,
     hash: Hash,
 }
 impl Reader {
+    /// 单独打开一个读者（不属于任何 Store 的池，drop 时连接即关闭）。
     pub fn open(directory: &Path, hash: Hash) -> Result<Self> {
-        let connection = schema::readonly(&directory.join("history.db"))?;
-        Ok(Self { connection, hash })
+        Self::pooled(&Pool::new(directory.to_path_buf()), hash)
+    }
+    pub(crate) fn pooled(pool: &Arc<Pool>, hash: Hash) -> Result<Self> {
+        Ok(Self {
+            source: Source::File(Some(pool.take()?)),
+            hash,
+        })
+    }
+    pub(crate) fn memory(store: Store, hash: Hash) -> Self {
+        Self {
+            source: Source::Memory(store),
+            hash,
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn connection(&self) -> &Connection {
+        match &self.source {
+            Source::File(lease) => lease.as_ref().unwrap().connection(),
+            Source::Memory(_) => panic!("内存库的连接在写入线程里"),
+        }
+    }
+    fn run<T: Send + 'static>(
+        &self,
+        job: impl FnOnce(&Connection) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
+        match &self.source {
+            Source::File(lease) => job(lease.as_ref().unwrap().connection()),
+            Source::Memory(store) => store.call(move |writer| job(&writer.connection)),
+        }
     }
     pub fn recent(&self) -> Result<Vec<Metadata>> {
-        let tx = self.connection.unchecked_transaction()?;
-        let items = schema::recent(&tx)?;
-        tx.commit()?;
-        Ok(items)
+        self.run(|c| {
+            let tx = c.unchecked_transaction()?;
+            let items = schema::recent(&tx)?;
+            tx.commit()?;
+            Ok(items)
+        })
     }
     pub fn counts(&self) -> Result<Counts> {
-        let tx = self.connection.unchecked_transaction()?;
-        let counts = schema::counts(&tx)?;
-        tx.commit()?;
-        Ok(counts)
+        self.run(|c| {
+            let tx = c.unchecked_transaction()?;
+            let counts = schema::counts(&tx)?;
+            tx.commit()?;
+            Ok(counts)
+        })
     }
     // 收藏列表（E01）：按收藏顺序返回，不按复制时间。
     pub fn favorites(&self) -> Result<Vec<Metadata>> {
-        let tx = self.connection.unchecked_transaction()?;
-        let items = schema::favorites(&tx)?;
-        tx.commit()?;
-        Ok(items)
+        self.run(|c| {
+            let tx = c.unchecked_transaction()?;
+            let items = schema::favorites(&tx)?;
+            tx.commit()?;
+            Ok(items)
+        })
     }
     pub fn source_app_by_path(&self, exe_path: &str) -> Result<Option<SourceApp>> {
-        let tx = self.connection.unchecked_transaction()?;
-        let app = schema::source_app_by_path(&tx, exe_path)?;
-        tx.commit()?;
-        Ok(app)
+        let exe_path = exe_path.to_owned();
+        self.run(move |c| {
+            let tx = c.unchecked_transaction()?;
+            let app = schema::source_app_by_path(&tx, &exe_path)?;
+            tx.commit()?;
+            Ok(app)
+        })
     }
     /// 回收站（B12）：最近删除的在前，带删除时间。
     pub fn trash(&self) -> Result<Vec<(Metadata, u64)>> {
-        let tx = self.connection.unchecked_transaction()?;
-        let items = schema::trash(&tx)?;
-        tx.commit()?;
-        Ok(items)
+        self.run(|c| {
+            let tx = c.unchecked_transaction()?;
+            let items = schema::trash(&tx)?;
+            tx.commit()?;
+            Ok(items)
+        })
     }
-    /// 不在回收站里的文件类条目和它们的路径。
-    pub fn file_lists(&self) -> Result<Vec<FileList>> {
-        let tx = self.connection.unchecked_transaction()?;
-        let lists = schema::file_lists(&tx)?;
-        tx.commit()?;
-        Ok(lists)
+    /// 不在回收站里的文件类条目和它们的路径；`ids` 给定时只取这些条目。
+    pub fn file_lists(&self, ids: Option<&[usize]>) -> Result<Vec<FileList>> {
+        let ids = ids.map(<[usize]>::to_vec);
+        self.run(move |c| {
+            let tx = c.unchecked_transaction()?;
+            let lists = schema::file_lists(&tx, ids.as_deref())?;
+            tx.commit()?;
+            Ok(lists)
+        })
     }
     pub fn usage(&self) -> Result<Usage> {
-        let tx = self.connection.unchecked_transaction()?;
-        let usage = schema::usage(&tx)?;
-        tx.commit()?;
-        Ok(usage)
+        self.run(|c| {
+            let tx = c.unchecked_transaction()?;
+            let usage = schema::usage(&tx)?;
+            tx.commit()?;
+            Ok(usage)
+        })
     }
     /// 存在库里的图片（没有源文件的截图等），`before_ms` 只取复制时间早于它的；按大小从大到小。
     pub fn images(&self, before_ms: Option<u64>) -> Result<Vec<Metadata>> {
-        let tx = self.connection.unchecked_transaction()?;
-        let items = schema::images(&tx, before_ms)?;
-        tx.commit()?;
-        Ok(items)
+        self.run(move |c| {
+            let tx = c.unchecked_transaction()?;
+            let items = schema::images(&tx, before_ms)?;
+            tx.commit()?;
+            Ok(items)
+        })
     }
     pub fn content(&self, id: usize) -> Result<Option<std::sync::Arc<content::Content>>> {
-        let tx = self.connection.unchecked_transaction()?;
-        let content = schema::content(&tx, id, self.hash)?;
-        tx.commit()?;
-        Ok(content)
+        let hash = self.hash;
+        self.run(move |c| {
+            let tx = c.unchecked_transaction()?;
+            let content = schema::content(&tx, id, hash)?;
+            tx.commit()?;
+            Ok(content)
+        })
     }
     pub fn search(&self, query: &str) -> Result<Search> {
-        search::search(&self.connection, query)
+        let query = query.to_owned();
+        self.run(move |c| search::search(c, &query))
     }
     pub fn event_exists(&self, id: i64) -> Result<bool> {
-        Ok(self.connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM copy_events WHERE id=?1)",
-            [id],
-            |r| r.get(0),
-        )?)
+        self.run(move |c| {
+            Ok(c.query_row(
+                "SELECT EXISTS(SELECT 1 FROM copy_events WHERE id=?1)",
+                [id],
+                |r| r.get(0),
+            )?)
+        })
     }
     pub fn quick_check(&self) -> Result<()> {
-        schema::pragma_check(&self.connection, "quick_check")
+        self.run(|c| schema::pragma_check(c, "quick_check"))
     }
 }
 
@@ -309,6 +466,8 @@ pub(crate) fn writable(path: &Path) -> Result<Connection> {
 mod backup_tests;
 #[cfg(test)]
 mod gates_tests;
+#[cfg(test)]
+mod perf_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

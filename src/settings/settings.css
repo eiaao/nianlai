@@ -15,18 +15,6 @@ button:disabled { cursor: default; }
 [hidden] { display: none !important; }
 :focus-visible { outline: 2px solid var(--settings-accent); outline-offset: 3px; }
 
-/* 系统“减少动画效果”压过应用动效设置时的醒目提示 */
-.motion-warning {
-  margin: 2px 0 0;
-  padding: 8px 11px;
-  border: 1px solid var(--settings-caution, #a6791c);
-  border-radius: var(--settings-radius, 4px);
-  background: color-mix(in srgb, var(--settings-caution, #a6791c) 10%, transparent);
-  color: var(--settings-caution, #8a6410);
-  font-size: 11px;
-  line-height: 1.6;
-}
-
 /* 各设置分区共用的版式（原在 Settings.svelte，拆出分区组件后改为全局）。 */
 .page { display: grid; gap: 20px; }
 h2 { margin: 0 0 6px; font: 600 18px var(--font-display); }
@@ -44,3 +32,11 @@ select:disabled { opacity: .65; }
 
 /* 开关（checkbox role=switch），各页共用。 */
 .switch { width: 34px; height: 18px; flex: none; accent-color: var(--settings-accent); }
+
+/* 备份导出/导入共用的动效：转圈、画对勾、淡入。尺寸和时长由各组件覆盖。 */
+.spinner { width: var(--spinner-size, 10px); height: var(--spinner-size, 10px); border: 1.5px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: spin .7s linear infinite; }
+.tick { stroke-dasharray: 14; stroke-dashoffset: 14; animation: draw 300ms ease-out forwards; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes draw { to { stroke-dashoffset: 0; } }
+@keyframes rise { from { opacity: 0; transform: translateY(-4px); } }
+html[data-reduce-motion="true"] .tick { animation: none; stroke-dashoffset: 0; }

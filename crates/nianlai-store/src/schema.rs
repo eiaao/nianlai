@@ -169,34 +169,53 @@ pub fn trash(c: &Connection) -> Result<Vec<(Metadata, u64)>> {
     Ok(items)
 }
 /// 文件类内容的路径列表都存在 encoding=1 的格式里（JSON 数组）。
-pub fn file_lists(c: &Connection) -> Result<Vec<FileList>> {
-    let mut lists: Vec<FileList> = Vec::new();
-    let mut statement = c.prepare(&format!(
+/// `ids` 给定时只查这些内容（按主键过滤，分批绑定以避开参数个数上限）。
+pub fn file_lists(c: &Connection, ids: Option<&[usize]>) -> Result<Vec<FileList>> {
+    const BATCH: usize = 500;
+    let base = format!(
         "SELECT f.content_id,fv.content_id IS NOT NULL,f.data FROM formats f \
          JOIN contents c ON c.id=f.content_id LEFT JOIN favorites fv ON fv.content_id=c.id \
-         WHERE f.encoding=1 AND {LIVE} ORDER BY f.content_id"
-    ))?;
-    let rows = statement.query_map([], |r| {
-        Ok((number(r, 0)?, r.get::<_, bool>(1)?, r.get::<_, Vec<u8>>(2)?))
-    })?;
-    for row in rows {
-        let (id, favorite, data) = row?;
-        let paths: Vec<String> =
-            serde_json::from_slice(&data).map_err(|_| Error::Invalid("file_list"))?;
-        // 一条内容一般只有一个文件列表格式；有多个时合并去重。
-        match lists.last_mut() {
-            Some(last) if last.id == id => {
-                for path in paths {
-                    if !last.paths.contains(&path) {
-                        last.paths.push(path);
+         WHERE f.encoding=1 AND {LIVE}"
+    );
+    let mut lists: Vec<FileList> = Vec::new();
+    let mut load = |filter: &str, params: Vec<i64>| -> Result<()> {
+        let mut statement = c.prepare(&format!("{base}{filter} ORDER BY f.content_id"))?;
+        let rows = statement.query_map(rusqlite::params_from_iter(params), |r| {
+            Ok((number(r, 0)?, r.get::<_, bool>(1)?, r.get::<_, Vec<u8>>(2)?))
+        })?;
+        for row in rows {
+            let (id, favorite, data) = row?;
+            let paths: Vec<String> =
+                serde_json::from_slice(&data).map_err(|_| Error::Invalid("file_list"))?;
+            // 一条内容一般只有一个文件列表格式；有多个时合并去重。
+            match lists.last_mut() {
+                Some(last) if last.id == id => {
+                    for path in paths {
+                        if !last.paths.contains(&path) {
+                            last.paths.push(path);
+                        }
                     }
                 }
+                _ => lists.push(FileList {
+                    id,
+                    favorite,
+                    paths,
+                }),
             }
-            _ => lists.push(FileList {
-                id,
-                favorite,
-                paths,
-            }),
+        }
+        Ok(())
+    };
+    match ids {
+        None => load("", Vec::new())?,
+        Some(ids) => {
+            // 排序去重后分批，每批结果各自有序，拼起来仍按 content_id 递增。
+            let mut ids: Vec<i64> = ids.iter().map(|id| *id as i64).collect();
+            ids.sort_unstable();
+            ids.dedup();
+            for batch in ids.chunks(BATCH) {
+                let marks = vec!["?"; batch.len()].join(",");
+                load(&format!(" AND f.content_id IN ({marks})"), batch.to_vec())?;
+            }
         }
     }
     Ok(lists)

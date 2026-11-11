@@ -418,7 +418,6 @@ mod tests {
     }
 
     // 用 cmd /C exit N 代替 nianlai.exe --child：按参数立刻以指定退出码退出，不建窗口、不碰剪贴板。
-    #[cfg(windows)]
     #[test]
     fn real_child_exit_codes_flow_through_the_loop() {
         let policy = Policy {

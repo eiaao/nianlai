@@ -72,11 +72,6 @@ pub fn set_visible_with_completion(
         let outcome = (|| -> windows::core::Result<()> {
             controller.SetIsVisible(visible)?;
             let core = controller.CoreWebView2()?;
-            if logger.tier == 1 {
-                logger.event("webview_visibility", json!({"session":session,"visible":visible,"suspend_result":"tier_1_skipped"}));
-                complete(&ready, Ok(()));
-                return Ok(());
-            }
             let suspend = core.cast::<ICoreWebView2_3>()?;
             if visible {
                 suspend.Resume()?;

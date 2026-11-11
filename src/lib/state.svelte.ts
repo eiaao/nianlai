@@ -3,7 +3,7 @@
 import { tick, untrack } from "svelte";
 import * as ipc from "./ipc";
 import type { HistoryItem, HistorySnapshot, PanelInteraction, PasteMode, SearchSelection, Timing, UnlistenFn } from "./ipc";
-import type { Preferences } from "./preferences";
+import { applyPreferences, DEFAULT_PREFERENCES, normalizePreferences, type Preferences } from "./preferences";
 
 const HOLD_HINT_MS = 300;
 // 页脚撤销提示停留的时长。删除的条目在回收站里保留 7 天，提示消失后 Ctrl+Z 照样能撤销。
@@ -32,7 +32,6 @@ function normalizeMouseActions(interaction: import("./ipc").AppSettings["interac
   };
 }
 
-const DEFAULT_PREFERENCES: Preferences = { layout: "a", theme: "system", motion: "spring", density: "compact", followSystemMotion: false };
 
 export type PasteFeedback = {
   kind: "copied" | "failed"; title: string; detail: string; duration: number; startedAt: number;
@@ -76,7 +75,7 @@ export class PanelState {
     if (open === this.#previewOpen) return;
     this.#previewOpen = open;
     if (open) this.previewZoom = "fit";
-    void ipc.setPreviewKeys?.(open)?.catch(() => {});
+    void ipc.setPreviewKeys(open).catch(() => {});
   }
   previewZoom = $state<"fit" | "original">("fit");
   // 完整预览里全文的字数（由预览组件取到全文后填上）。
@@ -97,10 +96,7 @@ export class PanelState {
   inputSurface = $derived(this.visible && (this.interaction === "quick" || this.interaction === "activated"));
   interactive = $derived(this.inputSurface && (this.interaction === "quick" || this.domFocus === "ready") && !this.searchStarting && !this.searchStartFailed);
   activationRetrying = $state(false);
-  // 实验 NIANLAI_G0_SEARCHBOX_FOCUS（后端随 panel:shown 下发）：开着时快速模式也让搜索框持有页面内焦点。
-  // 只用于不激活的普通 quick；activated 使用同一真实输入框承载首字和输入法。
-  searchBoxFocus = $state(false);
-  locked = $derived(!this.inputSurface || (this.interaction === "quick" && this.mode === "quick" && !this.searchBoxFocus)
+  locked = $derived(!this.inputSurface || (this.interaction === "quick" && this.mode === "quick")
     || (this.interaction === "activated" && this.busy));
   selected = $state(0);
   session = $state(0);
@@ -212,40 +208,15 @@ export class PanelState {
   }
 
   applySettings = (settings: import("./ipc").AppSettings) => {
-    const layout = settings.panel?.layout;
-    const motion = settings.feedback?.motion;
-    const density = settings.panel?.density;
-    this.preferences = {
-      layout: layout === "a" || layout === "b" || layout === "c" ? layout : "a",
-      theme: settings.theme === "light" || settings.theme === "dark" || settings.theme === "system" ? settings.theme : "system",
-      motion: motion === "none" || motion === "spring" || motion === "soft" ? motion : "spring",
-      density: density === "comfortable" || density === "compact" ? density : "compact",
-      followSystemMotion: settings.feedback?.follow_system === true,
-    };
+    this.preferences = normalizePreferences(settings);
     this.mouseActions = normalizeMouseActions(settings.interaction);
-    // 与 preferences.ts 保持同一映射；本地实现让 G0 的单文件 Node 回归无需打包器。
-    document.documentElement.dataset.layout = this.preferences.layout;
-    document.documentElement.dataset.theme = this.preferences.theme;
-    document.documentElement.dataset.motion = this.preferences.motion;
-    // 系统“减少动画效果”只在选了“跟随系统”时生效（与 preferences.ts 的 data-reduce-motion 一致）。
-    this.syncReduceMotion();
-    document.documentElement.dataset.density = "compact";
+    applyPreferences(this.preferences);
   };
-
-  private reduceMedia: MediaQueryList | null = null;
-  private syncReduceMotion() {
-    if (typeof matchMedia !== "function" || typeof document === "undefined") return;
-    if (!this.reduceMedia) {
-      this.reduceMedia = matchMedia("(prefers-reduced-motion: reduce)");
-      this.reduceMedia.addEventListener?.("change", () => this.syncReduceMotion());
-    }
-    document.documentElement.dataset.reduceMotion = this.preferences.followSystemMotion && this.reduceMedia.matches ? "true" : "false";
-  }
 
   refreshFavorites = async () => {
     const session = this.session;
     try {
-      const favorites = await ipc.getFavorites?.();
+      const favorites = await ipc.getFavorites();
       if (!favorites) return;
       // 按回来那一刻的选中项追踪：请求期间用户可能已经移动过，不能拉回请求前的位置。
       const selectedId = this.currentItem?.id;
@@ -362,7 +333,7 @@ export class PanelState {
     const index = this.selected;
     this.deleting = true;
     try {
-      const removed = await ipc.deleteItem?.(item.id);
+      const removed = await ipc.deleteItem(item.id);
       if (session !== this.session || !this.visible) return;
       if (!removed) { this.message = "这条记录已经不在了。"; return; }
       this.message = "";
@@ -390,14 +361,14 @@ export class PanelState {
     const session = this.session;
     this.clearUndo();
     try {
-      const restored = await ipc.undoDelete?.();
+      const restored = await ipc.undoDelete();
       if (session !== this.session || !this.visible) return;
       if (!restored) { this.message = "没有可以撤销的删除。"; return; }
       const snapshot = await ipc.getHistory();
       if (session !== this.session || !this.visible) return;
       this.history = snapshot;
       if (restored.favorite) {
-        const favorites = await ipc.getFavorites?.();
+        const favorites = await ipc.getFavorites();
         if (favorites && session === this.session) this.favorites = favorites;
       }
       if (this.mode === "search") this.searchRevision += 1;
@@ -416,7 +387,7 @@ export class PanelState {
     if (!item || !this.previewOpen) return;
     if (!text) { this.message = "先用鼠标选中要复制的文字。"; return; }
     try {
-      await ipc.copySelection?.(item.id, text);
+      await ipc.copySelection(item.id, text);
       this.message = "";
       this.notice = `已复制选中的 ${[...text].length} 字`;
       if (this.noticeTimer) clearTimeout(this.noticeTimer);
@@ -731,7 +702,6 @@ export class PanelState {
     if (interaction !== "quick") {
       this.searchRequest += 1;
       this.mode = "quick";
-      this.searchBoxFocus = false;
       this.composing = false;
       this.firstInput = null;
       if (interaction !== "activated") this.input?.blur();
@@ -1007,7 +977,7 @@ export class PanelState {
     if (!this.visible) return;
     const session = this.session;
     void this.command(() => ipc.hidePanel(session), session);
-    void ipc.openSettings?.("trash")?.catch(() => {});
+    void ipc.openSettings("trash").catch(() => {});
   };
 
   startComposition = (event?: CompositionEvent) => {
@@ -1021,7 +991,7 @@ export class PanelState {
 
   private async prewarm() {
     try {
-      const snapshot = await ipc.getHistory?.();
+      const snapshot = await ipc.getHistory();
       if (!snapshot || this.visible) return;
       this.history = snapshot;
       this.warming = true;
@@ -1040,7 +1010,7 @@ export class PanelState {
   connect = () => {
     let disposed = false;
     void ipc.appVersion().then((value) => { if (!disposed) this.version = value; }).catch(() => {});
-    const settingsReady = Promise.resolve(ipc.getSettings?.()).then((settings) => { if (!disposed && settings) this.applySettings(settings); }).catch(() => {});
+    const settingsReady = ipc.getSettings().then((settings) => { if (!disposed && settings) this.applySettings(settings); }).catch(() => {});
     void this.refreshFavorites();
     const unlisten: UnlistenFn[] = [];
     const frames = new Set<number>();
@@ -1122,12 +1092,9 @@ export class PanelState {
         this.selectionNonce = 0;
         this.selectionEvents = new WeakSet();
         this.receiveForegroundRevision(payload.foregroundRevision, receivedAt);
-        this.searchBoxFocus = this.interaction === "quick" && payload.experiments?.searchBoxFocus === true;
         this.timing = { session: payload.session, hotkeyToShowMs: payload.hotkeyToShowMs };
         const current = this.session;
-        // 实验开着时等 readonly 摘掉再聚焦，让焦点一直停在搜索框；关着时照旧 blur，按键全交给钩子。
         if (this.interaction === "activated") this.prepareDomFocus();
-        else if (this.searchBoxFocus) void tick().then(() => { if (!disposed && this.visible && this.session === current && this.interaction === "quick" && this.mode === "quick") this.input?.focus({ preventScroll: true }); });
         else this.input?.blur();
         frame(() => frame(() => {
           if (this.visible && this.session === current) void this.command(() => ipc.reportPainted(current));
@@ -1196,8 +1163,7 @@ export class PanelState {
         this.clearSearchTimer();
         this.searchStarting = false;
         this.searchStartFailed = false;
-        // 实验开着时焦点留在搜索框，下次呼出不用再聚焦。
-        if (!this.searchBoxFocus) this.input?.blur();
+        this.input?.blur();
       });
       await subscribe(ipc.onPanelTiming, (payload) => { if (payload.session === this.session) this.timing = payload; });
       await subscribe(ipc.onPanelError, (payload) => {

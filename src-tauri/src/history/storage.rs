@@ -2,7 +2,7 @@
 //!
 //! 不做自动清理；这里的清理都由用户在设置“数据与备份”页手动发起。条目类的清理（失效条目、截图）
 //! 进回收站，收藏的不动；临时导出的 PNG 和恢复时留下的旧库副本是文件，直接删除。
-use super::{DAY_MS, Shared};
+use super::{DAY_MS, History, user_message};
 use nianlai_store::{KindUsage, now_ms};
 use serde::Serialize;
 use serde_json::json;
@@ -109,7 +109,7 @@ fn exports(directory: &Path) -> Vec<(PathBuf, fs::Metadata)> {
     })
 }
 
-impl Shared {
+impl History {
     fn storage(&self) -> Result<(nianlai_store::Store, PathBuf), String> {
         let store = self.store().ok_or(MEMORY_MODE)?;
         let directory = store.directory().to_path_buf();
@@ -118,10 +118,10 @@ impl Shared {
 
     pub fn storage_overview(&self) -> Result<Overview, String> {
         let (store, directory) = self.storage()?;
-        let reader = store.reader().map_err(|e| e.to_string())?;
-        let usage = reader.usage().map_err(|e| e.to_string())?;
+        let reader = store.reader().map_err(|e| user_message(&e))?;
+        let usage = reader.usage().map_err(|e| user_message(&e))?;
         let images = |before: Option<u64>| -> Result<Files, String> {
-            let items = reader.images(before).map_err(|e| e.to_string())?;
+            let items = reader.images(before).map_err(|e| user_message(&e))?;
             let free: Vec<_> = items.iter().filter(|item| !item.favorite).collect();
             Ok(Files {
                 count: free.len(),
@@ -163,7 +163,7 @@ impl Shared {
     /// 把条目移进回收站（收藏的跳过），并记日志。返回移进去的条数。
     fn trash_for_cleanup(&self, ids: Vec<usize>, target: &str) -> Result<usize, String> {
         let (store, _) = self.storage()?;
-        let result = store.trash_many(ids).map_err(|e| e.to_string());
+        let result = store.trash_many(ids);
         if let Ok(moved) = &result {
             // 进了回收站就不再算失效条目；恢复后下次检查再标。
             self.files.forget(moved);
@@ -173,9 +173,11 @@ impl Shared {
         }
         self.logger.event(
             "storage_cleaned",
-            json!({"target":target,"count":result.as_ref().ok().map(Vec::len),"error_code":result.as_ref().err()}),
+            json!({"target":target,"count":result.as_ref().ok().map(Vec::len),"error_code":result.as_ref().err().map(ToString::to_string)}),
         );
-        result.map(|moved| moved.len())
+        result
+            .map(|moved| moved.len())
+            .map_err(|e| user_message(&e))
     }
 
     /// 清理失效条目：只清全部文件都不在的（部分失效的其余文件还能用，未确认的不动）。
@@ -190,7 +192,7 @@ impl Shared {
         let ids = store
             .reader()
             .and_then(|r| r.images(before))
-            .map_err(|e| e.to_string())?
+            .map_err(|e| user_message(&e))?
             .into_iter()
             .filter(|item| !item.favorite)
             .map(|item| item.id)
@@ -209,7 +211,7 @@ impl Shared {
         Ok(store
             .reader()
             .and_then(|r| r.images(None))
-            .map_err(|e| e.to_string())?
+            .map_err(|e| user_message(&e))?
             .into_iter()
             .map(|item| ImageItem {
                 id: item.id,
@@ -286,14 +288,16 @@ impl Shared {
             ));
         }
         let started = std::time::Instant::now();
-        let result = store.compact().map_err(|e| e.to_string());
+        let result = store.compact();
         let after = database_bytes(&directory);
         self.logger.event(
             "storage_compacted",
             json!({"before_bytes":before,"after_bytes":after,"elapsed_ms":started.elapsed().as_secs_f64()*1000.0,
-                "error_code":result.as_ref().err()}),
+                "error_code":result.as_ref().err().map(ToString::to_string)}),
         );
-        result.map(|_| before.saturating_sub(after))
+        result
+            .map(|_| before.saturating_sub(after))
+            .map_err(|e| user_message(&e))
     }
 }
 

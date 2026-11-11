@@ -27,7 +27,7 @@ fn history(directories: &Directories, persistent: bool) -> History {
     let history = History::new(nianlai_store::hash::sha256, logger);
     if persistent {
         history.initialize();
-        assert!(history.0.store().is_some());
+        assert!(history.store().is_some());
     }
     history
 }
@@ -49,7 +49,7 @@ fn utf16(text: &str) -> Vec<u8> {
 // ---------------------------------------------------------------- 门槛 5
 
 /// 模拟“现在是 `at_ms`”时的过期清理：与 `purge_expired` 同一个截止算法，只是时钟由调用方给。
-fn expire_at(shared: &Shared, at_ms: u64) -> usize {
+fn expire_at(shared: &History, at_ms: u64) -> usize {
     shared
         .purge_before(None, at_ms.saturating_sub(TRASH_DAYS * DAY_MS), "expired")
         .unwrap()
@@ -61,7 +61,7 @@ fn gate5_trash_chain_delete_restore_delete_and_expire_in_both_modes() {
     for persistent in [false, true] {
         let directory = Directory::new();
         let history = history(&directories(&directory), persistent);
-        let shared = &history.0;
+        let shared = &history;
         let save = |text: &str, sequence: u32| {
             shared
                 .ingest(
@@ -149,7 +149,7 @@ fn offer(
     sequence: u32,
 ) -> String {
     let skipped = |reason: &str| {
-        history.0.logger.event(
+        history.logger.event(
             "capture",
             json!({"outcome":"skipped","reason":reason,"owner_process":owner}),
         );
@@ -168,17 +168,10 @@ fn offer(
     }
     let content = Content::new(data, nianlai_store::hash::sha256).unwrap();
     let now = Instant::now();
-    Shared::capture(
-        &history.0,
-        content,
-        event(sequence, owner),
-        false,
-        now,
-        None,
-    )
-    .unwrap();
     history
-        .0
+        .capture_with(content, event(sequence, owner), false, now, None)
+        .unwrap();
+    history
         .logger
         .event("capture", json!({"outcome":"saved","owner_process":owner}));
     "stored".into()
@@ -267,9 +260,9 @@ fn gate6_excluded_paused_marked_and_sensitive_content_leaves_no_trace() {
     for text in &stored {
         assert!(snapshot.contains(text.as_str()), "对照组没进列表 {text}");
     }
-    let store = history.0.store().unwrap();
+    let store = history.store().unwrap();
     // 让 WAL 里有东西：不做检查点，直接扫文件。
-    history.0.logger.flush();
+    history.logger.flush();
     let (data, logs) = (&directories.data, &directories.logs);
     for text in &stored {
         assert!(

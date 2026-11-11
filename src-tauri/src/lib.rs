@@ -1,5 +1,7 @@
+mod app;
 mod autocycle;
 mod capture;
+mod directories;
 mod history;
 mod hotkey;
 mod log;
@@ -11,12 +13,15 @@ mod resuspend;
 mod samples;
 mod settings;
 mod settings_window;
+mod shortcut;
 mod tray;
 
-use panel::{Action, Controller};
+use app::Controller;
+use history::History;
+use panel::Action;
 use serde_json::json;
 use std::time::Instant;
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 #[tauri::command]
 fn get_settings(app: AppHandle) -> settings::Settings {
@@ -29,11 +34,44 @@ async fn set_settings(
     settings: serde_json::Value,
 ) -> Result<settings::Settings, String> {
     // 注册/注销由插件派回主线程；不能在主线程持锁等待它们完成。
-    tauri::async_runtime::spawn_blocking(move || {
-        app.state::<hotkey::Runtime>().save(&app, settings)
-    })
-    .await
-    .map_err(|_| "设置保存任务未完成，请重试".to_owned())?
+    tauri::async_runtime::spawn_blocking(move || save_settings(&app, settings))
+        .await
+        .map_err(|_| "设置保存任务未完成，请重试".to_owned())?
+}
+
+// 保存设置的编排：写盘 → 换呼出键 → 广播 → 即时生效 → 记日志。
+// hotkey 只负责换键并留下结果；持锁让跨窗口并发保存按同一顺序执行。
+fn save_settings(app: &AppHandle, update: serde_json::Value) -> Result<settings::Settings, String> {
+    let runtime = app.state::<hotkey::Runtime>();
+    let mut hotkey = runtime.lock(app);
+    let controller = app.state::<Controller>();
+    let update_hotkey = update.get("hotkey").is_some();
+    let (saved, issues) = settings::save(
+        &app.state::<settings::Store>(),
+        update,
+        |saved| hotkey.apply(&saved.hotkey),
+        |saved| {
+            if let Err(error) = app.emit("settings:changed", saved) {
+                controller.logger.event(
+                    "settings_broadcast_failed",
+                    json!({"error":error.to_string()}),
+                );
+            }
+        },
+    )?;
+    for issue in issues {
+        issue.record(&controller.logger);
+    }
+    // 采集规则即时生效：下一次复制就按新规则检查。
+    apply_live_settings(&saved);
+    if update_hotkey {
+        hotkey.record(&controller.logger);
+    }
+    controller.logger.event(
+        "settings_saved",
+        json!({"reason":"设置已保存；呼出键即时应用，其他设置按各自策略生效"}),
+    );
+    Ok(saved)
 }
 
 #[derive(serde::Serialize)]
@@ -77,16 +115,16 @@ struct SnapshotState {
     relaunch: bool,
 }
 
-fn store_directory() -> Result<std::path::PathBuf, String> {
-    history::active()
-        .and_then(|history| history.store_directory())
+fn store_directory(history: &History) -> Result<std::path::PathBuf, String> {
+    history
+        .store_directory()
         .ok_or_else(|| "历史库未打开，暂时不能使用快照".to_owned())
 }
 
 #[tauri::command]
-fn get_snapshots() -> Result<SnapshotState, String> {
+fn get_snapshots(history: State<'_, History>) -> Result<SnapshotState, String> {
     Ok(SnapshotState {
-        items: history::snapshots::list(&store_directory()?)?,
+        items: history::snapshots::list(&store_directory(&history)?)?,
         keep: nianlai_store::SNAPSHOT_KEEP,
         current_version: nianlai_store::VERSION,
         restored: history::snapshots::last_restore(),
@@ -95,8 +133,8 @@ fn get_snapshots() -> Result<SnapshotState, String> {
 }
 
 #[tauri::command]
-async fn create_snapshot(app: AppHandle) -> Result<(), String> {
-    let directory = store_directory()?;
+async fn create_snapshot(history: State<'_, History>, app: AppHandle) -> Result<(), String> {
+    let directory = store_directory(&history)?;
     tauri::async_runtime::spawn_blocking(move || {
         history::snapshots::manual(&directory, &app.state::<Controller>().logger)
     })
@@ -105,8 +143,12 @@ async fn create_snapshot(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn restore_snapshot(app: AppHandle, name: String) -> Result<(), String> {
-    let directory = store_directory()?;
+async fn restore_snapshot(
+    history: State<'_, History>,
+    app: AppHandle,
+    name: String,
+) -> Result<(), String> {
+    let directory = store_directory(&history)?;
     let handle = app.clone();
     // 完整校验可能要几秒，不能占着主线程。
     tauri::async_runtime::spawn_blocking(move || {
@@ -126,8 +168,8 @@ async fn restore_snapshot(app: AppHandle, name: String) -> Result<(), String> {
 
 /// 备份与导入（M2-4）。
 #[tauri::command]
-async fn backup_summary() -> Result<history::backup::Summary, String> {
-    blocking(|shared| shared.backup_summary()).await
+async fn backup_summary(history: State<'_, History>) -> Result<history::backup::Summary, String> {
+    blocking(history, |history| history.backup_summary()).await
 }
 /// 原生“另存为”；归设置窗口所有。取消返回 None。
 #[tauri::command]
@@ -163,8 +205,11 @@ async fn choose_backup(
     .map_err(|_| "文件对话框没有完成，请重试".to_owned())?
 }
 #[tauri::command]
-async fn export_backup(path: String) -> Result<history::backup::Exported, String> {
-    blocking(move |shared| shared.export_backup(&path)).await
+async fn export_backup(
+    history: State<'_, History>,
+    path: String,
+) -> Result<history::backup::Exported, String> {
+    blocking(history, move |history| history.export_backup(&path)).await
 }
 #[tauri::command]
 async fn reveal_in_explorer(path: String) -> Result<(), String> {
@@ -173,16 +218,20 @@ async fn reveal_in_explorer(path: String) -> Result<(), String> {
         .map_err(|_| "操作没有完成，请重试".to_owned())?
 }
 #[tauri::command]
-async fn inspect_backup(path: String) -> Result<nianlai_store::Inspection, String> {
-    blocking(move |shared| shared.inspect_backup(&path)).await
+async fn inspect_backup(
+    history: State<'_, History>,
+    path: String,
+) -> Result<nianlai_store::Inspection, String> {
+    blocking(history, move |history| history.inspect_backup(&path)).await
 }
 #[tauri::command]
 async fn import_backup(
+    history: State<'_, History>,
     app: AppHandle,
     token: String,
     mode: history::backup::Mode,
 ) -> Result<history::backup::Imported, String> {
-    let imported = blocking(move |shared| shared.import_backup(&token, mode)).await?;
+    let imported = blocking(history, move |history| history.import_backup(&token, mode)).await?;
     if imported.relaunch {
         // 覆盖已登记：和恢复快照一样，退出并由守护者重启，启动时完成替换。
         app.state::<Controller>()
@@ -193,170 +242,175 @@ async fn import_backup(
     Ok(imported)
 }
 #[tauri::command]
-async fn discard_import(token: String) -> Result<(), String> {
-    blocking(move |shared| {
-        shared.discard_import(&token);
+async fn discard_import(history: State<'_, History>, token: String) -> Result<(), String> {
+    blocking(history, move |history| {
+        history.discard_import(&token);
         Ok(())
     })
     .await
 }
 
 #[tauri::command]
-fn get_history(app: AppHandle) -> history::Snapshot {
-    app.state::<Controller>().history_snapshot()
+fn get_history(history: State<'_, History>) -> history::Snapshot {
+    history.snapshot()
 }
 #[tauri::command]
 async fn search_history(
-    app: AppHandle,
+    history: State<'_, History>,
     query: String,
     request_id: u64,
 ) -> Result<history::SearchReply, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        app.state::<Controller>().search(&query, request_id)
-    })
-    .await
-    .map_err(|_| "search_worker_failed".to_owned())?
+    let history = history.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || history.search(&query, request_id))
+        .await
+        .map_err(|_| "search_worker_failed".to_owned())?
 }
-// E01 收藏：面板控制器不暴露历史服务字段，命令层经 history::active() 取当前实例。
+// E01 收藏：命令层经 State<History> 取历史服务。
 #[tauri::command]
-fn get_favorites() -> Result<Vec<history::Preview>, String> {
-    history::active()
-        .ok_or_else(|| "历史服务未就绪".to_owned())?
-        .favorites()
+fn get_favorites(history: State<'_, History>) -> Result<Vec<history::Preview>, String> {
+    history.favorites()
 }
 #[tauri::command]
-fn set_favorite(id: usize, favorite: bool) -> Result<Option<history::Preview>, String> {
-    history::active()
-        .ok_or_else(|| "历史服务未就绪".to_owned())?
-        .set_favorite(id, favorite)
+fn set_favorite(
+    history: State<'_, History>,
+    id: usize,
+    favorite: bool,
+) -> Result<Option<history::Preview>, String> {
+    history.set_favorite(id, favorite)
 }
 // E03/E04 收藏整理：ids 是界面当前展示的全部收藏的新顺序。
 #[tauri::command]
-fn reorder_favorites(ids: Vec<usize>) -> Result<Vec<history::Preview>, String> {
-    history::active()
-        .ok_or_else(|| "历史服务未就绪".to_owned())?
-        .reorder_favorites(&ids)
+fn reorder_favorites(
+    history: State<'_, History>,
+    ids: Vec<usize>,
+) -> Result<Vec<history::Preview>, String> {
+    history.reorder_favorites(&ids)
 }
 #[tauri::command]
-fn set_favorite_label(id: usize, title: String, note: String) -> Result<history::Preview, String> {
-    history::active()
-        .ok_or_else(|| "历史服务未就绪".to_owned())?
-        .set_favorite_label(id, &title, &note)
+fn set_favorite_label(
+    history: State<'_, History>,
+    id: usize,
+    title: String,
+    note: String,
+) -> Result<history::Preview, String> {
+    history.set_favorite_label(id, &title, &note)
 }
 #[tauri::command]
-fn delete_item(id: usize) -> Result<bool, String> {
-    history::active()
-        .ok_or_else(|| "历史服务未就绪".to_owned())?
-        .delete(id)
+fn delete_item(history: State<'_, History>, id: usize) -> Result<bool, String> {
+    history.delete(id)
 }
 #[tauri::command]
-fn undo_delete() -> Result<Option<history::Preview>, String> {
-    history::active()
-        .ok_or_else(|| "历史服务未就绪".to_owned())?
-        .undo_delete()
+fn undo_delete(history: State<'_, History>) -> Result<Option<history::Preview>, String> {
+    history.undo_delete()
 }
 #[tauri::command]
-fn get_trash() -> Result<Vec<history::Trashed>, String> {
-    history::active()
-        .ok_or_else(|| "历史服务未就绪".to_owned())?
-        .trash()
+fn get_trash(history: State<'_, History>) -> Result<Vec<history::Trashed>, String> {
+    history.trash()
 }
 #[tauri::command]
-fn restore_item(app: AppHandle, id: usize) -> Result<Option<history::Preview>, String> {
-    let restored = history::active()
-        .ok_or_else(|| "历史服务未就绪".to_owned())?
-        .restore(id)?;
+fn restore_item(
+    history: State<'_, History>,
+    app: AppHandle,
+    id: usize,
+) -> Result<Option<history::Preview>, String> {
+    let restored = history.restore(id)?;
     // 面板开着时列表跟着刷新。
     let _ = panel::dispatch(&app, Action::HistoryChanged);
     Ok(restored)
 }
 /// 物理删除回收站里的条目；`ids` 为空表示清空回收站。
 #[tauri::command]
-fn purge_items(ids: Option<Vec<usize>>) -> Result<usize, String> {
-    history::active()
-        .ok_or_else(|| "历史服务未就绪".to_owned())?
-        .purge(ids)
-}
-fn shared() -> Result<std::sync::Arc<history::Shared>, String> {
-    history::active().ok_or_else(|| "历史服务未就绪".to_owned())
+fn purge_items(history: State<'_, History>, ids: Option<Vec<usize>>) -> Result<usize, String> {
+    history.purge(ids)
 }
 /// 存储管理（M2-3）的命令都可能读写较多数据，放到阻塞线程池里跑，不卡主线程。
 async fn blocking<T: Send + 'static>(
-    job: impl FnOnce(std::sync::Arc<history::Shared>) -> Result<T, String> + Send + 'static,
+    history: State<'_, History>,
+    job: impl FnOnce(History) -> Result<T, String> + Send + 'static,
 ) -> Result<T, String> {
-    let shared = shared()?;
-    tauri::async_runtime::spawn_blocking(move || job(shared))
+    let history = history.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || job(history))
         .await
         .map_err(|_| "操作没有完成，请重试".to_owned())?
 }
 /// 文件条目的每个路径现在还在不在（预览用）；不是文件条目返回 None。
 #[tauri::command]
-async fn get_file_paths(id: usize) -> Result<Option<Vec<history::files::PathCheck>>, String> {
-    blocking(move |shared| shared.file_paths(id)).await
+async fn get_file_paths(
+    history: State<'_, History>,
+    id: usize,
+) -> Result<Option<Vec<history::files::PathCheck>>, String> {
+    blocking(history, move |history| history.file_paths(id)).await
 }
 #[tauri::command]
-async fn get_storage() -> Result<history::storage::Overview, String> {
-    blocking(|shared| shared.storage_overview()).await
+async fn get_storage(history: State<'_, History>) -> Result<history::storage::Overview, String> {
+    blocking(history, |history| history.storage_overview()).await
 }
 /// 立即全量检查文件条目（设置页“重新检查”）。
 #[tauri::command]
-async fn check_files() -> Result<(), String> {
-    blocking(|shared| {
-        if shared.check_files(None, "manual") {
-            shared.notify_changed();
+async fn check_files(history: State<'_, History>) -> Result<(), String> {
+    blocking(history, |history| {
+        if history.check_files(None, "manual") {
+            history.notify_changed();
         }
         Ok(())
     })
     .await
 }
 #[tauri::command]
-async fn clean_missing() -> Result<usize, String> {
-    blocking(|shared| shared.clean_missing()).await
+async fn clean_missing(history: State<'_, History>) -> Result<usize, String> {
+    blocking(history, |history| history.clean_missing()).await
 }
 /// 清理截图类图片：`older_days` 为空表示全部。
 #[tauri::command]
-async fn clean_images(older_days: Option<u64>) -> Result<usize, String> {
-    blocking(move |shared| shared.clean_images(older_days)).await
+async fn clean_images(
+    history: State<'_, History>,
+    older_days: Option<u64>,
+) -> Result<usize, String> {
+    blocking(history, move |history| history.clean_images(older_days)).await
 }
 #[tauri::command]
-async fn trash_items(ids: Vec<usize>) -> Result<usize, String> {
-    blocking(move |shared| shared.trash_items(ids)).await
+async fn trash_items(history: State<'_, History>, ids: Vec<usize>) -> Result<usize, String> {
+    blocking(history, move |history| history.trash_items(ids)).await
 }
 #[tauri::command]
-async fn get_images() -> Result<Vec<history::storage::ImageItem>, String> {
-    blocking(|shared| shared.images()).await
+async fn get_images(
+    history: State<'_, History>,
+) -> Result<Vec<history::storage::ImageItem>, String> {
+    blocking(history, |history| history.images()).await
 }
 #[tauri::command]
-async fn get_thumbnail(id: usize) -> Result<Option<String>, String> {
-    blocking(move |shared| shared.thumbnail(id)).await
+async fn get_thumbnail(history: State<'_, History>, id: usize) -> Result<Option<String>, String> {
+    blocking(history, move |history| history.thumbnail(id)).await
 }
 #[tauri::command]
-async fn clean_exports() -> Result<history::storage::Files, String> {
-    blocking(|shared| shared.clean_exports()).await
+async fn clean_exports(history: State<'_, History>) -> Result<history::storage::Files, String> {
+    blocking(history, |history| history.clean_exports()).await
 }
 #[tauri::command]
-async fn clean_leftovers() -> Result<history::storage::Files, String> {
-    blocking(|shared| shared.clean_leftovers()).await
+async fn clean_leftovers(history: State<'_, History>) -> Result<history::storage::Files, String> {
+    blocking(history, |history| history.clean_leftovers()).await
 }
 #[tauri::command]
-async fn compact_history() -> Result<u64, String> {
-    blocking(|shared| shared.compact()).await
+async fn compact_history(history: State<'_, History>) -> Result<u64, String> {
+    blocking(history, |history| history.compact()).await
 }
 /// 完整预览的全文（M2-7）：`limit` 为空表示全部。
 #[tauri::command]
 async fn get_full_text(
+    history: State<'_, History>,
     id: usize,
     limit: Option<usize>,
 ) -> Result<Option<history::preview::TextChunk>, String> {
-    blocking(move |shared| shared.full_text(id, limit)).await
+    blocking(history, move |history| history.full_text(id, limit)).await
 }
 /// 预览用的图片：`max` 为长边上限，空表示原尺寸。
 #[tauri::command]
 async fn get_image(
+    history: State<'_, History>,
     id: usize,
     max: Option<u32>,
 ) -> Result<Option<history::preview::ImageView>, String> {
-    blocking(move |shared| shared.image(id, max)).await
+    blocking(history, move |history| history.image(id, max)).await
 }
 /// 完整预览里选中的文字复制到剪贴板。
 #[tauri::command]
@@ -450,12 +504,11 @@ fn report_search_input(
         json!({"session":session,"input_type":input_type,"composing":composing,"after_ready_ms":after_ready_ms}),
     );
 }
-#[tauri::command]
-fn quit_prototype(app: AppHandle) -> Result<(), String> {
-    app.state::<Controller>()
-        .logger
-        .event("quit_source", json!({"source":"frontend"}));
-    panel::dispatch(&app, Action::QuitFrontend)
+// 启动和保存设置共用：采集规则、快照上限、重复复制置顶都即时生效。
+pub(crate) fn apply_live_settings(settings: &settings::Settings) {
+    capture::rules::gate().apply(&settings.capture);
+    history::snapshots::set_limit(settings.snapshots.max_mb);
+    history::set_reuse_to_top(settings.history.reuse_to_top);
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -522,7 +575,6 @@ pub fn run() {
             paste_item,
             report_painted,
             report_search_input,
-            quit_prototype,
             settings_window::open_settings
         ])
         .setup(|app| {
@@ -557,19 +609,18 @@ pub fn run() {
             platform::window::no_activate(&window, true)?;
             platform::webview::initialize(&window)?;
             let plan = autocycle::Plan::from_env(&logger);
-            capture::rules::gate().apply(&resolved.settings.capture);
-            history::snapshots::set_limit(resolved.settings.snapshots.max_mb);
-            history::set_reuse_to_top(resolved.settings.history.reuse_to_top);
+            apply_live_settings(&resolved.settings);
             let resuspend = resuspend::from_settings(&resolved.settings.memory, &logger);
-            let experiments =
-                panel::Experiments::from_settings(&resolved.settings.experiments, &logger);
             let automatic = plan.is_some();
+            let history = History::new(platform::hash::sha256, logger.clone());
+            // 命令层经 State<History> 取同一个历史服务，先于任何前端调用登记。
+            app.manage(history.clone());
             app.manage(Controller::new(
                 window,
                 logger.clone(),
+                history,
                 plan,
                 resuspend,
-                experiments,
             )?);
             // A06 图标：asset 协议只放开 <数据目录>\icons 这一个目录（非递归），
             // 数据目录其余内容（库、日志、导出文件）不进入 webview 可读范围；
@@ -595,7 +646,7 @@ pub fn run() {
                 &logger,
                 automatic,
                 &resolved.settings.hotkey,
-                std::env::var_os("NIANLAI_HOTKEY").is_some(),
+                resolved.hotkey_overridden,
             );
             Ok(())
         })

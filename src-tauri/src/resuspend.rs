@@ -14,35 +14,21 @@ use tauri::AppHandle;
 const CHECK: Duration = Duration::from_secs(10);
 const SETTLE: Duration = Duration::from_secs(60);
 
-fn parse(value: &str) -> Result<Duration> {
-    let minutes = value
-        .trim()
-        .parse::<f64>()
-        .map_err(|_| format!("分钟数“{value}”不是有效数字"))?;
-    if !minutes.is_finite() || minutes <= 0.0 {
-        return Err(format!("分钟数“{value}”必须大于 0 且为有限数"));
+// settings::valid_minutes 已保证有限、非负，且非 0 时换算出的时长有效；0 表示关闭。
+fn interval(minutes: f64) -> Option<Duration> {
+    if minutes == 0.0 {
+        return None;
     }
-    Duration::try_from_secs_f64(minutes * 60.0)
-        .map_err(|_| format!("分钟数“{value}”换算出的时长超出计时范围"))
+    Duration::try_from_secs_f64(minutes * 60.0).ok()
 }
 
 pub fn from_settings(settings: &crate::settings::Memory, logger: &Logger) -> Option<Duration> {
-    if settings.resuspend_minutes == 0.0 {
-        return None;
-    }
-    match parse(&settings.resuspend_minutes.to_string()) {
-        Ok(interval) => {
-            logger.event(
-                "resuspend_enabled",
-                json!({"interval_minutes": interval.as_secs_f64() / 60.0}),
-            );
-            Some(interval)
-        }
-        Err(reason) => {
-            logger.event("resuspend_invalid", json!({"reason":reason}));
-            None
-        }
-    }
+    let interval = interval(settings.resuspend_minutes)?;
+    logger.event(
+        "resuspend_enabled",
+        json!({"interval_minutes": interval.as_secs_f64() / 60.0}),
+    );
+    Some(interval)
 }
 
 pub fn spawn(
@@ -92,16 +78,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_whole_trimmed_and_fractional_minutes() {
-        assert_eq!(parse("15").unwrap(), Duration::from_secs(15 * 60));
-        assert_eq!(parse(" 30 ").unwrap(), Duration::from_secs(30 * 60));
-        assert_eq!(parse("0.5").unwrap(), Duration::from_secs(30));
-    }
-
-    #[test]
-    fn rejects_invalid_minutes() {
-        for input in ["", "0", "-1", "NaN", "inf", "abc", "1e300"] {
-            assert!(parse(input).is_err(), "{input}");
-        }
+    fn converts_whole_and_fractional_minutes_and_zero_means_off() {
+        assert_eq!(interval(15.0), Some(Duration::from_secs(15 * 60)));
+        assert_eq!(interval(0.5), Some(Duration::from_secs(30)));
+        assert_eq!(interval(0.0), None);
+        assert_eq!(interval(-0.0), None);
     }
 }

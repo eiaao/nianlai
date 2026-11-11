@@ -125,11 +125,12 @@ pub struct FocusResult {
     pub focus_unknown: bool,
 }
 
+#[cfg(not(windows))]
+compile_error!(
+    "拈来只支持 Windows：平台层只有 platform/windows 一份实现，请用 Windows 工具链构建。"
+);
+
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
 pub use windows::*;
-#[cfg(not(windows))]
-mod stub;
-#[cfg(not(windows))]
-pub use stub::*;

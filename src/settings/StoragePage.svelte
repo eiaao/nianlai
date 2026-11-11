@@ -10,7 +10,7 @@
   import ConfirmButton from "./ConfirmButton.svelte";
   import RollingNumber from "./RollingNumber.svelte";
   import type { AppSettings, SettingsUpdate, SnapshotState, StorageOverview } from "../lib/ipc";
-  import { count, message, shortTime, size, time } from "./format";
+  import { count, limitLabel, message, shortTime, size, time } from "./format";
 
   type StorageView = "main" | "trash" | "snapshots" | "images" | "export" | "import";
 
@@ -195,7 +195,7 @@
       </div>
     </div></div>
 
-    <div class="group"><span class="group-title split">自动快照<em>保留 {snapshots?.keep ?? 7} 份 · 上限 {maxMb >= 1024 ? `${maxMb / 1024} GB` : `${maxMb} MB`}</em></span><div class="card">
+    <div class="group"><span class="group-title split">自动快照<em>保留 {snapshots?.keep ?? 7} 份 · 上限 {limitLabel(maxMb)}</em></span><div class="card">
       <div class="setting">
         <span class="setting-copy"><strong>{latestSnapshot ? `最近一份：${shortTime(latestSnapshot.created_ms)}` : "还没有快照"}</strong><small>{snapshots?.items.length ?? 0} 份，共 {size(overview?.snapshots.bytes ?? 0)}。出问题时可以把历史恢复到其中任何一份</small></span>
         <button type="button" onclick={() => { view = "snapshots"; }}>全部快照</button>

@@ -1,5 +1,6 @@
+pub use super::outcome::PasteResult;
 use crate::{history::content::Content, platform::Target};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::{sync::Arc, time::Instant};
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -11,39 +12,26 @@ pub enum Mode {
     Text,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum Outcome {
-    Copied,
-    Sent,
-    Confirmed,
-    CopiedOnly,
-    NativeSubmissionUnknown,
-    NativeNotSubmitted,
-    GenericSubmissionUnknown,
-    GenericNotSubmitted,
-}
-
 // 通用提交已开始后，任何未发送/写入错误都终止旧请求，不能承诺仍可手动 Ctrl+V。
 pub(crate) fn generic_outcome(
     result: Result<super::generic::Completion, String>,
     report: &mut serde_json::Value,
-) -> Outcome {
+) -> PasteResult {
     use super::generic::{Completion, Submission};
     match result {
         Ok(Completion::NotSubmitted(reason)) => {
             report["reason"] = serde_json::json!(reason);
-            Outcome::GenericNotSubmitted
+            PasteResult::GenericNotSubmitted
         }
         Err(reason) => {
             report["reason"] = serde_json::json!(reason);
-            Outcome::GenericNotSubmitted
+            PasteResult::GenericNotSubmitted
         }
-        Ok(Completion::Submitted(Submission::Sent)) => Outcome::Sent,
-        Ok(Completion::Submitted(Submission::Confirmed)) => Outcome::Confirmed,
+        Ok(Completion::Submitted(Submission::Sent)) => PasteResult::Sent,
+        Ok(Completion::Submitted(Submission::Confirmed)) => PasteResult::Confirmed,
         Ok(Completion::Submitted(Submission::Unknown)) => {
             report["reason"] = serde_json::json!("generic_submission_unknown");
-            Outcome::GenericSubmissionUnknown
+            PasteResult::GenericSubmissionUnknown
         }
         Ok(Completion::Submitted(Submission::Refused)) => unreachable!("拒绝发送已转为未提交"),
     }
@@ -53,19 +41,19 @@ pub(crate) fn generic_outcome(
 pub(crate) fn native_outcome(
     result: Result<super::native::Completion, String>,
     report: &mut serde_json::Value,
-) -> Outcome {
+) -> PasteResult {
     use super::native::{Completion, Submission};
     match result {
         Ok(Completion::NotSubmitted(reason)) => {
             report["reason"] = serde_json::json!(reason);
-            Outcome::NativeNotSubmitted
+            PasteResult::NativeNotSubmitted
         }
         Err(reason) => {
             report["reason"] = serde_json::json!(reason);
-            Outcome::NativeNotSubmitted
+            PasteResult::NativeNotSubmitted
         }
-        Ok(Completion::Submitted(Submission::Sent)) => Outcome::Sent,
-        Ok(Completion::Submitted(Submission::Unknown)) => Outcome::NativeSubmissionUnknown,
+        Ok(Completion::Submitted(Submission::Sent)) => PasteResult::Sent,
+        Ok(Completion::Submitted(Submission::Unknown)) => PasteResult::NativeSubmissionUnknown,
         Ok(Completion::Submitted(Submission::Refused)) => {
             unreachable!("拒绝提交已转为未提交")
         }
@@ -85,15 +73,15 @@ pub struct Callbacks<'a> {
     pub synchronize: &'a dyn Fn() -> bool,
 }
 
-pub fn conclude(mode: Mode, sent: bool, confirmed: bool, degraded: bool) -> Outcome {
+pub fn conclude(mode: Mode, sent: bool, confirmed: bool, degraded: bool) -> PasteResult {
     if mode == Mode::Copy {
-        Outcome::Copied
+        PasteResult::Copied
     } else if degraded || !sent {
-        Outcome::CopiedOnly
+        PasteResult::CopiedOnly
     } else if confirmed {
-        Outcome::Confirmed
+        PasteResult::Confirmed
     } else {
-        Outcome::Sent
+        PasteResult::Sent
     }
 }
 
@@ -116,15 +104,27 @@ mod tests {
     use super::*;
     #[test]
     fn only_content_evidence_confirms_a_successfully_sent_paste() {
-        assert_eq!(conclude(Mode::Copy, false, false, false), Outcome::Copied);
-        assert_eq!(conclude(Mode::Paste, true, false, false), Outcome::Sent);
-        assert_eq!(conclude(Mode::Paste, true, true, false), Outcome::Confirmed);
+        assert_eq!(
+            conclude(Mode::Copy, false, false, false),
+            PasteResult::Copied
+        );
+        assert_eq!(conclude(Mode::Paste, true, false, false), PasteResult::Sent);
+        assert_eq!(
+            conclude(Mode::Paste, true, true, false),
+            PasteResult::Confirmed
+        );
         assert_eq!(
             conclude(Mode::Paste, false, true, false),
-            Outcome::CopiedOnly
+            PasteResult::CopiedOnly
         );
-        assert_eq!(conclude(Mode::Paste, true, true, true), Outcome::CopiedOnly);
-        assert_eq!(conclude(Mode::Text, true, false, false), Outcome::Sent);
-        assert_eq!(conclude(Mode::Text, true, true, false), Outcome::Confirmed);
+        assert_eq!(
+            conclude(Mode::Paste, true, true, true),
+            PasteResult::CopiedOnly
+        );
+        assert_eq!(conclude(Mode::Text, true, false, false), PasteResult::Sent);
+        assert_eq!(
+            conclude(Mode::Text, true, true, false),
+            PasteResult::Confirmed
+        );
     }
 }

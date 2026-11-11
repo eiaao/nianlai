@@ -1,18 +1,16 @@
-use crate::settings::Directories;
+use crate::directories::Directories;
 use serde_json::{Value, json};
 use std::{
     fs::{self, File, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
     sync::{Arc, mpsc},
-    time::{SystemTime, UNIX_EPOCH},
+    time::UNIX_EPOCH,
 };
 
 #[derive(Clone)]
 pub struct Logger {
     sender: mpsc::Sender<Message>,
-    // 策略固定为隐藏时挂起；保留原日志字段及平台调用接口。
-    pub tier: u8,
     pub directories: Arc<Directories>,
 }
 
@@ -20,6 +18,9 @@ enum Message {
     Event(Value),
     Flush(mpsc::SyncSender<()>),
 }
+
+// 策略固定为隐藏时挂起；日志仍保留 memory_tier 列供工具读取。
+const MEMORY_TIER: u8 = 2;
 
 pub const COMPATIBILITY_FILE: &str = "panel-log.jsonl";
 
@@ -35,12 +36,7 @@ pub fn fallback_directory() -> PathBuf {
         .join(std::process::id().to_string())
 }
 
-pub fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
+pub use nianlai_store::now_ms;
 
 // 使用与 time_ms 一致的 UTC 日期，避免夏令时或时区变动让轮转顺序倒退。
 fn day_stamp(millis: u64) -> String {
@@ -69,6 +65,9 @@ struct DailyWriter {
     file: Option<File>,
     compatibility: bool,
     compatibility_file: Option<File>,
+    // 上次清理后写入的字节数与当时的日期文件，用来降低枚举目录的频率。
+    since_prune: u64,
+    pruned_name: String,
 }
 
 impl DailyWriter {
@@ -81,6 +80,8 @@ impl DailyWriter {
             file: None,
             compatibility,
             compatibility_file: None,
+            since_prune: 0,
+            pruned_name: String::new(),
         };
         writer.open_day(time)?;
         writer.prune()?;
@@ -119,7 +120,12 @@ impl DailyWriter {
             file.write_all(line.as_bytes())?;
         }
         self.flush()?;
-        self.prune()
+        self.since_prune += line.len() as u64 * (1 + u64::from(self.compatibility_file.is_some()));
+        // 跨天必清理；同一天内累计写入超过总量上限的 1/16 再清理，超限最多多出这一小段。
+        if self.file_name != self.pruned_name || self.since_prune >= self.max_bytes / 16 {
+            self.prune()?;
+        }
+        Ok(())
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -133,6 +139,8 @@ impl DailyWriter {
     }
 
     fn prune(&mut self) -> io::Result<()> {
+        self.since_prune = 0;
+        self.pruned_name.clone_from(&self.file_name);
         let mut files = Vec::new();
         let mut total = 0_u64;
         for entry in fs::read_dir(&self.directory)? {
@@ -198,19 +206,6 @@ impl DailyWriter {
 }
 
 impl Logger {
-    // 单实例通知可能早于主启动流程；保留托盘原有的无参入口。
-    pub fn new() -> io::Result<Self> {
-        let path = crate::settings::settings_path();
-        let (store, issues) = crate::settings::Store::load(path.clone());
-        let resolved = crate::settings::Resolved::new(store.get(), path);
-        let logger =
-            Self::with_settings(&resolved.directories, resolved.settings.log.max_total_mb)?;
-        for issue in issues.iter().chain(&resolved.issues) {
-            issue.record(&logger);
-        }
-        Ok(logger)
-    }
-
     pub fn with_settings(directories: &Directories, max_total_mb: u64) -> io::Result<Self> {
         let max_bytes = max_total_mb
             .checked_mul(1024 * 1024)
@@ -249,7 +244,6 @@ impl Logger {
             })?;
         let logger = Self {
             sender,
-            tier: 2,
             directories: Arc::new(directories),
         };
         if fallback {
@@ -268,7 +262,7 @@ impl Logger {
             "process_name": null, "focus_class": null,
             "foreground_path": null, "foreground_ok": null, "focus_restored": null, "focus_unknown": null,
             "replayed_keys": null, "dropped_keys": null, "wait_ms": null, "keyboard_hook": null, "mouse_hook": null,
-            "memory_tier": self.tier, "suspend_result": null, "paste_result": null
+            "memory_tier": MEMORY_TIER, "suspend_result": null, "paste_result": null
         });
         if let (Some(row), Some(fields)) = (row.as_object_mut(), fields.as_object()) {
             row.extend(fields.clone());
@@ -287,7 +281,29 @@ impl Logger {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings::tests::Directory;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    struct Directory(PathBuf);
+
+    impl Directory {
+        fn new() -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "nianlai-log-test-{}-{}-{}",
+                std::process::id(),
+                now_ms(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for Directory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
 
     #[test]
     fn utc_dates_cover_epoch_leap_day_and_year_boundary() {

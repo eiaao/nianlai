@@ -222,6 +222,7 @@ pub struct Permit {
     monitor: Arc<Monitor>,
 }
 impl Permit {
+    #[cfg(test)]
     pub fn current_revision(&self) -> u64 {
         self.monitor.revision()
     }
@@ -515,7 +516,6 @@ mod tests {
             Ok(())
         }
 
-        #[cfg(windows)]
         fn candidate(&self, builtin: bool) -> bool {
             let request = crate::paste::request::Request {
                 session: 7,
@@ -692,7 +692,6 @@ mod tests {
         }
     }
 
-    #[cfg(windows)]
     fn multiformat_replay_content(companions: &[&str]) -> Arc<crate::history::content::Content> {
         use crate::history::content::{Content, Data, TEXT};
         let text = Content::text("synthetic 中文 replay", nianlai_store::hash::sha256).unwrap();
@@ -705,7 +704,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(windows)]
     fn native_multiformat_i1_replay_submits_before_restore_while_generic_refuses_at_prepare_boundary()
      {
         use crate::{
@@ -780,7 +778,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(windows)]
     fn native_multiformat_pre_submit_noncurrent_switch_return_and_other_revocations_never_submit() {
         use crate::history::content::{HTML, RTF};
         for companions in [vec![HTML], vec![RTF], vec![HTML, RTF]] {
@@ -818,7 +815,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(windows)]
     fn native_multiformat_post_submit_noncurrent_cancel_and_unknown_keep_one_submission() {
         use crate::{
             history::content::{HTML, RTF},

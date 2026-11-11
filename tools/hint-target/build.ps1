@@ -1,4 +1,4 @@
-param([string]$OutputDirectory = (Join-Path $PSScriptRoot '..\..\release\hint-target'))
+﻿param([string]$OutputDirectory = (Join-Path $PSScriptRoot '..\..\release\hint-target'))
 $ErrorActionPreference = 'Stop'
 $compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 if (-not (Test-Path -LiteralPath $compiler)) { throw '未找到 .NET Framework 4 的 C# 编译器' }

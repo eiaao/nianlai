@@ -8,5 +8,6 @@ pub mod native_access;
 pub mod native_edit;
 #[cfg(test)]
 pub mod native_publication_trace;
+pub mod outcome;
 pub mod permit;
 pub mod request;

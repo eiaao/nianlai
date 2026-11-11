@@ -93,13 +93,9 @@
   button:disabled { opacity: .6; }
   button.primary.done:disabled { opacity: 1; }
   svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
-  .tick { stroke-dasharray: 14; stroke-dashoffset: 14; animation: draw 360ms 60ms ease-out forwards; }
-  @keyframes draw { to { stroke-dashoffset: 0; } }
-  .spinner { width: 10px; height: 10px; border: 1.5px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: spin .7s linear infinite; }
-  @keyframes spin { to { transform: rotate(360deg); } }
+  /* 对勾、转圈和 rise/draw/spin 关键帧在 settings.css；这里只改时长。 */
+  .tick { animation-duration: 360ms; animation-delay: 60ms; }
   .result { animation: rise 260ms ease-out; }
-  @keyframes rise { from { opacity: 0; transform: translateY(-4px); } }
   .error { margin: 0; padding: 10px 16px; color: var(--state-critical); font-size: 11px; }
-  :global(html[data-reduce-motion="true"]) .tick { animation: none; stroke-dashoffset: 0; }
   :global(html[data-reduce-motion="true"]) .result { animation: none; }
 </style>

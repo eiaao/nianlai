@@ -504,7 +504,7 @@ struct Inner {
 pub struct Service(Arc<Inner>);
 
 impl Service {
-    pub fn start(logger: Logger, history: Arc<History>) -> Result<Self> {
+    pub fn start(logger: Logger, history: History) -> Result<Self> {
         let (sender, commands) = mpsc::channel();
         let (ready, receiver) = mpsc::sync_channel(1);
         let thread = thread::Builder::new()

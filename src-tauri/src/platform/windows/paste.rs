@@ -8,8 +8,9 @@ use crate::{
         keys::{Key, Match, Table},
         native, native_access,
         native_edit::{self, NativeTransport},
+        outcome::Outcome,
         request::{
-            Callbacks, Mode, Outcome, Request, RestorePolicy, conclude, generic_outcome,
+            Callbacks, Mode, PasteResult, Request, RestorePolicy, conclude, generic_outcome,
             native_outcome,
         },
     },
@@ -415,7 +416,7 @@ fn copy(
     clipboard: &clipboard::Service,
     report: &mut Value,
     reason: &'static str,
-) -> Result<Outcome, String> {
+) -> Result<PasteResult, String> {
     report["submission_method"] = json!("clipboard_only");
     report["clipboard_publication"] = json!("immediate");
     if request.cancelled.load(Ordering::Acquire) {
@@ -1248,7 +1249,7 @@ fn perform(
     stopping: &AtomicBool,
     callbacks: Callbacks<'_>,
     report: &mut Value,
-) -> Result<Outcome, String> {
+) -> Result<PasteResult, String> {
     if cancelled(request, stopping) {
         return Err("request_cancelled".into());
     }
@@ -1324,7 +1325,7 @@ pub fn execute(
     stopping: &AtomicBool,
     callbacks: Callbacks<'_>,
     exports: Option<&Path>,
-) -> Value {
+) -> Outcome {
     let mut report = json!({"paste_result":null,"reason":null,"clipboard_written":false,
         "submission_method":"send_input","clipboard_publication":"immediate",
         "record_id":request.record_id,"written_formats":[],
@@ -1399,10 +1400,13 @@ pub fn execute(
             &mut report,
         )
     };
-    match outcome {
-        Ok(outcome) => report["paste_result"] = json!(outcome),
-        Err(reason) => report["reason"] = json!(reason),
-    }
+    let result = match outcome {
+        Ok(result) => Some(result),
+        Err(reason) => {
+            report["reason"] = json!(reason);
+            None
+        }
+    };
     report["selected_to_result_ms"] = json!(request.started.elapsed().as_secs_f64() * 1000.0);
     if report["clipboard_written"] == true {
         let mut names: Vec<_> = written.formats.keys().cloned().collect();
@@ -1416,7 +1420,7 @@ pub fn execute(
         );
         report["written_formats"] = json!(names);
     }
-    report
+    Outcome::from_report(result, report)
 }
 
 #[cfg(test)]

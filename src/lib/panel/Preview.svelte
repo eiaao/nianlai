@@ -2,6 +2,7 @@
   import { onDestroy, tick } from "svelte";
   import * as ipc from "../ipc";
   import type { HistoryItem, ImageView, PathCheck, TextChunk } from "../ipc";
+  import { count } from "../format";
   import { formatTime, type PanelState } from "../state.svelte";
   import { colorValue, linkParts, relativeTime, sourceName, visualKind } from "./content";
   import { SpringValue } from "./motion";
@@ -41,7 +42,7 @@
     pathsFor = id;
     paths = null;
     if (!files) return;
-    void ipc.getFilePaths?.(id)?.then((result) => { if (pathsFor === id) paths = result; }).catch(() => {});
+    void ipc.getFilePaths(id).then((result) => { if (pathsFor === id) paths = result; }).catch(() => {});
   });
   const mark = $derived(item?.file_state ?? null);
 
@@ -55,8 +56,8 @@
     imageFor = key;
     image = null; imageFailed = false;
     if (!key || !item) return;
-    void ipc.getImage?.(item.id, expanded ? null : 480)
-      ?.then((result) => { if (imageFor === key) { image = result; imageFailed = !result; } })
+    void ipc.getImage(item.id, expanded ? null : 480)
+      .then((result) => { if (imageFor === key) { image = result; imageFailed = !result; } })
       .catch(() => { if (imageFor === key) imageFailed = true; });
   });
   const fit = $derived(panel.previewZoom === "fit");
@@ -101,7 +102,7 @@
     if (id === fullFor) return;
     fullFor = id; full = null; loadingRest = false;
     if (id < 0) return;
-    void ipc.getFullText?.(id, FIRST_CHUNK)?.then((chunk) => { if (fullFor === id) full = chunk; }).catch(() => {});
+    void ipc.getFullText(id, FIRST_CHUNK).then((chunk) => { if (fullFor === id) full = chunk; }).catch(() => {});
   });
   // 完整预览的头部按全文的字数显示（列表里的字数只算了摘要）。
   $effect(() => {
@@ -113,12 +114,11 @@
       const id = fullFor;
       if (!entries.some((entry) => entry.isIntersecting) || !full || full.shown >= full.total || loadingRest) return;
       loadingRest = true;
-      void ipc.getFullText?.(id, null)?.then((chunk) => { if (fullFor === id) full = chunk; }).catch(() => {}).finally(() => { loadingRest = false; });
+      void ipc.getFullText(id, null).then((chunk) => { if (fullFor === id) full = chunk; }).catch(() => {}).finally(() => { loadingRest = false; });
     });
     observer.observe(node);
     return { destroy: () => observer.disconnect() };
   }
-  const count = (n: number) => n.toLocaleString("zh-CN");
   function size(bytes: number) {
     if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
     return `${Math.max(1, Math.round(bytes / 1024))} KB`;

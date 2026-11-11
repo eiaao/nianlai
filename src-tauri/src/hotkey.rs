@@ -1,11 +1,13 @@
 //! 呼出键校验、运行时替换与非致命降级；不改变面板的激活策略。
 use crate::{
+    app::Controller,
     log::Logger,
-    panel::{self, Action, Controller},
-    platform, settings,
+    panel::{self, Action},
+    platform,
+    shortcut::{parse, warning},
 };
 use serde::Serialize;
-use serde_json::{Value, json};
+use serde_json::json;
 use std::{
     sync::{
         Mutex,
@@ -13,197 +15,8 @@ use std::{
     },
     time::Instant,
 };
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Manager};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
-
-fn modifier(value: &str) -> Option<Modifiers> {
-    match value.to_ascii_lowercase().as_str() {
-        "ctrl" | "control" | "controlleft" | "controlright" => Some(Modifiers::CONTROL),
-        "alt" | "altleft" | "altright" | "option" => Some(Modifiers::ALT),
-        "shift" | "shiftleft" | "shiftright" => Some(Modifiers::SHIFT),
-        "win" | "super" | "meta" | "metaleft" | "metaright" | "cmd" | "command" => {
-            Some(Modifiers::SUPER)
-        }
-        _ => None,
-    }
-}
-
-pub fn parse(value: &str) -> Result<Shortcut, String> {
-    let mut mods = Modifiers::empty();
-    let mut key = None;
-    for part in value.trim().split('+').map(str::trim) {
-        if part.is_empty() {
-            return Err("主键不能为空，请选择一个主键".into());
-        }
-        if let Some(one) = modifier(part) {
-            if key.is_some() {
-                return Err("修饰键必须放在主键之前".into());
-            }
-            if mods.contains(one) {
-                return Err("同一个修饰键不能重复选择".into());
-            }
-            mods |= one;
-        } else if key.replace(part).is_some() {
-            return Err("只能选择一个主键，不支持按键序列".into());
-        }
-    }
-    let key = key.ok_or("不能只使用修饰键，请选择一个主键")?;
-    if mods.is_empty() {
-        return Err("至少选择一个修饰键（Ctrl / Alt / Shift / Win）".into());
-    }
-    // Win 是界面名称，底层解析器使用 Super；主键统一使用物理 Code。
-    let mut parts = Vec::new();
-    for (flag, name) in [
-        (Modifiers::CONTROL, "Ctrl"),
-        (Modifiers::ALT, "Alt"),
-        (Modifiers::SHIFT, "Shift"),
-        (Modifiers::SUPER, "Super"),
-    ] {
-        if mods.contains(flag) {
-            parts.push(name);
-        }
-    }
-    parts.push(key);
-    let shortcut: Shortcut = parts
-        .join("+")
-        .parse()
-        .map_err(|_| "主键无效，请选择支持的键")?;
-    let key = shortcut.key.to_string();
-    if let Some(reason) = reserved(&key, mods) {
-        return Err(reason.into());
-    }
-    if !platform::hook::supported(&shortcut) {
-        return Err("此主键暂不受面板钩子支持，请选择其他键".into());
-    }
-    Ok(shortcut)
-}
-
-fn reserved(key: &str, mods: Modifiers) -> Option<&'static str> {
-    let ctrl = Modifiers::CONTROL;
-    let alt = Modifiers::ALT;
-    let shift = Modifiers::SHIFT;
-    let win = Modifiers::SUPER;
-    if mods == (ctrl | alt | shift) && matches!(key, "KeyQ" | "KeyL") {
-        return Some("呼出键不能占用退出键或采集调试键");
-    }
-    if key == "Delete" && mods.contains(ctrl | alt) {
-        return Some("Ctrl+Alt+Del 是 Windows 安全保留键，不能用作呼出键");
-    }
-    if key == "F12" {
-        return Some("F12 由 Windows 保留给调试器，不能用作全局呼出键");
-    }
-    if (mods == alt || mods == (alt | shift)) && matches!(key, "Tab" | "Escape" | "F4" | "Space") {
-        return Some("此组合用于系统窗口切换、关闭或窗口菜单，不能用作呼出键");
-    }
-    if (mods == ctrl || mods == (ctrl | shift)) && key == "Escape" {
-        return Some("此组合用于开始菜单或任务管理器，不能用作呼出键");
-    }
-    if mods == win
-        && matches!(
-            key,
-            "KeyA"
-                | "KeyB"
-                | "KeyC"
-                | "KeyD"
-                | "KeyE"
-                | "KeyG"
-                | "KeyH"
-                | "KeyI"
-                | "KeyK"
-                | "KeyL"
-                | "KeyM"
-                | "KeyN"
-                | "KeyP"
-                | "KeyR"
-                | "KeyS"
-                | "KeyT"
-                | "KeyU"
-                | "KeyV"
-                | "KeyW"
-                | "KeyX"
-                | "KeyZ"
-                | "Tab"
-                | "Space"
-                | "Enter"
-                | "Escape"
-                | "Home"
-                | "Pause"
-                | "PrintScreen"
-                | "Equal"
-                | "Minus"
-                | "ArrowLeft"
-                | "ArrowRight"
-                | "ArrowUp"
-                | "ArrowDown"
-                | "Digit0"
-                | "Digit1"
-                | "Digit2"
-                | "Digit3"
-                | "Digit4"
-                | "Digit5"
-                | "Digit6"
-                | "Digit7"
-                | "Digit8"
-                | "Digit9"
-        )
-    {
-        return Some("此 Win 组合是已知的 Windows 系统快捷键，不能用作呼出键");
-    }
-    if (mods == (win | shift)
-        && matches!(
-            key,
-            "KeyS" | "KeyM" | "ArrowLeft" | "ArrowRight" | "ArrowUp" | "ArrowDown"
-        ))
-        || (mods == (win | ctrl)
-            && matches!(
-                key,
-                "KeyD" | "KeyF" | "F4" | "ArrowLeft" | "ArrowRight" | "Enter" | "Space"
-            ))
-        || (mods == (win | ctrl | shift) && key == "KeyB")
-        || (mods == (win | alt) && matches!(key, "KeyR" | "PrintScreen"))
-        || (mods.contains(win) && key == "KeyL")
-    {
-        return Some("此组合是已知的 Windows 系统保留操作，不能用作呼出键");
-    }
-    None
-}
-
-fn warning(shortcut: &Shortcut) -> Option<&'static str> {
-    let mods = shortcut.mods;
-    let key = shortcut.key.to_string();
-    if mods == Modifiers::SHIFT {
-        Some("仅 Shift 的组合可能影响正常输入；建议同时使用 Ctrl 或 Alt。此提示不阻止保存。")
-    } else if (mods == Modifiers::CONTROL || mods == (Modifiers::CONTROL | Modifiers::SHIFT))
-        && matches!(
-            key.as_str(),
-            "KeyA"
-                | "KeyC"
-                | "KeyF"
-                | "KeyN"
-                | "KeyO"
-                | "KeyP"
-                | "KeyS"
-                | "KeyT"
-                | "KeyV"
-                | "KeyW"
-                | "KeyX"
-                | "KeyY"
-                | "KeyZ"
-                | "Space"
-                | "Tab"
-        )
-    {
-        Some("此组合常用于编辑器、浏览器或输入法，可能覆盖其他应用的操作；仍可保存。")
-    } else if mods.contains(Modifiers::CONTROL | Modifiers::ALT) {
-        Some("Ctrl+Alt 组合可能与其他应用或 AltGr 输入冲突；仍可保存。")
-    } else if mods == Modifiers::ALT {
-        Some("此组合可能与其他应用的菜单或快捷键冲突；仍可保存。")
-    } else if mods.contains(Modifiers::SUPER) {
-        Some("Win 组合的可用性受 Windows 版本和系统设置影响，未列出的系统组合仍可能注册失败。")
-    } else {
-        None
-    }
-}
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Validation {
@@ -348,23 +161,6 @@ impl State {
         Ok(())
     }
 
-    fn save(
-        &mut self,
-        store: &settings::Store,
-        update: Value,
-        backend: &impl Backend,
-        changed: impl FnOnce(&settings::Settings),
-    ) -> Result<(settings::Settings, Vec<settings::Issue>), String> {
-        let update_hotkey = update.get("hotkey").is_some();
-        // 校验和原子写盘先完成：非法输入或磁盘失败不得注销当前可用键，也不得广播。
-        let (saved, issues) = store.set(update)?;
-        if update_hotkey {
-            self.apply(&saved.hotkey, backend);
-        }
-        changed(&saved);
-        Ok((saved, issues))
-    }
-
     fn record(&self, logger: &Logger) {
         if let Some(reason) = self.status.warning {
             logger.event(
@@ -447,39 +243,29 @@ impl Runtime {
         self.active_id.load(Ordering::Acquire) == u64::from(shortcut.id()) + 1
     }
 
-    pub fn save(&self, app: &AppHandle, update: Value) -> Result<settings::Settings, String> {
-        // 跨窗口并发保存按同一顺序执行写盘、注销、注册和广播。
-        let mut state = self.state.lock().unwrap();
-        let controller = app.state::<Controller>();
-        let update_hotkey = update.get("hotkey").is_some();
-        let (saved, issues) = state.save(
-            &app.state::<settings::Store>(),
-            update,
-            &SystemBackend(app),
-            |saved| {
-                if let Err(error) = app.emit("settings:changed", saved) {
-                    controller.logger.event(
-                        "settings_broadcast_failed",
-                        json!({"error":error.to_string()}),
-                    );
-                }
-            },
-        )?;
-        for issue in issues {
-            issue.record(&controller.logger);
+    /// 取得保存会话：持锁期间，跨窗口并发保存按同一顺序执行写盘、注销、注册和广播。
+    pub fn lock<'a>(&'a self, app: &'a AppHandle) -> Session<'a> {
+        Session {
+            state: self.state.lock().unwrap(),
+            app,
         }
-        // 采集规则即时生效：下一次复制就按新规则检查。
-        crate::capture::rules::gate().apply(&saved.capture);
-        crate::history::snapshots::set_limit(saved.snapshots.max_mb);
-        crate::history::set_reuse_to_top(saved.history.reuse_to_top);
-        if update_hotkey {
-            state.record(&controller.logger);
-        }
-        controller.logger.event(
-            "settings_saved",
-            json!({"reason":"设置已保存；呼出键即时应用，其他设置按各自策略生效"}),
-        );
-        Ok(saved)
+    }
+}
+
+/// 一次保存期间持有的呼出键状态；编排顺序由调用方（`save_settings`）决定。
+pub struct Session<'a> {
+    state: std::sync::MutexGuard<'a, State>,
+    app: &'a AppHandle,
+}
+
+impl Session<'_> {
+    /// 换成 `requested`；成功、冲突、错误都记在状态里，不返回错误。
+    pub fn apply(&mut self, requested: &str) {
+        self.state.apply(requested, &SystemBackend(self.app));
+    }
+
+    pub fn record(&self, logger: &Logger) {
+        self.state.record(logger);
     }
 }
 
@@ -565,6 +351,7 @@ pub fn setup(app: &AppHandle, logger: &Logger, automatic: bool, requested: &str,
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settings;
     use std::cell::RefCell;
 
     #[derive(Default)]
@@ -598,69 +385,12 @@ mod tests {
     }
 
     #[test]
-    fn validation_requires_modifiers_and_exactly_one_supported_main_key() {
-        for (value, reason) in [
-            ("", "主键不能为空"),
-            ("Ctrl+", "主键不能为空"),
-            ("Ctrl+Shift", "不能只使用修饰键"),
-            ("Win", "不能只使用修饰键"),
-            ("Ctrl+ShiftLeft", "不能只使用修饰键"),
-            ("A", "至少选择一个修饰键"),
-            ("Ctrl+A+B", "只能选择一个主键"),
-            ("Ctrl+Ctrl+A", "不能重复"),
-            ("Ctrl+not-a-key", "主键无效"),
-        ] {
-            assert!(parse(value).unwrap_err().contains(reason), "{value}");
-        }
-        for value in [
-            "Ctrl+`",
-            "control+Backquote",
-            "Alt+V",
-            "Ctrl+Shift+F11",
-            "Win+F8",
-            "Shift+KeyA",
-            "Ctrl+Numpad3",
-        ] {
-            assert!(parse(value).is_ok(), "{value}");
-        }
-        assert_eq!(key("Win+F8"), key("Super+F8"));
+    fn validate_command_reports_the_parsed_shortcut() {
         let value = validate_hotkey("Ctrl+`".into()).unwrap();
         assert!(value.control);
         assert!(!value.win);
         assert_eq!(value.key, "Backquote");
         assert_eq!(key(&value.hotkey), key("Ctrl+`"));
-    }
-
-    #[test]
-    fn reserved_combinations_are_blocked_but_common_application_conflicts_only_warn() {
-        for value in [
-            "Win+L",
-            "Win+Shift+L",
-            "Super+V",
-            "Ctrl+Alt+Delete",
-            "Ctrl+Alt+Shift+Delete",
-            "Alt+Tab",
-            "Alt+F4",
-            "Ctrl+Shift+Escape",
-            "Ctrl+F12",
-            "Win+Shift+S",
-            "Win+Ctrl+Shift+B",
-            "Ctrl+Alt+Shift+Q",
-            "Ctrl+Alt+Shift+L",
-        ] {
-            assert!(parse(value).is_err(), "{value}");
-        }
-        for value in [
-            "Ctrl+V",
-            "Ctrl+C",
-            "Ctrl+Shift+P",
-            "Ctrl+Space",
-            "Alt+V",
-            "Ctrl+Alt+V",
-        ] {
-            let shortcut = key(value);
-            assert!(warning(&shortcut).is_some(), "{value}");
-        }
     }
 
     #[test]
@@ -785,14 +515,13 @@ mod tests {
         state.apply(&store.get().hotkey, &backend);
         let mut broadcasts = Vec::new();
         *backend.register_error.borrow_mut() = Some("模拟被占用");
-        let (saved, _) = state
-            .save(
-                &store,
-                json!({"hotkey":"Ctrl+Shift+F11"}),
-                &backend,
-                |saved| broadcasts.push(saved.clone()),
-            )
-            .unwrap();
+        let (saved, _) = settings::save(
+            &store,
+            json!({"hotkey":"Ctrl+Shift+F11"}),
+            |saved| state.apply(&saved.hotkey, &backend),
+            |saved| broadcasts.push(saved.clone()),
+        )
+        .unwrap();
         assert_eq!(broadcasts.as_slice(), std::slice::from_ref(&saved));
         assert_eq!(saved.hotkey, "Ctrl+Shift+F11");
         assert!(state.status.error.is_some());
@@ -804,9 +533,13 @@ mod tests {
         assert_eq!(restarted.active, Some(key("Ctrl+Shift+F11")));
         assert!(restarted.status.error.is_none());
         backend.calls.borrow_mut().clear();
-        state
-            .save(&store, json!({"theme":"dark"}), &backend, |_| {})
-            .unwrap();
+        settings::save(
+            &store,
+            json!({"theme":"dark"}),
+            |saved| state.apply(&saved.hotkey, &backend),
+            |_| {},
+        )
+        .unwrap();
         assert!(
             backend.calls.borrow().is_empty(),
             "外观保存不应顺便重试抢占快捷键"
@@ -829,9 +562,13 @@ mod tests {
             json!({"hotkey":"Ctrl+"}),
         ] {
             assert!(
-                state
-                    .save(&store, update, &backend, |_| panic!("不能广播非法设置"))
-                    .is_err()
+                settings::save(
+                    &store,
+                    update,
+                    |saved| state.apply(&saved.hotkey, &backend),
+                    |_| panic!("不能广播非法设置")
+                )
+                .is_err()
             );
             assert_eq!(std::fs::read(&path).unwrap(), original);
         }
@@ -839,11 +576,13 @@ mod tests {
         std::fs::create_dir(&path).unwrap();
         std::fs::write(path.join("sentinel"), b"keep").unwrap();
         assert!(
-            state
-                .save(&store, json!({"hotkey":"Alt+V"}), &backend, |_| panic!(
-                    "写盘失败不能广播"
-                ))
-                .is_err()
+            settings::save(
+                &store,
+                json!({"hotkey":"Alt+V"}),
+                |saved| state.apply(&saved.hotkey, &backend),
+                |_| panic!("写盘失败不能广播")
+            )
+            .is_err()
         );
         assert!(backend.calls.borrow().is_empty());
         assert_eq!(state.active, Some(key("Ctrl+`")));

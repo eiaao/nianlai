@@ -5,7 +5,7 @@
 //! 网络位置可能长时间无响应，单独开线程限时，超时记为“未确认”；同一次检查里同一个网络根目录
 //! 超时一次后，其余路径直接记为未确认，不再一个个等。
 use super::{
-    DAY_MS, Shared,
+    DAY_MS, History,
     content::{Content, FILES},
 };
 use nianlai_store::{FileList, content::Data, now_ms};
@@ -199,22 +199,6 @@ fn root(path: &str) -> String {
         .to_lowercase()
 }
 
-pub(super) fn memory_lists(memory: &super::memory::History) -> Vec<FileList> {
-    memory
-        .records()
-        .filter_map(
-            |record| match record.content.formats.get(FILES).map(|f| &f.data) {
-                Some(Data::Files(paths)) => Some(FileList {
-                    id: record.id,
-                    favorite: record.favorite,
-                    paths: paths.to_vec(),
-                }),
-                _ => None,
-            },
-        )
-        .collect()
-}
-
 /// 粘贴文件条目前的检查结果。
 pub enum Usable {
     /// 不是文件条目，或文件都在（未确认的也照常粘贴）。
@@ -258,12 +242,12 @@ pub fn usable(content: &Arc<Content>, hash: nianlai_store::content::Hash) -> Usa
 
 impl super::History {
     pub fn usable_files(&self, content: &Arc<Content>) -> Usable {
-        usable(content, self.0.hash)
+        usable(content, self.hash)
     }
 
     /// 面板呼出后在后台检查列表里看得到的文件条目（最近的和收藏的）；结论有变化就通知面板刷新。
     pub fn check_visible_files(&self) {
-        let shared = self.0.clone();
+        let shared = self.clone();
         let _ = std::thread::Builder::new()
             .name("file-check".into())
             .spawn(move || {
@@ -284,16 +268,10 @@ impl super::History {
     }
 }
 
-impl Shared {
-    fn file_lists(&self) -> Result<Vec<FileList>, String> {
-        if let Some(store) = self.store() {
-            store
-                .reader()
-                .and_then(|r| r.file_lists())
-                .map_err(|e| e.to_string())
-        } else {
-            Ok(memory_lists(&self.memory.lock().unwrap()))
-        }
+impl History {
+    /// `ids` 给定时只取这些条目（库里按主键过滤）。
+    fn file_lists(&self, ids: Option<&[usize]>) -> nianlai_store::Result<Vec<FileList>> {
+        self.db().reader().and_then(|r| r.file_lists(ids))
     }
 
     /// 检查文件条目：`ids` 为 None 时检查全部（并记下全量检查时间）。返回结论是否有变化。
@@ -303,23 +281,22 @@ impl Shared {
             return false;
         }
         let started = Instant::now();
-        let result = self.file_lists().map(|lists| {
-            let lists: Vec<FileList> = match ids {
-                Some(ids) => lists.into_iter().filter(|l| ids.contains(&l.id)).collect(),
-                None => lists,
-            };
-            let now = now_ms();
-            let results: Vec<(usize, Option<Mark>)> = lists
-                .iter()
-                .map(|list| (list.id, Mark::from(&probe(&list.paths), now)))
-                .collect();
-            let checked = results.len();
-            let changed = self.files.update(results, ids.is_none());
-            if ids.is_none() {
-                self.files.last_full_ms.store(now, Ordering::Release);
-            }
-            (checked, changed)
-        });
+        let result = self
+            .file_lists(ids)
+            .map_err(|e| e.to_string())
+            .map(|lists| {
+                let now = now_ms();
+                let results: Vec<(usize, Option<Mark>)> = lists
+                    .iter()
+                    .map(|list| (list.id, Mark::from(&probe(&list.paths), now)))
+                    .collect();
+                let checked = results.len();
+                let changed = self.files.update(results, ids.is_none());
+                if ids.is_none() {
+                    self.files.last_full_ms.store(now, Ordering::Release);
+                }
+                (checked, changed)
+            });
         self.files.checking.store(false, Ordering::Release);
         let (missing, partial, unknown) = self.files.counts();
         self.logger.event(
@@ -342,7 +319,12 @@ impl Shared {
 
     /// 预览：逐个路径现查，顺便更新这一条的结论。不是文件条目返回 None。
     pub fn file_paths(&self, id: usize) -> Result<Option<Vec<PathCheck>>, String> {
-        let Some(list) = self.file_lists()?.into_iter().find(|l| l.id == id) else {
+        let Some(list) = self
+            .file_lists(Some(&[id]))
+            .map_err(|e| super::user_message(&e))?
+            .into_iter()
+            .find(|l| l.id == id)
+        else {
             return Ok(None);
         };
         let states = probe(&list.paths);

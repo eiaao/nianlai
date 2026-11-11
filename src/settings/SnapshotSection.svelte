@@ -2,7 +2,7 @@
   // 全部快照（B18）：列表、立即拍一份、恢复、占用上限。恢复会登记后让拈来重启，启动时在打开库之前替换。
   import * as ipc from "../lib/ipc";
   import type { AppSettings, SettingsUpdate, SnapshotInfo, SnapshotReason, SnapshotState } from "../lib/ipc";
-  import { message, size, time } from "./format";
+  import { limitLabel, message, size, time } from "./format";
 
   let { snapshots, maxMb, disabled, onsave, onchange }: {
     snapshots: SnapshotState | null;
@@ -24,10 +24,6 @@
   };
   const LIMITS = [256, 512, 1024, 2048, 5120];
   const total = $derived((snapshots?.items ?? []).reduce((sum, item) => sum + item.bytes, 0));
-
-  function limitLabel(mb: number) {
-    return mb >= 1024 ? `${mb / 1024} GB` : `${mb} MB`;
-  }
 
   async function create() {
     busy = "create"; actionError = "";

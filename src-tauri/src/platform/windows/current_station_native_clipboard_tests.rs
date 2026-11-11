@@ -5,6 +5,7 @@ use crate::{
     log::Logger,
     settings::Directories,
 };
+use nianlai_store::hash::hex;
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -80,9 +81,6 @@ fn with_watchdog(action: impl FnOnce() -> Result<()>) -> Result<()> {
     let _ = finished.send(());
     let _ = watchdog.join();
     result
-}
-fn hex(value: &[u8]) -> String {
-    value.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 fn object_name(handle: HANDLE) -> Result<String> {
     let mut name = [0u16; 256];
@@ -608,7 +606,7 @@ fn production_write_observed(
     if logger.directories.logs != directories.logs {
         return Err("日志目录出现fallback；拒绝诊断".into());
     }
-    let history = Arc::new(History::new(hash::sha256, logger.clone()));
+    let history = History::new(hash::sha256, logger.clone());
     let content = Content::text(SENTINEL, hash::sha256)?;
     let ingested = history.ingest(
         content.clone(),

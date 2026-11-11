@@ -6,6 +6,7 @@
 
 - `release.ps1`：一条命令构建 Windows x64 便携版：`powershell -NoProfile -ExecutionPolicy Bypass -File tools\release.ps1`。默认版本来自 `src-tauri/Cargo.toml`，同步 `package.json`，输出 `release/nianlai-<版本>-windows-x64-portable.zip`、`nianlai-<版本>.sha256` 和 `build-info.json`；固定构建目标 `x86_64-pc-windows-msvc`，读取 Cargo 目标目录下 `x86_64-pc-windows-msvc/release/nianlai.exe` 并校验 PE x64 架构和打包哈希。`-Version 0.1.0-alpha.1` 指定版本，`-SkipBuild` 打包该目标目录中的已有程序，`-OutDir <目录>` 指定输出目录，`-AllowDirty` 允许未提交改动。指定新版本后需审查并提交清单和锁文件；跳过构建时需自行确认已有程序的版本，构建信息记录 `skip_build=true`、`source_commit=null`，其中 `git_commit` 仅表示打包时的工作区提交。ZIP 附带运行、WebView2、SmartScreen、数据目录和退出说明，不含安装包及签名。
 - `check_release_versions.py`：核对 `Cargo.toml`、`package.json`、`Cargo.lock` 的版本一致，且 Tauri 不单独设版本。
+- `check_ps1_encoding.py`：已跟踪的 `*.ps1` 只要含非 ASCII 字符（如中文）就必须带 UTF-8 BOM，否则 Windows PowerShell 5.1 会按系统代码页读成乱码；新增脚本带中文时先加 BOM。
 - `test-panel-key-repeat.mjs`：面板状态机回归（键位、收藏、删除撤销、修饰键提示等），`node tools/test-panel-key-repeat.mjs`。
 
 ## 焦点与粘贴
