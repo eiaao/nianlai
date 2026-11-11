@@ -24,7 +24,6 @@
     placeholder={placeholder}
     readonly={panel.locked}
     tabindex={panel.locked ? -1 : 0}
-    class:quiet={panel.searchBoxFocus && panel.mode === "quick"}
     spellcheck="false"
     autocomplete="off"
     onpointerdown={panel.searchPointer}
@@ -50,8 +49,6 @@
   input::placeholder { color: var(--faint); opacity: 1; }
   input::-webkit-search-cancel-button { display: none; }
   .search-count { color: var(--faint); font: 10px var(--font-mono); white-space: nowrap; }
-  /* NIANLAI_G0_SEARCHBOX_FOCUS 实验仍藏掉 quick 焦点外观。 */
-  input.quiet { caret-color: transparent; }
 
   :global(html[data-layout="b"]) .search-box {
     height: auto; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; grid-template-rows: auto auto;

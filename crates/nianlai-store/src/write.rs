@@ -19,6 +19,8 @@ struct Inner {
     cache: Arc<RwLock<Cache>>,
     stats: Arc<Mutex<Stats>>,
     directory: PathBuf,
+    pool: Arc<Pool>,
+    memory: bool,
     hash: Hash,
     report: OpenReport,
 }
@@ -30,8 +32,8 @@ struct Stats {
     failures: usize,
     micros: BTreeMap<u64, usize>,
 }
-struct Writer {
-    connection: Connection,
+pub(crate) struct Writer {
+    pub(crate) connection: Connection,
     hash: Hash,
     cache: Arc<RwLock<Cache>>,
     stats: Arc<Mutex<Stats>>,
@@ -39,7 +41,43 @@ struct Writer {
     echoes: Vec<(Fingerprint, Instant)>,
     fail_after_formats: bool,
     sort_order: i64,
-    _lock: File,
+    // 内存库的容量约束；文件库没有。
+    limits: Option<MemoryOptions>,
+    _lock: Option<File>,
+}
+
+/// 内存库的设置。内存库和文件库走同一套表结构、迁移和搜索索引，只是不落盘。
+#[derive(Clone, Copy, Debug)]
+pub struct MemoryOptions {
+    /// 新内容的编号从它之后开始，用来和磁盘库里的编号错开（界面里残留的旧请求不会取到新内容）。
+    pub id_floor: usize,
+    /// 列表里最多留几条（回收站和收藏不算在淘汰范围内：收藏不被淘汰，回收站不计数）。
+    pub max_records: usize,
+    /// 列表里内容总字节数上限；单条超过它直接不记（reason=capacity）。
+    pub max_bytes: usize,
+}
+impl MemoryOptions {
+    /// 历史退到内存模式时用的约束：最近 300 条、256 MiB，编号与磁盘库错开。
+    pub fn fallback() -> Self {
+        Self {
+            id_floor: 1 << 52,
+            max_records: CACHE_LIMIT,
+            max_bytes: 256 * 1024 * 1024,
+        }
+    }
+    /// 不淘汰、不限大小。
+    pub fn unbounded() -> Self {
+        Self {
+            id_floor: 0,
+            max_records: usize::MAX,
+            max_bytes: usize::MAX,
+        }
+    }
+}
+
+enum Target {
+    Disk(PathBuf),
+    Memory(MemoryOptions),
 }
 
 pub(crate) fn lock(directory: &Path) -> Result<File> {
@@ -62,8 +100,19 @@ pub(crate) fn lock_named(directory: &Path, name: &str, shared: bool) -> Result<F
 
 impl Store {
     pub fn open(directory: &Path, hash: Hash) -> Result<Self> {
-        let directory = directory.to_path_buf();
-        let path = directory.clone();
+        Self::start(Target::Disk(directory.to_path_buf()), hash)
+    }
+    /// 开一个内存库：每个 Store 各有一份独立的库，互不可见，丢掉最后一个句柄数据就没了。
+    /// 读和写共用写入线程里的那一条连接，所以读到的一定是已提交的最新数据；
+    /// 不需要数据目录，也不碰磁盘（没有 WAL、锁文件、迁移前备份）。
+    pub fn open_memory(hash: Hash, options: MemoryOptions) -> Result<Self> {
+        Self::start(Target::Memory(options), hash)
+    }
+    fn start(target: Target, hash: Hash) -> Result<Self> {
+        let (directory, memory) = match &target {
+            Target::Disk(path) => (path.clone(), false),
+            Target::Memory(_) => (PathBuf::new(), true),
+        };
         let cache = Arc::new(RwLock::new(Cache::default()));
         let shared = cache.clone();
         let stats = Arc::new(Mutex::new(Stats::default()));
@@ -75,17 +124,40 @@ impl Store {
             .spawn(move || {
                 let initialized = (|| -> Result<(Writer, OpenReport)> {
                     let started = Instant::now();
-                    let db = path.join("history.db");
-                    // 先只读探测版本；拒绝新版时不设置 journal_mode，不触发迁移。
-                    if db.exists() {
-                        let probe =
-                            Connection::open_with_flags(&db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-                        schema::version(&probe)?;
-                    }
-                    std::fs::create_dir_all(&path)?;
-                    let lock = lock(&path)?;
-                    let mut connection = writable(&db)?;
+                    let (mut connection, lock, path, limits) = match &target {
+                        Target::Disk(path) => {
+                            let db = path.join("history.db");
+                            // 先只读探测版本；拒绝新版时不设置 journal_mode，不触发迁移。
+                            if db.exists() {
+                                let probe = Connection::open_with_flags(
+                                    &db,
+                                    OpenFlags::SQLITE_OPEN_READ_ONLY,
+                                )?;
+                                schema::version(&probe)?;
+                            }
+                            std::fs::create_dir_all(path)?;
+                            let lock = lock(path)?;
+                            (writable(&db)?, Some(lock), path.clone(), None)
+                        }
+                        Target::Memory(options) => {
+                            let connection = Connection::open_in_memory()?;
+                            // 排序、临时表也不落到临时目录。
+                            connection.execute_batch(
+                                "PRAGMA foreign_keys=ON; PRAGMA temp_store=MEMORY;",
+                            )?;
+                            (connection, None, PathBuf::new(), Some(*options))
+                        }
+                    };
                     let migrated_from = schema::initialize(&mut connection, &path)?;
+                    if let Some(options) = &limits
+                        && options.id_floor > 0
+                    {
+                        // AUTOINCREMENT 的下一个编号取 sqlite_sequence 里的值加一。
+                        connection.execute(
+                            "INSERT INTO sqlite_sequence(name,seq) VALUES('contents',?1)",
+                            [options.id_floor as i64],
+                        )?;
+                    }
                     let counts = schema::counts(&connection)?;
                     let sort_order = connection.query_row(
                         "SELECT coalesce(max(sort_order),0) FROM contents",
@@ -123,6 +195,7 @@ impl Store {
                             echoes: Vec::new(),
                             fail_after_formats: false,
                             sort_order,
+                            limits,
                             _lock: lock,
                         },
                         report,
@@ -154,12 +227,14 @@ impl Store {
             thread: Mutex::new(Some(thread)),
             cache,
             stats,
+            pool: Pool::new(directory.clone()),
             directory,
+            memory,
             hash,
             report,
         })))
     }
-    fn call<T: Send + 'static>(
+    pub(crate) fn call<T: Send + 'static>(
         &self,
         job: impl FnOnce(&mut Writer) -> Result<T> + Send + 'static,
     ) -> Result<T> {
@@ -181,11 +256,19 @@ impl Store {
     pub fn report(&self) -> &OpenReport {
         &self.0.report
     }
+    /// 数据目录；内存库没有目录，返回空路径——调用方要先用 `is_memory` 判断。
     pub fn directory(&self) -> &Path {
         &self.0.directory
     }
+    pub fn is_memory(&self) -> bool {
+        self.0.memory
+    }
     pub fn reader(&self) -> Result<Reader> {
-        Reader::open(&self.0.directory, self.0.hash)
+        if self.0.memory {
+            Ok(Reader::memory(self.clone(), self.0.hash))
+        } else {
+            Reader::pooled(&self.0.pool, self.0.hash)
+        }
     }
     pub fn ingest(
         &self,
@@ -442,11 +525,26 @@ impl Store {
     }
     // 压缩（M2-3）：把删除后空出来的页还给磁盘。VACUUM 期间写入线程忙，采集排队等它结束。
     pub fn compact(&self) -> Result<()> {
-        self.call(|w| {
+        if self.0.memory {
+            return Ok(());
+        }
+        // 文件被整体改写：先清空读连接池，VACUUM 之后新借的连接重新打开。
+        self.0.pool.clear();
+        let result = self.call(|w| {
             w.connection
                 .execute_batch("VACUUM; PRAGMA wal_checkpoint(TRUNCATE);")?;
             Ok(())
-        })
+        });
+        self.0.pool.clear();
+        result
+    }
+    /// 关掉读连接池里的空闲连接（释放它们的页缓存）；借出的连接照常归还，下次读再按需新开。
+    pub fn release_idle_readers(&self) {
+        self.0.pool.release_idle();
+    }
+    #[cfg(test)]
+    pub(crate) fn pool(&self) -> &Arc<Pool> {
+        &self.0.pool
     }
     // 从回收站恢复：回到原来的位置（排序时间不变）。不在回收站里返回 None。
     pub fn restore(&self, id: usize) -> Result<Option<Metadata>> {
@@ -497,6 +595,9 @@ impl Store {
     }
     // 合并备份（M2-4）：把已检查通过的临时目录里的备份并进现役库，一个事务，随后整体重载缓存。
     pub fn import_merge(&self, token: &str) -> Result<MergeReport> {
+        if self.0.memory {
+            return Err(Error::Invalid("memory_store"));
+        }
         let staging =
             backup::staging(&self.0.directory, token).ok_or(Error::Invalid("import_missing"))?;
         let icons = self.0.directory.join("icons");
@@ -560,6 +661,7 @@ impl Store {
 }
 impl Drop for Inner {
     fn drop(&mut self) {
+        self.pool.clear();
         let _ = self.sender.send(None);
         if let Some(thread) = self.thread.lock().unwrap().take() {
             let _ = thread.join();
@@ -664,6 +766,13 @@ impl Writer {
         {
             return Ok(Ingest::skipped("stale", None));
         }
+        if let Some(limits) = self.limits
+            && content.bytes > limits.max_bytes
+        {
+            self.cache.write().unwrap().latest_sequence = Some(event.sequence);
+            self.last = None;
+            return Ok(Ingest::skipped("skipped", Some("capacity")));
+        }
         if self.echoes.iter().any(|(fingerprint, at)| {
             *fingerprint == content.fingerprint
                 && now.saturating_duration_since(*at) < Duration::from_secs(5)
@@ -707,6 +816,14 @@ impl Writer {
                     merge_id = Some(*id);
                 }
             }
+        }
+        if let Some(limits) = self.limits
+            && merged.bytes > limits.max_bytes
+        {
+            // 合并后超限：什么都不改（事务随 tx 丢弃回滚），旧记录原样保留。
+            self.cache.write().unwrap().latest_sequence = Some(event.sequence);
+            self.last = None;
+            return Ok(Ingest::skipped("skipped", Some("capacity")));
         }
         let duplicate: Option<usize> = tx
             .query_row(
@@ -823,8 +940,74 @@ impl Writer {
         }
         cache.last_recorded_ms = Some(event.time_ms);
         cache.latest_sequence = Some(event.sequence);
+        drop(cache);
         self.last = Some((id, event));
+        // 淘汰失败不影响这次写入已经成功；下一次写入会再试。
+        let _ = self.evict();
         Ok(result)
+    }
+    // 内存库的容量淘汰：只动列表里未收藏的内容，最旧的先走，直到条数和字节数都在上限内。
+    // 收藏占名额但不被淘汰；回收站不计数（它本来就随退出丢掉）。
+    fn evict(&mut self) -> Result<()> {
+        let Some(limits) = self.limits else {
+            return Ok(());
+        };
+        let (count, bytes): (usize, i64) = self.connection.query_row(
+            &format!(
+                "SELECT count(*),coalesce(sum(c.bytes),0) FROM contents c WHERE {}",
+                schema::LIVE
+            ),
+            [],
+            |r| Ok((schema::number(r, 0)?, r.get(1)?)),
+        )?;
+        let mut bytes = bytes.max(0) as usize;
+        let mut count = count;
+        if count <= limits.max_records && bytes <= limits.max_bytes {
+            return Ok(());
+        }
+        let candidates: Vec<(i64, usize)> = self
+            .connection
+            .prepare(&format!(
+                "SELECT c.id,c.bytes FROM contents c WHERE {} \
+                 AND NOT EXISTS(SELECT 1 FROM favorites fv WHERE fv.content_id=c.id) \
+                 ORDER BY c.sort_ms ASC,c.sort_order ASC",
+                schema::LIVE
+            ))?
+            .query_map([], |r| Ok((r.get(0)?, schema::number(r, 1)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        let mut evicted = Vec::new();
+        for (id, size) in candidates {
+            if count <= limits.max_records && bytes <= limits.max_bytes {
+                break;
+            }
+            evicted.push(id);
+            count -= 1;
+            bytes = bytes.saturating_sub(size);
+        }
+        let tx = self.connection.transaction()?;
+        for id in &evicted {
+            tx.execute("DELETE FROM contents WHERE id=?1", [id])?;
+        }
+        tx.commit()?;
+        let mut cache = self.cache.write().unwrap();
+        let before = cache.items.len();
+        cache
+            .items
+            .retain(|item| !evicted.contains(&(item.id as i64)));
+        cache.total = count;
+        // 被淘汰的通常是缓存之外最旧的那几条；缓存里有被淘汰的、而库里还有更多时才重新取。
+        if cache.items.len() < before && cache.items.len() < count.min(CACHE_LIMIT) {
+            cache.items = schema::recent(&self.connection)?;
+        }
+        drop(cache);
+        if self
+            .last
+            .as_ref()
+            .is_some_and(|(last, _)| evicted.contains(&(*last as i64)))
+        {
+            self.last = None;
+        }
+        Ok(())
     }
 }
 

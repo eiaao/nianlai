@@ -611,14 +611,8 @@ pub fn restore(target: &Target) -> FocusResult {
 pub fn restore_for_paste(
     target: &Target,
     permit: &crate::paste::permit::Permit,
-    logger: &crate::log::Logger,
-    session: u64,
     direct_only: bool,
 ) -> FocusResult {
-    // 同一 opt-in 开关控制所有归还取证；默认路径不生成阶段 JSON。
-    let started =
-        super::foreground::enabled(std::env::var_os("NIANLAI_G0_FOREGROUND_TRACE").as_deref())
-            .then(std::time::Instant::now);
     let mut backend = RestoreBackend {
         target,
         direct_only,
@@ -638,24 +632,10 @@ pub fn restore_for_paste(
             permit.current(target, current) || permit.return_pending(target, current)
         },
     };
-    let observe = |stage, snapshot: crate::platform::focus_restore::Snapshot| {
-        if let Some(started) = started {
-            logger.event("paste_restore_phase", serde_json::json!({
-                    "session":session,"stage":stage,
-                    "elapsed_ms":started.elapsed().as_secs_f64()*1000.0,
-                    "revision":permit.current_revision(),
-                    "target_valid":snapshot.target_valid,
-                    "target_foreground":snapshot.focus.foreground.success,
-                    "original_control_valid":snapshot.original_valid,
-                    "original_focus_restored":snapshot.original_valid && snapshot.focus.focus_restored,
-                    "focus_unknown":snapshot.focus.focus_unknown,"permitted":snapshot.permitted,
-                }));
-        }
-    };
     if direct_only {
-        crate::platform::focus_restore::run_direct(&mut backend, observe)
+        crate::platform::focus_restore::run_direct(&mut backend, |_, _| {})
     } else {
-        crate::platform::focus_restore::run(&mut backend, observe)
+        crate::platform::focus_restore::run(&mut backend, |_, _| {})
     }
 }
 

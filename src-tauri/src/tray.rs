@@ -1,7 +1,8 @@
 use crate::{
+    app::Controller,
     capture::rules::gate,
     log::Logger,
-    panel::{self, Action, Controller},
+    panel::{self, Action},
     platform, settings_window,
 };
 use serde_json::json;
@@ -157,7 +158,7 @@ pub fn setup(app: &AppHandle, logger: &Logger) -> Result<(), Box<dyn std::error:
             }
             QUIT => {
                 record(app, "托盘：请求退出");
-                // 与 quit_prototype 共用 Panel 的退出分支和 RunEvent::Exit 清理。
+                // 走 Panel 的退出分支和 RunEvent::Exit 清理。
                 if panel::dispatch(app, Action::Quit).is_err() {
                     record(app, "托盘：退出请求未完成");
                 }
@@ -271,7 +272,7 @@ fn record(app: &AppHandle, message: &'static str) {
     if let Some(controller) = app.try_state::<Controller>() {
         controller.logger.event(message, json!({}));
         controller.logger.flush();
-    } else if let Ok(logger) = Logger::new() {
+    } else if let Ok(logger) = crate::settings::open_logger() {
         // 单实例通知可能早于 Controller 初始化，不读取启动参数或工作目录。
         logger.event(message, json!({}));
         logger.flush();

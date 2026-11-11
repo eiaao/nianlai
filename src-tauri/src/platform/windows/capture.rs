@@ -145,7 +145,7 @@ impl Counters {
 struct Shared {
     inbox: Inbox,
     stopping: AtomicBool,
-    history: Arc<History>,
+    history: History,
     own_owner: usize,
     capture_access: Arc<CaptureAccess>,
     logger: Logger,
@@ -465,7 +465,7 @@ pub struct Service {
 impl Service {
     pub fn start(
         logger: Logger,
-        history: Arc<History>,
+        history: History,
         clipboard: &clipboard::Service,
         automatic: bool,
         changed: Arc<dyn Fn() + Send + Sync>,

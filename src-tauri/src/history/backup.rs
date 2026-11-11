@@ -4,7 +4,7 @@
 //! 磁盘上的位置：备份文件由用户在系统对话框里选；导出和导入过程中的临时目录在
 //! `<数据目录>\imports\`（导出用 `export-*`，导入检查用令牌命名），结束即删，下次启动也会清空；
 //! 导出时的 `<目标>.pending` 暂存文件与目标在同一目录，失败时删除。
-use super::Shared;
+use super::History;
 use crate::platform;
 use nianlai_store::{BackupSummary, Inspection, Store};
 use serde::{Deserialize, Serialize};
@@ -94,7 +94,7 @@ pub fn reveal(path: &str) -> Result<(), String> {
     platform::dialog::reveal(&existing_backup(path)?)
 }
 
-impl Shared {
+impl History {
     fn backup_store(&self) -> Result<(Store, PathBuf), String> {
         let store = self.store().ok_or(MEMORY_MODE)?;
         let directory = store.directory().to_path_buf();
@@ -179,6 +179,7 @@ impl Shared {
     }
 
     pub fn import_backup(&self, token: &str, mode: Mode) -> Result<Imported, String> {
+        self.images.lock().unwrap().clear();
         let _busy = Busy::acquire()?;
         let (store, directory) = self.backup_store()?;
         let result = match mode {

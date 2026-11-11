@@ -26,6 +26,8 @@ export function message(error: unknown) {
   return typeof error === "string" ? error : error instanceof Error ? error.message : "操作没有完成，请重试";
 }
 
-export function count(n: number) {
-  return n.toLocaleString("zh-CN");
+export { count } from "../lib/format";
+
+export function limitLabel(mb: number) {
+  return mb >= 1024 ? `${mb / 1024} GB` : `${mb} MB`;
 }

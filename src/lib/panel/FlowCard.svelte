@@ -17,7 +17,7 @@
     const id = item.id;
     thumb = null;
     if (kind !== "image") return;
-    void ipc.getImage?.(id, 480)?.then((result) => { if (item.id === id) thumb = result?.url ?? null; }).catch(() => {});
+    void ipc.getImage(id, 480).then((result) => { if (item.id === id) thumb = result?.url ?? null; }).catch(() => {});
   });
   const excerpt = $derived(kind === "code"
     ? item.preview.split("\n").slice(0, 8).join("\n")

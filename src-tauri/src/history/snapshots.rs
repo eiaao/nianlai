@@ -19,6 +19,31 @@ use std::{
 const PENDING_FILE: &str = "restore-pending";
 /// 登记文件内容以此开头表示导入备份覆盖，后面是临时目录令牌；快照文件名都以 history- 开头，不会混淆。
 const IMPORT_PREFIX: &str = "import:";
+
+/// 登记文件里的内容：恢复哪份快照，或应用哪个导入令牌。
+#[derive(Debug, PartialEq, Eq)]
+enum Pending {
+    Snapshot(String),
+    Import(String),
+}
+
+impl Pending {
+    fn parse(marker: &str) -> Self {
+        let marker = marker.trim();
+        match marker.strip_prefix(IMPORT_PREFIX) {
+            Some(token) => Self::Import(token.to_owned()),
+            None => Self::Snapshot(marker.to_owned()),
+        }
+    }
+
+    /// 写进登记文件的文本，也是 `Restored.name`。
+    fn marker(&self) -> String {
+        match self {
+            Self::Snapshot(name) => name.clone(),
+            Self::Import(token) => format!("{IMPORT_PREFIX}{token}"),
+        }
+    }
+}
 const MIB: u64 = 1024 * 1024;
 /// 运行期间多久检查一次是否该拍每日快照。
 pub const CHECK_INTERVAL: Duration = Duration::from_secs(60 * 60);
@@ -111,8 +136,11 @@ pub fn schedule_restore(directory: &Path, name: &str, logger: &Logger) -> Result
         );
         return Err("这份快照校验没有通过，不能用来恢复".to_owned());
     }
-    fs::write(directory.join("snapshots").join(PENDING_FILE), name)
-        .map_err(|_| "恢复没有登记成功，请重试".to_owned())?;
+    fs::write(
+        directory.join("snapshots").join(PENDING_FILE),
+        Pending::Snapshot(name.to_owned()).marker(),
+    )
+    .map_err(|_| "恢复没有登记成功，请重试".to_owned())?;
     logger.event("snapshot_restore_scheduled", json!({"name":name}));
     Ok(())
 }
@@ -129,8 +157,11 @@ pub fn schedule_import(directory: &Path, token: &str, logger: &Logger) -> Result
     }
     let folder = directory.join("snapshots");
     fs::create_dir_all(&folder).map_err(|_| "覆盖没有登记成功，请重试".to_owned())?;
-    fs::write(folder.join(PENDING_FILE), format!("{IMPORT_PREFIX}{token}"))
-        .map_err(|_| "覆盖没有登记成功，请重试".to_owned())?;
+    fs::write(
+        folder.join(PENDING_FILE),
+        Pending::Import(token.to_owned()).marker(),
+    )
+    .map_err(|_| "覆盖没有登记成功，请重试".to_owned())?;
     logger.event("backup_import_scheduled", json!({}));
     Ok(())
 }
@@ -138,59 +169,62 @@ pub fn schedule_import(directory: &Path, token: &str, logger: &Logger) -> Result
 /// 这个令牌的临时目录是否正被登记的覆盖占用（此时不能清理）。
 pub fn import_pending(directory: &Path, token: &str) -> bool {
     fs::read_to_string(directory.join("snapshots").join(PENDING_FILE))
-        .is_ok_and(|marker| marker.trim().strip_prefix(IMPORT_PREFIX) == Some(token))
+        .is_ok_and(|marker| Pending::parse(&marker) == Pending::Import(token.to_owned()))
 }
 
 /// 启动时、打开库之前调用：有登记的恢复就执行。登记文件无论成败都先删掉，避免反复重试。
 pub fn apply_pending(directory: &Path, logger: &Logger) {
     let marker = directory.join("snapshots").join(PENDING_FILE);
-    let Ok(name) = fs::read_to_string(&marker) else {
+    let Ok(text) = fs::read_to_string(&marker) else {
         return;
     };
     let _ = fs::remove_file(&marker);
-    let name = name.trim().to_owned();
-    let import = name.strip_prefix(IMPORT_PREFIX).map(str::to_owned);
+    let pending = Pending::parse(&text);
     let result = (|| -> Result<(), String> {
-        // 先确认要恢复的东西在，再动当前库。
-        let file = match &import {
-            Some(_) => None,
-            None => Some(nianlai_store::snapshot_file(directory, &name).ok_or("snapshot_missing")?),
-        };
-        // 当前库先另拍一份，不参与轮换，避免把要恢复的那份删掉。
-        if directory.join("history.db").exists() {
-            nianlai_store::snapshot_with(directory, Reason::BeforeRestore, None, None)
-                .map_err(|error| format!("before_restore:{error}"))?;
-        }
-        match (&import, file) {
-            (Some(token), _) => nianlai_store::apply_overwrite(directory, token),
-            (None, Some(file)) => nianlai_store::restore(directory, &file).map(drop),
-            (None, None) => unreachable!(),
+        match &pending {
+            Pending::Snapshot(name) => {
+                // 先确认要恢复的东西在，再动当前库。
+                let file =
+                    nianlai_store::snapshot_file(directory, name).ok_or("snapshot_missing")?;
+                before_restore(directory)?;
+                nianlai_store::restore(directory, &file).map(drop)
+            }
+            Pending::Import(token) => {
+                before_restore(directory)?;
+                nianlai_store::apply_overwrite(directory, token)
+            }
         }
         .map_err(|error| error.to_string())
     })();
-    let kind = if import.is_some() {
-        "import"
-    } else {
-        "snapshot"
+    let (kind, applied, failed) = match pending {
+        Pending::Snapshot(_) => ("snapshot", "snapshot_restored", "snapshot_restore_failed"),
+        Pending::Import(_) => ("import", "backup_import_applied", "backup_import_failed"),
     };
     logger.event(
-        match (import.is_some(), result.is_ok()) {
-            (false, true) => "snapshot_restored",
-            (false, false) => "snapshot_restore_failed",
-            (true, true) => "backup_import_applied",
-            (true, false) => "backup_import_failed",
-        },
-        json!({"name":if import.is_some() {""} else {&name},"error_code":result.as_ref().err()}),
+        if result.is_ok() { applied } else { failed },
+        json!({"name":match &pending {
+            Pending::Snapshot(name) => name.as_str(),
+            Pending::Import(_) => "",
+        },"error_code":result.as_ref().err()}),
     );
     // 覆盖用过的临时目录（无论成败）这里就清掉。
-    if let Some(token) = &import {
+    if let Pending::Import(token) = &pending {
         nianlai_store::discard_import(directory, token);
     }
     *LAST_RESTORE.lock().unwrap() = Some(Restored {
-        name,
+        name: pending.marker(),
         kind,
         error: result.err(),
     });
+}
+
+/// 当前库先另拍一份，不参与轮换，避免把要恢复的那份删掉。
+fn before_restore(directory: &Path) -> Result<(), String> {
+    if directory.join("history.db").exists() {
+        nianlai_store::snapshot_with(directory, Reason::BeforeRestore, None, None)
+            .map_err(|error| format!("before_restore:{error}"))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

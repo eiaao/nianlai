@@ -198,7 +198,6 @@ mod tests {
         assert_eq!(report["error"], "no_export_directory");
     }
 
-    #[cfg(windows)]
     #[test]
     fn images_become_the_path_of_a_saved_png() {
         // 1×1、24 位的 DIB：40 字节信息头加一行像素（补齐到 4 字节）。

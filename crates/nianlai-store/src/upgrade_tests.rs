@@ -5,7 +5,7 @@
 // 这里的测试每次都把夹具复制到临时目录再打开，仓库里的文件不会被改动。
 use super::{tests::Temp, *};
 use content::{Content, DIB, Data, FILES, HTML, PNG, RTF, TEXT};
-use hash::sha256;
+use hash::{hex, sha256};
 use migrations::{STEPS, Step, migrate, user_version};
 use rusqlite::Transaction;
 use serde::{Deserialize, Serialize};
@@ -342,9 +342,6 @@ fn populate(store: &Store, origin: Instant) {
         .unwrap();
 }
 
-fn hex(fingerprint: &[u8]) -> String {
-    fingerprint.iter().map(|b| format!("{b:02x}")).collect()
-}
 fn schema_rows(c: &Connection) -> Vec<SchemaRow> {
     c.prepare("SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY type,name")
         .unwrap()
@@ -398,11 +395,11 @@ fn manifest_of(directory: &Path) -> Manifest {
         })
         .collect();
     Manifest {
-        version: user_version(&reader.connection).unwrap(),
+        version: user_version(reader.connection()).unwrap(),
         counts: reader.counts().unwrap().into(),
         records,
         searches,
-        schema: schema_rows(&reader.connection),
+        schema: schema_rows(reader.connection()),
     }
 }
 // 结构以外的部分逐项比对（结构在真正迁移之后会变，单独测）。
@@ -787,7 +784,7 @@ fn fresh_database_starts_at_latest_without_backup() {
     assert_eq!(store.report().version, VERSION);
     assert_eq!(store.report().migrated_from, None);
     let c = store.reader().unwrap();
-    assert_eq!(user_version(&c.connection).unwrap(), VERSION);
+    assert_eq!(user_version(c.connection()).unwrap(), VERSION);
     assert!(!temp.0.join("backups").exists());
 }
 

@@ -487,7 +487,6 @@ fn generic_final_lightweight_guard_can_refuse_after_a_ready_probe() {
     }
 }
 #[test]
-#[cfg(windows)]
 fn generic_production_override_preserves_rich_files_images_and_explicit_text() {
     let plain = Content::text("synthetic-format-marker", sha256).unwrap();
     let bytes = |value: &'static [u8]| Data::Bytes(Arc::from(value));

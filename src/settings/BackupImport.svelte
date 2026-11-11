@@ -182,11 +182,9 @@
   .mark { width: 16px; height: 16px; display: grid; place-items: center; color: var(--settings-accent); }
   .step.failed .mark { color: var(--state-critical); }
   svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
-  .tick { stroke-dasharray: 14; stroke-dashoffset: 14; animation: draw 300ms ease-out forwards; }
   .cross { stroke-dasharray: 10; stroke-dashoffset: 10; animation: draw 260ms ease-out forwards; }
-  @keyframes draw { to { stroke-dashoffset: 0; } }
-  .spinner { width: 11px; height: 11px; display: inline-block; border: 1.5px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: spin .7s linear infinite; }
-  @keyframes spin { to { transform: rotate(360deg); } }
+  /* 对勾、转圈和 rise/draw/spin 关键帧在 settings.css；这里只改尺寸。 */
+  .spinner { --spinner-size: 11px; display: inline-block; }
   .choices { display: grid; gap: 8px; animation: rise 240ms ease-out; }
   .choice { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; align-items: start; gap: 12px; padding: 13px 16px; border: 1px solid var(--settings-line); border-radius: var(--radius-md); background: var(--settings-card); text-align: left; }
   .choice[aria-checked="true"] { border-color: var(--settings-accent); background: var(--settings-selected); }
@@ -209,7 +207,6 @@
   .note { margin: 0; padding: 14px 16px; color: var(--settings-muted); font-size: 11px; line-height: 1.6; }
   .error { margin: 0; padding: 10px 16px; color: var(--state-critical); font-size: 11px; }
   .error.inline { padding: 0; margin-right: auto; }
-  @keyframes rise { from { opacity: 0; transform: translateY(-4px); } }
-  :global(html[data-reduce-motion="true"]) .tick, :global(html[data-reduce-motion="true"]) .cross { animation: none; stroke-dashoffset: 0; }
+  :global(html[data-reduce-motion="true"]) .cross { animation: none; stroke-dashoffset: 0; }
   :global(html[data-reduce-motion="true"]) .choices, :global(html[data-reduce-motion="true"]) .done, :global(html[data-reduce-motion="true"]) .countdown { animation: none; }
 </style>

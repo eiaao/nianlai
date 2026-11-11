@@ -5,7 +5,7 @@
 // NIANLAI_G0_RESUSPEND_MIN：覆盖 memory.resuspend_minutes，支持小数分钟及 0（关闭）。
 // 呼出键保存后即时重新注册；其余运行配置仍按各自的生效策略读取。
 
-use crate::{hotkey, log::Logger};
+use crate::{log::Logger, shortcut};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::{
@@ -33,7 +33,6 @@ pub struct Settings {
     pub theme: String,
     pub data_dir: Option<PathBuf>,
     pub memory: Memory,
-    pub experiments: Experiments,
     pub log: Log,
     pub capture: Capture,
     pub snapshots: Snapshots,
@@ -50,7 +49,6 @@ impl Default for Settings {
             theme: "system".into(),
             data_dir: None,
             memory: Memory::default(),
-            experiments: Experiments::default(),
             log: Log::default(),
             capture: Capture::default(),
             snapshots: Snapshots::default(),
@@ -193,13 +191,6 @@ pub struct Memory {
     unknown: Unknown,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct Experiments {
-    pub searchbox_focus: bool,
-    #[serde(flatten)]
-    unknown: Unknown,
-}
-
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Log {
     pub max_total_mb: u64,
@@ -239,7 +230,7 @@ impl Issue {
 }
 
 pub fn parse_hotkey(value: &str) -> Result<Shortcut, String> {
-    hotkey::parse(value)
+    shortcut::parse(value)
 }
 
 fn valid_path(value: &str) -> bool {
@@ -327,14 +318,6 @@ fn validate(mut value: Value) -> (Settings, Vec<Issue>) {
         "memory.resuspend_minutes",
         json!(0.0),
         |v| v.as_f64().is_some_and(valid_minutes),
-        &mut issues,
-    );
-    field(
-        section(object, "experiments", &mut issues),
-        "searchbox_focus",
-        "experiments.searchbox_focus",
-        json!(false),
-        Value::is_boolean,
         &mut issues,
     );
     field(
@@ -552,13 +535,35 @@ impl Store {
     }
 }
 
-#[derive(Clone)]
-pub struct Directories {
-    pub settings_file: PathBuf,
-    pub data: PathBuf,
-    pub logs: PathBuf,
-    pub data_source: &'static str,
-    pub test_data_dir: bool,
+pub use crate::directories::Directories;
+
+/// 保存设置的顺序：校验并原子写盘 → 含呼出键时换键 → 广播。
+/// 校验或写盘失败直接返回，不换键也不广播（原设置保留）；换键失败不回滚，由 `apply_hotkey` 自己记录状态。
+pub fn save(
+    store: &Store,
+    update: Value,
+    apply_hotkey: impl FnOnce(&Settings),
+    changed: impl FnOnce(&Settings),
+) -> Result<(Settings, Vec<Issue>), String> {
+    let update_hotkey = update.get("hotkey").is_some();
+    let (saved, issues) = store.set(update)?;
+    if update_hotkey {
+        apply_hotkey(&saved);
+    }
+    changed(&saved);
+    Ok((saved, issues))
+}
+
+/// 按设置文件打开日志；单实例通知可能早于主启动流程，托盘走这个无参入口。
+pub fn open_logger() -> io::Result<Logger> {
+    let path = settings_path();
+    let (store, issues) = Store::load(path.clone());
+    let resolved = Resolved::new(store.get(), path);
+    let logger = Logger::with_settings(&resolved.directories, resolved.settings.log.max_total_mb)?;
+    for issue in issues.iter().chain(&resolved.issues) {
+        issue.record(&logger);
+    }
+    Ok(logger)
 }
 
 pub fn settings_path() -> PathBuf {
@@ -573,6 +578,8 @@ pub struct Resolved {
     pub settings: Settings,
     pub directories: Directories,
     pub issues: Vec<Issue>,
+    // 环境变量给出了有效的呼出键并已覆盖设置；无效值不算，沿用设置文件里的键。
+    pub hotkey_overridden: bool,
 }
 
 impl Resolved {
@@ -600,14 +607,20 @@ impl Resolved {
         resuspend: Option<OsString>,
     ) -> Self {
         let mut issues = Vec::new();
+        let mut hotkey_overridden = false;
         if let Some(value) = hotkey {
-            settings.hotkey = match value.to_str().filter(|v| parse_hotkey(v).is_ok()) {
-                Some(value) => value.into(),
-                None => {
-                    issues.push(Issue::new("NIANLAI_HOTKEY", "测试快捷键无效，已使用默认值"));
-                    DEFAULT_HOTKEY.into()
+            match value.to_str().filter(|v| parse_hotkey(v).is_ok()) {
+                Some(value) => {
+                    settings.hotkey = value.into();
+                    hotkey_overridden = true;
                 }
-            };
+                None => {
+                    issues.push(Issue::new(
+                        "NIANLAI_HOTKEY",
+                        "测试快捷键无效，已沿用设置里的快捷键",
+                    ));
+                }
+            }
         }
         if let Some(value) = resuspend {
             settings.memory.resuspend_minutes = match value
@@ -657,6 +670,7 @@ impl Resolved {
                 test_data_dir,
             },
             issues,
+            hotkey_overridden,
         }
     }
 }
@@ -687,6 +701,30 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn save_orders_write_then_hotkey_then_broadcast_and_skips_both_on_failure() {
+        let directory = Directory::new();
+        let (store, _) = Store::load(directory.0.join("settings.json"));
+        let calls = std::cell::RefCell::new(Vec::new());
+        let run = |update| {
+            save(
+                &store,
+                update,
+                |_| calls.borrow_mut().push("hotkey"),
+                |_| calls.borrow_mut().push("broadcast"),
+            )
+        };
+        run(json!({"theme":"dark"})).unwrap();
+        assert_eq!(*calls.borrow(), ["broadcast"]);
+        calls.borrow_mut().clear();
+        run(json!({"hotkey":"Alt+V"})).unwrap();
+        assert_eq!(*calls.borrow(), ["hotkey", "broadcast"]);
+        calls.borrow_mut().clear();
+        assert!(run(json!({"hotkey":"Win+L"})).is_err());
+        assert!(calls.borrow().is_empty());
+        assert_eq!(store.get().hotkey, "Alt+V");
+    }
+
+    #[test]
     fn creates_defaults_then_reads_and_updates_settings() {
         let directory = Directory::new();
         let path = directory.0.join("Nianlai/settings.json");
@@ -698,13 +736,12 @@ pub(crate) mod tests {
         assert_eq!(defaults["theme"], "system");
         assert!(defaults["data_dir"].is_null());
         assert_eq!(defaults["memory"]["resuspend_minutes"].as_f64(), Some(0.0));
-        assert_eq!(defaults["experiments"]["searchbox_focus"], false);
         assert_eq!(defaults["log"]["max_total_mb"], 20);
         assert!(parse_hotkey(&store.get().hotkey).is_ok());
         let (updated, issues) = store
             .set(
                 json!({"hotkey":"Alt+V","theme":"dark","data_dir":directory.0,
-                "memory":{"resuspend_minutes":0.5},"experiments":{"searchbox_focus":true},
+                "memory":{"resuspend_minutes":0.5},
                 "log":{"max_total_mb":3}}),
             )
             .unwrap();
@@ -713,7 +750,20 @@ pub(crate) mod tests {
         assert!(issues.is_empty());
         assert_eq!(loaded.get(), updated);
         assert_eq!(updated.memory.resuspend_minutes, 0.5);
-        assert!(updated.experiments.searchbox_focus);
+    }
+
+    #[test]
+    fn retired_experiments_section_is_read_without_issues_and_kept_as_unknown() {
+        let directory = Directory::new();
+        let path = directory.0.join("settings.json");
+        let old = json!({"searchbox_focus":true});
+        fs::write(&path, json!({"theme":"dark","experiments":old}).to_string()).unwrap();
+        let (store, issues) = Store::load(path.clone());
+        assert!(issues.is_empty());
+        assert_eq!(store.get().theme, "dark");
+        store.set(json!({"theme":"light"})).unwrap();
+        let value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(value["experiments"], old);
     }
 
     #[test]
@@ -821,15 +871,14 @@ pub(crate) mod tests {
     fn invalid_fields_fall_back_individually_without_losing_valid_fields() {
         let (settings, issues) = validate(json!({
             "hotkey":"Ctrl+Alt+Shift+Q", "theme":"dark", "data_dir":"relative",
-            "memory":{"resuspend_minutes":-1}, "experiments":{"searchbox_focus":"1"},
+            "memory":{"resuspend_minutes":-1},
             "log":{"max_total_mb":0}
         }));
-        assert_eq!(issues.len(), 5);
+        assert_eq!(issues.len(), 4);
         assert_eq!(settings.hotkey, DEFAULT_HOTKEY);
         assert_eq!(settings.theme, "dark");
         assert!(settings.data_dir.is_none());
         assert_eq!(settings.memory.resuspend_minutes, 0.0);
-        assert!(!settings.experiments.searchbox_focus);
         assert_eq!(settings.log.max_total_mb, 20);
         for value in [Value::Null, json!([]), json!("正文不应进入诊断")] {
             let (settings, issues) = validate(value);
@@ -853,10 +902,9 @@ pub(crate) mod tests {
             assert_eq!(settings.memory.resuspend_minutes, 0.0);
             assert_eq!(issues.len(), 1);
         }
-        let (settings, issues) =
-            validate(json!({"theme":[],"memory":false,"experiments":[],"log":null}));
+        let (settings, issues) = validate(json!({"theme":[],"memory":false,"log":null}));
         assert_eq!(settings, Settings::default());
-        assert_eq!(issues.len(), 4);
+        assert_eq!(issues.len(), 3);
         assert!(parse_hotkey("Ctrl+Alt+Shift+L").is_err());
         assert!(parse_hotkey("正文不应进入诊断").is_err());
     }
@@ -869,7 +917,7 @@ pub(crate) mod tests {
         fs::write(
             &path,
             json!({"future":unknown,"memory":{"future":unknown},
-            "experiments":{"future":unknown},"log":{"future":unknown}})
+            "log":{"future":unknown}})
             .to_string(),
         )
         .unwrap();
@@ -877,11 +925,11 @@ pub(crate) mod tests {
         assert!(issues.is_empty());
         store
             .set(json!({"theme":"light","memory":{"resuspend_minutes":15},
-            "experiments":{"searchbox_focus":true},"log":{"max_total_mb":2}}))
+            "log":{"max_total_mb":2}}))
             .unwrap();
         let value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(value["future"], unknown);
-        for section in ["memory", "experiments", "log"] {
+        for section in ["memory", "log"] {
             assert_eq!(value[section]["future"], unknown);
         }
         assert_eq!(value["theme"], "light");
@@ -916,13 +964,13 @@ pub(crate) mod tests {
             &path,
             json!({"hotkey":private,"theme":private,"data_dir":private,
                 "memory":{"resuspend_minutes":private},
-                "experiments":{"searchbox_focus":private},"log":{"max_total_mb":private}})
+                "log":{"max_total_mb":private}})
             .to_string(),
         )
         .unwrap();
         let (store, mut issues) = Store::load(path.clone());
         assert_eq!(store.get(), Settings::default());
-        assert_eq!(issues.len(), 6);
+        assert_eq!(issues.len(), 5);
         // JSON 解析器的错误也不能把损坏文件的输入带进诊断。
         fs::write(&path, format!("{{{private}")).unwrap();
         issues.extend(Store::load(path.clone()).1);
@@ -945,7 +993,7 @@ pub(crate) mod tests {
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
             .collect();
-        assert_eq!(rows.len(), 7);
+        assert_eq!(rows.len(), 6);
         assert!(rows.iter().all(|row| row["event"] == "settings_invalid"));
         assert!(rows.iter().all(|row| row["field"].is_string()));
     }
@@ -1031,6 +1079,8 @@ pub(crate) mod tests {
             Some("0.5".into()),
         );
         assert!(resolved.issues.is_empty());
+        assert!(resolved.hotkey_overridden);
+        assert!(!resolve(None, None, None).hotkey_overridden);
         assert!(resolved.directories.test_data_dir);
         assert_eq!(resolved.directories.logs, directory.0.join("test"));
         assert_eq!(resolved.directories.data, resolved.directories.logs);
@@ -1052,7 +1102,9 @@ pub(crate) mod tests {
                 Some(value.into()),
             );
             assert_eq!(invalid.issues.len(), 3);
-            assert_eq!(invalid.settings.hotkey, DEFAULT_HOTKEY);
+            // 无效的环境变量不算覆盖：沿用设置文件里保存的键。
+            assert_eq!(invalid.settings.hotkey, "Alt+V");
+            assert!(!invalid.hotkey_overridden);
             assert_eq!(invalid.settings.memory.resuspend_minutes, 0.0);
             assert_eq!(invalid.directories.data, directory.0.join("Nianlai/data"));
         }

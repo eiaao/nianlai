@@ -4,14 +4,14 @@
 //! FileDescription、图标提取和 PNG 缓存都在这里的后台线程完成。图标缓存键由路径加文件
 //! 修改时间决定，exe 升级后键变化、重新提取。隐私：只读进程与程序信息，不碰窗口标题。
 
-use crate::history::Shared;
+use crate::history::History;
 use crate::log::Logger;
 use serde_json::json;
 use std::{
     collections::HashMap,
     fs,
     path::{Path, PathBuf},
-    sync::{Arc, mpsc},
+    sync::mpsc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -351,7 +351,7 @@ impl Refresher {
     }
 }
 
-pub fn start(shared: Arc<Shared>, logger: Logger) -> Refresher {
+pub fn start(shared: History, logger: Logger) -> Refresher {
     let (sender, receiver) = mpsc::channel::<String>();
     let spawn_logger = logger.clone();
     let spawned = std::thread::Builder::new()
@@ -363,7 +363,7 @@ pub fn start(shared: Arc<Shared>, logger: Logger) -> Refresher {
     Refresher { sender }
 }
 
-fn run(receiver: mpsc::Receiver<String>, shared: &Shared, logger: &Logger) {
+fn run(receiver: mpsc::Receiver<String>, shared: &History, logger: &Logger) {
     let mut seen: HashMap<String, Instant> = HashMap::new();
     while let Ok(exe_path) = receiver.recv() {
         if seen.len() > 256 {
@@ -380,7 +380,7 @@ fn run(receiver: mpsc::Receiver<String>, shared: &Shared, logger: &Logger) {
     }
 }
 
-fn refresh_one(exe_path: &str, shared: &Shared, logger: &Logger) {
+fn refresh_one(exe_path: &str, shared: &History, logger: &Logger) {
     let started = Instant::now();
     let outcome = (|| -> Result<&'static str, String> {
         let Some(store) = shared.store() else {

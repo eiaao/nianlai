@@ -73,10 +73,9 @@ export type HotkeyStatus = {
 };
 export type SearchReply = { request_id: number; items: HistoryItem[] };
 export type SessionEvent = { session: number };
-export type Experiments = { searchBoxFocus?: boolean };
 export type Timing = SessionEvent & { hotkeyToShowMs: number; showToPaintMs?: number };
 export type PanelInteraction = "quick" | "activation_pending" | "activation_failed" | "activated" | "passive" | "close_only";
-export type PanelShown = Timing & { history: HistorySnapshot; experiments?: Experiments; interaction: PanelInteraction; foregroundRevision: number; terminal_feedback?: boolean };
+export type PanelShown = Timing & { history: HistorySnapshot; interaction: PanelInteraction; foregroundRevision: number; terminal_feedback?: boolean };
 export type PanelInteractionEvent = SessionEvent & { interaction: PanelInteraction };
 export type ForegroundRevision = SessionEvent & { revision: number };
 export type PanelKey = SessionEvent & { key: string };

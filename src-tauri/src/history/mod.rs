@@ -1,7 +1,6 @@
 pub mod backup;
 pub mod content;
 pub mod files;
-mod memory;
 pub mod preview;
 pub mod snapshots;
 pub mod storage;
@@ -9,7 +8,7 @@ pub mod storage;
 use crate::log::{Logger, now_ms};
 use content::{Content, Fingerprint, Hash};
 pub use nianlai_store::{CopyEvent, Ingest, older};
-use nianlai_store::{Metadata, Store};
+use nianlai_store::{MemoryOptions, Metadata, Store};
 use serde::Serialize;
 use serde_json::json;
 use std::{
@@ -101,6 +100,10 @@ static REUSE_TO_TOP: AtomicBool = AtomicBool::new(true);
 pub fn set_reuse_to_top(value: bool) {
     REUSE_TO_TOP.store(value, Ordering::Release);
 }
+// 内存模式的库：同一套存储层，只是开在内存里；编号与磁盘库错开（见 `MemoryOptions::fallback`）。
+fn memory_store(hash: Hash) -> Store {
+    Store::open_memory(hash, MemoryOptions::fallback()).expect("内存库应当总能打开")
+}
 // 把存储层的错误码翻成给用户看的话。
 fn label_error(error: nianlai_store::Error) -> String {
     match error {
@@ -109,24 +112,55 @@ fn label_error(error: nianlai_store::Error) -> String {
             "收藏顺序与当前收藏不一致，请刷新后重试".into()
         }
         nianlai_store::Error::Invalid("not_favorite") => "只有收藏的条目才能设置标题和备注".into(),
-        other => other.to_string(),
+        other => user_message(&other),
     }
 }
 
-static ACTIVE: Mutex<Vec<std::sync::Weak<Shared>>> = Mutex::new(Vec::new());
-pub fn active() -> Option<Arc<Shared>> {
-    let mut entries = ACTIVE.lock().unwrap();
-    entries.retain(|weak| weak.upgrade().is_some());
-    entries.last().and_then(|weak| weak.upgrade())
+// 存储层错误翻成用户能看懂的话；原始错误由调用方照常写日志。
+// SQLite 的扩展错误码低 8 位是主码：5 忙、6 表被锁、13 磁盘满、8 只读、3 无权限、23 授权拒绝、
+// 11 损坏、26 不是数据库、14 打不开；扩展码 1032（只读：库文件被移走）单独说明。
+pub(crate) fn user_message(error: &nianlai_store::Error) -> String {
+    use nianlai_store::Error;
+    use std::io::ErrorKind;
+    match error {
+        Error::Busy => "数据库正忙，请稍后重试".into(),
+        Error::Sqlite(code) if matches!(code & 0xff, 5 | 6) => "数据库正忙，请稍后重试".into(),
+        Error::Sqlite(code) if code & 0xff == 13 => "磁盘空间不足，请清理磁盘后重试".into(),
+        Error::Io(ErrorKind::StorageFull) => "磁盘空间不足，请清理磁盘后重试".into(),
+        // 1032 = SQLITE_READONLY_DBMOVED：打开着的库文件被移走或删除了，要放在“只读”之前。
+        Error::Sqlite(1032) => "数据文件已被移动或删除，请重启拈来".into(),
+        Error::Sqlite(code) if matches!(code & 0xff, 3 | 8 | 23) => {
+            "数据文件是只读的或没有权限，请检查数据目录的权限".into()
+        }
+        Error::Io(ErrorKind::PermissionDenied | ErrorKind::ReadOnlyFilesystem) => {
+            "数据文件是只读的或没有权限，请检查数据目录的权限".into()
+        }
+        Error::Sqlite(code) if matches!(code & 0xff, 11 | 26) => {
+            "历史库文件已损坏，可以从快照恢复".into()
+        }
+        Error::Sqlite(code) if code & 0xff == 14 => {
+            "找不到或无法打开数据文件，可能已被移动、删除或被占用".into()
+        }
+        Error::Io(ErrorKind::NotFound) => "找不到数据文件，可能已被移动或删除".into(),
+        Error::NewerSchema { .. } => "历史库来自更新版本的拈来，请先升级拈来".into(),
+        Error::Sqlite(code) => format!("操作失败，请稍后重试（Sqlite {code}）"),
+        Error::Io(kind) => format!("操作失败，请稍后重试（Io {kind:?}）"),
+        Error::Invalid(reason) => format!("操作失败，请稍后重试（Invalid {reason}）"),
+        Error::Closed => "操作失败，请稍后重试（Closed）".into(),
+    }
 }
 
-// 全部可变状态聚在 Shared 里，命令层（active()）与采集线程（Arc<History>）访问同一份。
-pub struct Shared {
+// 全部可变状态聚在 Inner 里；对外只有 History（内部是 Arc<Inner>，可 Clone），各处拿到的是同一份。
+pub struct Inner {
     application_guard: Mutex<Option<std::fs::File>>,
     directory: OnceLock<PathBuf>,
-    store: RwLock<Option<Store>>,
-    disabled: AtomicBool,
-    memory: Mutex<memory::History>,
+    // 永远有一个库：启动时先是内存库，打开磁盘库成功后换成磁盘库；
+    // 打不开或完整性检查失败时留在（或换回）内存库。区分两者只看 `Store::is_memory`。
+    store: RwLock<Store>,
+    // 完整性检查失败而被换下的磁盘库：不再使用，但也不关闭。
+    // SQLite 关闭最后一个连接时会把 WAL 检查点写回 history.db、删掉 -wal 并释放 history.lock，
+    // 被判损坏的库不能因此被改动；所以像旧版本那样一直持有到进程退出。
+    retired: Mutex<Vec<Store>>,
     status: Mutex<Option<&'static str>>,
     recording: AtomicBool,
     last_write: Mutex<Option<Instant>>,
@@ -140,26 +174,27 @@ pub struct Shared {
     last_seen: Mutex<Option<Fingerprint>>,
     changed: Mutex<Option<Changed>>,
     files: files::Marks,
+    // 预览图缓存：见 preview.rs。
+    images: Mutex<preview::ImageCache>,
     hash: Hash,
     logger: Logger,
 }
 
-pub struct History(Arc<Shared>);
-impl Clone for History {
-    fn clone(&self) -> Self {
-        Self(self.0.clone())
+#[derive(Clone)]
+pub struct History(Arc<Inner>);
+impl std::ops::Deref for History {
+    type Target = Inner;
+    fn deref(&self) -> &Inner {
+        &self.0
     }
 }
 impl History {
     pub fn new(hash: Hash, logger: Logger) -> Self {
-        let mut memory = memory::History::new(hash);
-        memory.isolate_fallback_ids();
-        let shared = Arc::new(Shared {
+        Self(Arc::new(Inner {
             application_guard: Mutex::new(None),
             directory: OnceLock::new(),
-            store: RwLock::new(None),
-            disabled: AtomicBool::new(false),
-            memory: Mutex::new(memory),
+            store: RwLock::new(memory_store(hash)),
+            retired: Mutex::new(Vec::new()),
             status: Mutex::new(Some("正在加载历史")),
             recording: AtomicBool::new(false),
             last_write: Mutex::new(None),
@@ -170,31 +205,10 @@ impl History {
             last_seen: Mutex::new(None),
             changed: Mutex::new(None),
             files: files::Marks::default(),
+            images: Mutex::default(),
             hash,
             logger,
-        });
-        ACTIVE.lock().unwrap().push(Arc::downgrade(&shared));
-        Self(shared)
-    }
-    pub fn initialize(&self) {
-        self.0.initialize(&self.0.clone());
-    }
-    pub fn snapshot(&self) -> Snapshot {
-        self.0.snapshot()
-    }
-    pub fn search(&self, query: &str, request_id: u64) -> Result<SearchReply, String> {
-        self.0.search(query, request_id)
-    }
-    // 采集走 capture()；测试直接写入。
-    #[cfg(test)]
-    pub fn ingest(
-        &self,
-        content: Arc<Content>,
-        event: CopyEvent,
-        partial: bool,
-        now: Instant,
-    ) -> Result<Ingest, String> {
-        self.0.ingest(content, event, partial, now)
+        }))
     }
     /// 采集线程的入口：按设置决定立即写入，还是先暂存再写（A11）。
     pub fn capture(
@@ -208,101 +222,80 @@ impl History {
         let window = policy
             .transient
             .then(|| Duration::from_millis(policy.transient_ms));
-        Shared::capture(&self.0, content, event, partial, now, window)
-    }
-    /// 立刻写入暂存的内容：呼出面板前、退出前调用，保证面板里能看到刚复制的内容。
-    pub fn flush_deferred(&self) {
-        self.0.flush_deferred();
+        self.capture_with(content, event, partial, now, window)
     }
     /// 暂存内容写入后用来通知面板刷新。
     pub fn set_changed(&self, changed: Changed) {
-        *self.0.changed.lock().unwrap() = Some(changed);
-    }
-    pub fn get(&self, id: usize) -> Result<Option<Arc<Content>>, String> {
-        self.0.get(id)
-    }
-    pub fn before_write(
-        &self,
-        id: usize,
-        fingerprint: Fingerprint,
-        written: Fingerprint,
-        now: Instant,
-    ) -> bool {
-        self.0.before_write(id, fingerprint, written, now)
-    }
-    pub fn reuse(&self, id: usize) {
-        self.0.reuse(id);
-    }
-    pub fn latest_sequence(&self) -> Option<u32> {
-        self.0.latest_sequence()
-    }
-    pub fn skipped_sequence(&self, sequence: u32) {
-        self.0.skipped_sequence(sequence);
+        *self.changed.lock().unwrap() = Some(changed);
     }
     pub fn set_recording(&self, value: bool) {
-        self.0.recording.store(value, Ordering::Release);
+        self.recording.store(value, Ordering::Release);
     }
     pub fn last_write(&self) -> Option<Instant> {
-        *self.0.last_write.lock().unwrap()
+        *self.last_write.lock().unwrap()
     }
-    pub fn summary(&self) {
-        self.0.summary();
-    }
-    pub fn maintenance(self: &Arc<Self>, changed: Arc<dyn Fn() + Send + Sync>) {
-        let Some(store) = self.0.store() else {
+    pub fn maintenance(&self, changed: Arc<dyn Fn() + Send + Sync>) {
+        let Some(store) = self.store() else {
             return;
         };
-        let history = Arc::new(Self(self.0.clone()));
-        let logger = self.0.logger.clone();
+        let history = self.clone();
+        let logger = self.logger.clone();
         if std::thread::Builder::new().name("history-check".into()).spawn(move || {
             let started=Instant::now();
             let result=store.reader().and_then(|r|r.quick_check());
             logger.event("store_check",json!({"success":result.is_ok(),"elapsed_ms":started.elapsed().as_secs_f64()*1000.0,"error_code":result.as_ref().err().map(ToString::to_string)}));
             if result.is_err() {
-                *history.0.status.lock().unwrap()=Some("历史库异常，未落盘");
-                    history.0.disabled.store(true, Ordering::Release);
+                history.fall_back_to_memory("历史库异常，未落盘");
                 changed();return;
             }
             // 启动时先检查一次，之后每小时检查是否到了每日快照的时间（程序常常连开好几天）。
             loop {
                 let Some(directory)=history.store_directory() else {return};
                 snapshots::automatic(&directory, &logger);
-                history.0.purge_expired();
-                if history.0.check_files_daily() {
-                    history.0.notify_changed();
+                history.purge_expired();
+                if history.check_files_daily() {
+                    history.notify_changed();
                 }
                 std::thread::sleep(snapshots::CHECK_INTERVAL);
             }
-        }).is_err() {self.0.logger.event("store_check_failed",json!({"error_code":"thread_start"}));}
-    }
-    /// 库已打开时的数据目录；内存模式（库没打开）返回 None。
-    pub fn store_directory(&self) -> Option<PathBuf> {
-        self.0.store_directory()
+        }).is_err() {self.logger.event("store_check_failed",json!({"error_code":"thread_start"}));}
     }
     // 图片降级成路径时 PNG 存在这里；库没打开（内存模式）也照样用数据目录。
     pub fn exports(&self) -> Option<PathBuf> {
-        self.0.exports_path()
+        self.exports_path()
     }
     // 采集线程在内容保存成功后调用：把来源 exe 交给后台刷新显示名和图标（A06）。
     pub fn refresh_source_app(&self, exe_path: &str) {
-        if let Some(refresher) = self.0.refresh.lock().unwrap().as_ref() {
+        if let Some(refresher) = self.refresh.lock().unwrap().as_ref() {
             refresher.refresh(exe_path);
         }
     }
 }
 
-impl Shared {
+impl History {
     pub fn store_directory(&self) -> Option<PathBuf> {
         self.store().map(|store| store.directory().to_path_buf())
     }
+    /// 磁盘库；内存模式返回 None。快照、备份、存储统计、图标缓存等只在磁盘库上有意义的功能
+    /// 都用它判断“能不能做”，其余功能走 `db()`。
     pub(crate) fn store(&self) -> Option<Store> {
-        if self.disabled.load(Ordering::Acquire) {
-            None
-        } else {
-            self.store.read().unwrap().clone()
-        }
+        Some(self.db()).filter(|store| !store.is_memory())
     }
-    pub fn initialize(&self, this: &Arc<Shared>) {
+    /// 当前的库（磁盘或内存）。
+    pub(crate) fn db(&self) -> Store {
+        self.store.read().unwrap().clone()
+    }
+    /// 完整性检查失败：换成一个全新的内存库。旧库留在磁盘上不动：旧 Store 收进 `retired`，
+    /// 不再使用也不 drop（drop 会让 SQLite 做检查点、改动 history.db 和 -wal）。
+    fn fall_back_to_memory(&self, status: &'static str) {
+        let old = std::mem::replace(&mut *self.store.write().unwrap(), memory_store(self.hash));
+        if !old.is_memory() {
+            self.retired.lock().unwrap().push(old);
+        }
+        self.images.lock().unwrap().clear();
+        *self.status.lock().unwrap() = Some(status);
+    }
+    pub fn initialize(&self) {
         let location = self.logger.directories.data_source;
         let directory = self.logger.directories.data.clone();
         let _ = self.directory.set(directory.clone());
@@ -328,9 +321,10 @@ impl Shared {
                     .max_by_key(|item| item.copied_ms)
                     .map(|item| item.fingerprint);
                 // 来源应用的显示名与图标在采集线程之外刷新（A06）：门槛 P95 ≤ 500 ms 不受影响。
-                let refresher = crate::platform::apps::start(this.clone(), self.logger.clone());
+                let refresher = crate::platform::apps::start(self.clone(), self.logger.clone());
                 *self.refresh.lock().unwrap() = Some(refresher);
-                *self.store.write().unwrap() = Some(store);
+                *self.store.write().unwrap() = store;
+                self.images.lock().unwrap().clear();
             }
             Err(error) => {
                 *self.status.lock().unwrap() = Some(
@@ -347,31 +341,28 @@ impl Shared {
             }
         }
         if std::env::var("NIANLAI_G0_SAMPLES").as_deref() == Ok("1") {
-            let result = if let Some(store) = self.store() {
-                crate::samples::all()
-                    .into_iter()
-                    .rev()
-                    .try_for_each(|sample| {
-                        let content = Content::text(&sample.text, self.hash)?;
-                        store
-                            .seed(
-                                content,
-                                CopyEvent {
-                                    time_ms: now_ms(),
-                                    sequence: 0,
-                                    source_process: "示例".into(),
-                                    source_path: String::new(),
-                                    owner_process: "示例".into(),
-                                    owner_pid: 0,
-                                    observed: Instant::now(),
-                                },
-                            )
-                            .map(|_| ())
-                            .map_err(|e| e.to_string())
-                    })
-            } else {
-                self.memory.lock().unwrap().seed_samples()
-            };
+            let store = self.db();
+            let result = crate::samples::all()
+                .into_iter()
+                .rev()
+                .try_for_each(|sample| {
+                    let content = Content::text(&sample.text, self.hash)?;
+                    store
+                        .seed(
+                            content,
+                            CopyEvent {
+                                time_ms: now_ms(),
+                                sequence: 0,
+                                source_process: "示例".into(),
+                                source_path: String::new(),
+                                owner_process: "示例".into(),
+                                owner_pid: 0,
+                                observed: Instant::now(),
+                            },
+                        )
+                        .map(|_| ())
+                        .map_err(|e| e.to_string())
+                });
             if let Err(error) = result {
                 self.logger
                     .event("store_seed_failed", json!({"error_code":error}));
@@ -423,28 +414,24 @@ impl Shared {
             file_state: None,
         }
     }
-    /// 给列表项带上文件失效结论（两种模式共用，内存模式的列表项不经过 preview）。
+    /// 给列表项带上文件失效结论。
     fn annotate(&self, items: &mut [Preview]) {
         for item in items {
             item.file_state = self.files.get(item.id);
         }
     }
     pub fn snapshot(&self) -> Snapshot {
-        let mut snapshot = if let Some(store) = self.store() {
-            let cache = store.cache();
-            Snapshot {
-                items: cache
-                    .items
-                    .into_iter()
-                    .map(|item| self.preview(item))
-                    .collect(),
-                total: cache.total,
-                recording: false,
-                last_recorded_ms: cache.last_recorded_ms,
-                store_status: None,
-            }
-        } else {
-            self.memory.lock().unwrap().snapshot()
+        let cache = self.db().cache();
+        let mut snapshot = Snapshot {
+            items: cache
+                .items
+                .into_iter()
+                .map(|item| self.preview(item))
+                .collect(),
+            total: cache.total,
+            recording: false,
+            last_recorded_ms: cache.last_recorded_ms,
+            store_status: None,
         };
         self.annotate(&mut snapshot.items);
         snapshot.recording = self.recording.load(Ordering::Acquire);
@@ -457,26 +444,30 @@ impl Shared {
     }
     pub fn search(&self, query: &str, request_id: u64) -> Result<SearchReply, String> {
         let started = Instant::now();
-        let (result, mode) = if let Some(store) = self.store() {
-            match store.reader().and_then(|r| r.search(query)) {
-                Ok(result) => (
-                    Ok(result
-                        .items
-                        .into_iter()
-                        .map(|item| self.preview(item))
-                        .collect()),
-                    json!(result.mode),
-                ),
-                Err(error) => (Err(error.to_string()), json!("failed")),
+        let store = self.db();
+        // 内存库用同一套搜索，日志里仍标 memory_substring，便于从日志区分两种模式。
+        let memory = store.is_memory();
+        let mut raw_error = None;
+        let (result, mode) = match store.reader().and_then(|r| r.search(query)) {
+            Ok(result) => (
+                Ok(result
+                    .items
+                    .into_iter()
+                    .map(|item| self.preview(item))
+                    .collect()),
+                if memory {
+                    json!("memory_substring")
+                } else {
+                    json!(result.mode)
+                },
+            ),
+            Err(error) => {
+                raw_error = Some(error.to_string());
+                (Err(user_message(&error)), json!("failed"))
             }
-        } else {
-            (
-                Ok(self.memory.lock().unwrap().search(query)),
-                json!("memory_substring"),
-            )
         };
         self.logger.event("search",json!({"words":query.split_whitespace().count(),"characters":query.chars().count(),"mode":mode,
-            "results":result.as_ref().map(Vec::len).ok(),"elapsed_ms":started.elapsed().as_secs_f64()*1000.0,"error_code":result.as_ref().err()}));
+            "results":result.as_ref().map(Vec::len).ok(),"elapsed_ms":started.elapsed().as_secs_f64()*1000.0,"error_code":raw_error}));
         result.map(|mut items: Vec<Preview>| {
             self.annotate(&mut items);
             SearchReply { request_id, items }
@@ -489,38 +480,26 @@ impl Shared {
         partial: bool,
         now: Instant,
     ) -> Result<Ingest, String> {
-        if let Some(store) = self.store() {
-            store
-                .ingest(content, event, partial, now)
-                .map_err(|e| e.to_string())
-        } else {
-            let event = memory::CopyEvent {
-                time_ms: event.time_ms,
-                sequence: event.sequence,
-                source_process: event.source_process,
-                source_path: event.source_path,
-                owner_process: event.owner_process,
-                owner_pid: event.owner_pid,
-                observed: event.observed,
-            };
-            self.memory
-                .lock()
-                .unwrap()
-                .ingest(content, event, partial, now)
-                .map(|r| Ingest {
-                    outcome: r.outcome,
-                    reason: r.reason,
-                    record_id: r.record_id,
-                    event_id: None,
-                    kind: r.kind.map(str::to_owned),
-                    copy_count: r.copy_count,
-                    write_ms: 0.0,
-                    transaction_ok: false,
-                })
+        // 错误只进日志（采集线程），不给用户看，保持原始文本。
+        let result = self
+            .db()
+            .ingest(content, event, partial, now)
+            .map_err(|e| e.to_string())?;
+        // 合并到已有 id：它的格式被重写了，缩略图缓存里的旧图要作废。
+        if result.merged()
+            && let Some(id) = result.record_id
+        {
+            self.images.lock().unwrap().remove(id);
         }
+        Ok(result)
     }
-    fn capture(
-        this: &Arc<Self>,
+    /// 面板隐藏时调用：释放读连接池里的空闲连接和缩略图缓存（下次用到再按需重建）。
+    pub fn release_idle(&self) {
+        self.db().release_idle_readers();
+        self.images.lock().unwrap().clear();
+    }
+    fn capture_with(
+        &self,
         content: Arc<Content>,
         event: CopyEvent,
         partial: bool,
@@ -529,28 +508,28 @@ impl Shared {
     ) -> Result<Captured, String> {
         let fingerprint = content.fingerprint;
         // 整个过程持锁：暂存内容的写入和新内容的处理按复制顺序进行。
-        let mut deferred = this.deferred.lock().unwrap();
+        let mut deferred = self.deferred.lock().unwrap();
         if let Some(pending) = deferred.take() {
             if pending.previous == Some(fingerprint) && pending.content.fingerprint != fingerprint {
                 // 剪贴板变回了借用前的内容：暂存的那条丢弃，还原回来的也不算一次新复制。
-                *this.last_seen.lock().unwrap() = Some(fingerprint);
-                this.logger.event(
+                *self.last_seen.lock().unwrap() = Some(fingerprint);
+                self.logger.event(
                     "capture_transient",
                     json!({"held_ms":pending.event.observed.elapsed().as_secs_f64()*1000.0,"kind":pending.content.kind}),
                 );
                 return Ok(Captured::Transient);
             }
-            this.commit_deferred(pending);
+            self.commit_deferred(pending);
         }
-        let previous = this.last_seen.lock().unwrap().replace(fingerprint);
+        let previous = self.last_seen.lock().unwrap().replace(fingerprint);
         let Some(window) = window else {
             drop(deferred);
-            return this
+            return self
                 .ingest(content, event, partial, now)
                 .map(Captured::Stored);
         };
-        let generation = this.generation.fetch_add(1, Ordering::AcqRel) + 1;
-        let shared = this.clone();
+        let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        let shared = self.clone();
         let timer = std::thread::Builder::new()
             .name("history-deferred".into())
             .spawn(move || {
@@ -580,7 +559,7 @@ impl Shared {
                 partial,
                 ..
             } = pending;
-            return this
+            return self
                 .ingest(content, event, partial, now)
                 .map(Captured::Stored);
         }
@@ -626,14 +605,11 @@ impl Shared {
     }
     // 仅在采集、搜索或粘贴工作线程调用；界面用 snapshot，绝不读 BLOB。
     pub fn get(&self, id: usize) -> Result<Option<Arc<Content>>, String> {
-        if let Some(store) = self.store() {
-            store
-                .reader()
-                .and_then(|r| r.content(id))
-                .map_err(|e| e.to_string())
-        } else {
-            Ok(self.memory.lock().unwrap().get(id))
-        }
+        self.load(id).map_err(|e| user_message(&e))
+    }
+    // 同 `get`，但保留原始错误，给只写日志的调用方。
+    pub(crate) fn load(&self, id: usize) -> nianlai_store::Result<Option<Arc<Content>>> {
+        self.db().reader().and_then(|r| r.content(id))
     }
     pub fn before_write(
         &self,
@@ -642,16 +618,10 @@ impl Shared {
         written: Fingerprint,
         now: Instant,
     ) -> bool {
-        let found = if let Some(store) = self.store() {
-            store
-                .before_write(id, fingerprint, written, now)
-                .unwrap_or(false)
-        } else {
-            self.memory
-                .lock()
-                .unwrap()
-                .before_write(id, fingerprint, written, now)
-        };
+        let found = self
+            .db()
+            .before_write(id, fingerprint, written, now)
+            .unwrap_or(false);
         if found {
             *self.last_write.lock().unwrap() = Some(now);
             *self.last_seen.lock().unwrap() = Some(written);
@@ -662,41 +632,25 @@ impl Shared {
         if !REUSE_TO_TOP.load(Ordering::Acquire) {
             return;
         }
-        if let Some(store) = self.store() {
-            if let Err(error) = store.reuse(id, now_ms()) {
-                self.logger.event(
-                    "store_reuse_failed",
-                    json!({"error_code":error.to_string()}),
-                );
-            }
-        } else {
-            self.memory.lock().unwrap().reuse(id);
+        if let Err(error) = self.db().reuse(id, now_ms()) {
+            self.logger.event(
+                "store_reuse_failed",
+                json!({"error_code":error.to_string()}),
+            );
         }
     }
     pub fn latest_sequence(&self) -> Option<u32> {
-        if let Some(store) = self.store() {
-            store.latest_sequence()
-        } else {
-            self.memory.lock().unwrap().latest_sequence()
-        }
+        self.db().latest_sequence()
     }
     pub fn skipped_sequence(&self, sequence: u32) {
-        if let Some(store) = self.store() {
-            if let Err(error) = store.skipped_sequence(sequence) {
-                self.logger
-                    .event("store_skip_failed", json!({"error_code":error.to_string()}));
-            }
-        } else {
-            self.memory.lock().unwrap().skipped_sequence(sequence);
+        if let Err(error) = self.db().skipped_sequence(sequence) {
+            self.logger
+                .event("store_skip_failed", json!({"error_code":error.to_string()}));
         }
     }
     /// 面板 Delete：移进回收站（B12）。收藏的也可以，确认由界面负责（B13）。
     pub fn delete(&self, id: usize) -> Result<bool, String> {
-        let result = if let Some(store) = self.store() {
-            store.delete(id).map_err(|e| e.to_string())
-        } else {
-            Ok(self.memory.lock().unwrap().delete(id, now_ms()))
-        };
+        let result = self.db().delete(id);
         if let Ok(true) = result {
             let mut stack = self.undo_stack.lock().unwrap();
             stack.retain(|old| *old != id);
@@ -707,9 +661,9 @@ impl Shared {
         }
         self.logger.event(
             "history_deleted",
-            json!({"trashed":result.as_ref().ok(),"error_code":result.as_ref().err()}),
+            json!({"trashed":result.as_ref().ok(),"error_code":result.as_ref().err().map(ToString::to_string)}),
         );
-        result
+        result.map_err(|e| user_message(&e))
     }
     /// Ctrl+Z：恢复本次运行里最近删除、还在回收站的一条；跨呼出有效。返回恢复的条目。
     pub fn undo_delete(&self) -> Result<Option<Preview>, String> {
@@ -736,27 +690,20 @@ impl Shared {
         Ok(restored)
     }
     fn restore_trashed(&self, id: usize) -> Result<Option<Preview>, String> {
-        if let Some(store) = self.store() {
-            store
-                .restore(id)
-                .map(|item| item.map(|item| self.preview(item)))
-                .map_err(|e| e.to_string())
-        } else {
-            Ok(self.memory.lock().unwrap().restore(id))
-        }
+        self.db()
+            .restore(id)
+            .map(|item| item.map(|item| self.preview(item)))
+            .map_err(|e| user_message(&e))
     }
     pub fn trash(&self) -> Result<Vec<Trashed>, String> {
-        let items = if let Some(store) = self.store() {
-            store
-                .reader()
-                .and_then(|r| r.trash())
-                .map_err(|e| e.to_string())?
-                .into_iter()
-                .map(|(item, deleted_ms)| (self.preview(item), deleted_ms))
-                .collect()
-        } else {
-            self.memory.lock().unwrap().trash()
-        };
+        let items: Vec<_> = self
+            .db()
+            .reader()
+            .and_then(|r| r.trash())
+            .map_err(|e| user_message(&e))?
+            .into_iter()
+            .map(|(item, deleted_ms)| (self.preview(item), deleted_ms))
+            .collect();
         Ok(items
             .into_iter()
             .map(|(item, deleted_ms)| Trashed { item, deleted_ms })
@@ -780,54 +727,39 @@ impl Shared {
         before_ms: u64,
         reason: &str,
     ) -> Result<usize, String> {
-        let result = if let Some(store) = self.store() {
-            store
-                .purge(ids.clone(), before_ms)
-                .map_err(|e| e.to_string())
-        } else {
-            Ok(self.memory.lock().unwrap().purge(ids.as_deref(), before_ms))
-        };
+        let result = self.db().purge(ids, before_ms);
+        self.images.lock().unwrap().clear();
         if result.as_ref().is_ok_and(|count| *count > 0) || result.is_err() {
             self.logger.event(
                 "trash_purged",
-                json!({"reason":reason,"count":result.as_ref().ok(),"error_code":result.as_ref().err()}),
+                json!({"reason":reason,"count":result.as_ref().ok(),"error_code":result.as_ref().err().map(ToString::to_string)}),
             );
         }
-        result
+        result.map_err(|e| user_message(&e))
     }
     pub fn favorites(&self) -> Result<Vec<Preview>, String> {
-        let mut items: Vec<Preview> = if let Some(store) = self.store() {
-            store
-                .reader()
-                .and_then(|r| r.favorites())
-                .map(|items| items.into_iter().map(|item| self.preview(item)).collect())
-                .map_err(|e| e.to_string())?
-        } else {
-            self.memory.lock().unwrap().favorites()
-        };
+        let mut items: Vec<Preview> = self
+            .db()
+            .reader()
+            .and_then(|r| r.favorites())
+            .map(|items| items.into_iter().map(|item| self.preview(item)).collect())
+            .map_err(|e| user_message(&e))?;
         self.annotate(&mut items);
         Ok(items)
     }
     pub fn set_favorite(&self, id: usize, favorite: bool) -> Result<Option<Preview>, String> {
-        if let Some(store) = self.store() {
-            store
-                .set_favorite(id, favorite)
-                .map(|item| item.map(|item| self.preview(item)))
-                .map_err(|e| e.to_string())
-        } else {
-            Ok(self.memory.lock().unwrap().set_favorite(id, favorite))
-        }
+        self.db()
+            .set_favorite(id, favorite)
+            .map(|item| item.map(|item| self.preview(item)))
+            .map_err(|e| user_message(&e))
     }
     /// 重排收藏：ids 是界面展示的全部收藏的新顺序。返回新的收藏列表。
     pub fn reorder_favorites(&self, ids: &[usize]) -> Result<Vec<Preview>, String> {
-        let mut items: Vec<Preview> = if let Some(store) = self.store() {
-            store
-                .reorder_favorites(ids)
-                .map(|items| items.into_iter().map(|item| self.preview(item)).collect())
-                .map_err(label_error)?
-        } else {
-            self.memory.lock().unwrap().reorder_favorites(ids)?
-        };
+        let mut items: Vec<Preview> = self
+            .db()
+            .reorder_favorites(ids)
+            .map(|items| items.into_iter().map(|item| self.preview(item)).collect())
+            .map_err(label_error)?;
         self.annotate(&mut items);
         Ok(items)
     }
@@ -838,32 +770,21 @@ impl Shared {
         title: &str,
         note: &str,
     ) -> Result<Preview, String> {
-        if let Some(store) = self.store() {
-            store
-                .set_favorite_label(id, title, note)
-                .map(|item| self.preview(item))
-                .map_err(label_error)
-        } else {
-            self.memory
-                .lock()
-                .unwrap()
-                .set_favorite_label(id, title, note)
-        }
+        self.db()
+            .set_favorite_label(id, title, note)
+            .map(|item| self.preview(item))
+            .map_err(label_error)
     }
     pub fn summary(&self) {
-        let stats = self
-            .store
-            .read()
-            .unwrap()
-            .as_ref()
-            .map(Store::stats)
-            .unwrap_or_default();
+        let stats = self.store().as_ref().map(Store::stats).unwrap_or_default();
         self.logger.event("store_summary", json!(stats));
     }
 }
 
 #[cfg(test)]
 mod gate_tests;
+#[cfg(all(test, windows))]
+mod tests;
 
 #[cfg(test)]
 mod startup_tests {
@@ -888,10 +809,10 @@ mod startup_tests {
         let logger = Logger::with_settings(&directories, 20).unwrap();
         let history = History::new(nianlai_store::hash::sha256, logger);
         history.initialize();
-        assert_eq!(history.0.store().unwrap().directory(), directories.data);
+        assert_eq!(history.store().unwrap().directory(), directories.data);
         assert!(directories.data.join("history.db").is_file());
         assert_eq!(history.exports(), Some(directories.data.join("exports")));
-        assert_eq!(history.0.icons(), Some(directories.data.join("icons")));
+        assert_eq!(history.icons(), Some(directories.data.join("icons")));
         assert_eq!(history.snapshot().store_status, None);
         assert!(!directories.settings_file.exists());
     }
@@ -907,7 +828,7 @@ mod startup_tests {
             let history = History::new(nianlai_store::hash::sha256, logger.clone());
             if persistent {
                 history.initialize();
-                assert!(history.0.store().is_some());
+                assert!(history.store().is_some());
             }
             let now = Instant::now();
             let saved = history
@@ -984,7 +905,7 @@ mod startup_tests {
         let logger = Logger::with_settings(&directories, 20).unwrap();
         let history = History::new(nianlai_store::hash::sha256, logger);
         history.initialize();
-        assert!(history.0.store().is_none());
+        assert!(history.store().is_none());
         assert_eq!(
             history.snapshot().store_status,
             Some("这个数据目录由更新版本的拈来创建，请升级后再打开")
@@ -994,11 +915,9 @@ mod startup_tests {
         assert!(!directories.data.join("backups").exists());
     }
 
-    // 命令层（lib.rs）通过注册表取到活动的历史服务，磁盘与内存模式行为一致（M1-S）。
-    // 注册表按“最后注册”取实例，并行测试会互相插队，所以功能断言走自己的 Shared，
-    // 注册表本身只断言拿得到某个活动实例。
+    // 命令层（lib.rs）拿到的就是这个 History 句柄，磁盘与内存模式行为一致（M1-S）。
     #[test]
-    fn active_registry_serves_favorites_for_stored_and_memory_modes() {
+    fn history_serves_favorites_for_stored_and_memory_modes() {
         for persistent in [false, true] {
             let directory = Directory::new();
             let directories = directories(&directory);
@@ -1007,8 +926,7 @@ mod startup_tests {
             if persistent {
                 history.initialize();
             }
-            assert!(active().is_some());
-            let shared = &history.0;
+            let shared = &history;
             let now = Instant::now();
             let saved = shared
                 .ingest(
@@ -1054,7 +972,7 @@ mod startup_tests {
             if persistent {
                 history.initialize();
             }
-            let shared = &history.0;
+            let shared = &history;
             let now = Instant::now();
             let mut ids = Vec::new();
             for sequence in 1..=3u32 {
@@ -1081,7 +999,7 @@ mod startup_tests {
             for id in [a, b, c] {
                 shared.set_favorite(id, true).unwrap().unwrap();
             }
-            let order = |shared: &Shared| {
+            let order = |shared: &History| {
                 shared
                     .favorites()
                     .unwrap()
@@ -1131,7 +1049,7 @@ mod startup_tests {
                 .unwrap();
             assert!(plain.get("title").is_none() && plain.get("note").is_none());
             // 搜索覆盖标题与备注。
-            let found = |shared: &Shared, query: &str| {
+            let found = |shared: &History, query: &str| {
                 shared
                     .search(query, 1)
                     .unwrap()
@@ -1143,7 +1061,7 @@ mod startup_tests {
             assert_eq!(found(shared, "XYZZY"), vec![a]);
             assert_eq!(found(shared, "发票"), vec![a]);
             // reuse_to_top：关闭时粘贴旧条目不挪位置，打开时挪到最前。
-            let newest = |shared: &Shared| shared.snapshot().items[0].id;
+            let newest = |shared: &History| shared.snapshot().items[0].id;
             assert_eq!(newest(shared), c);
             set_reuse_to_top(false);
             shared.reuse(a);
@@ -1166,7 +1084,7 @@ mod startup_tests {
             if persistent {
                 history.initialize();
             }
-            let shared = &history.0;
+            let shared = &history;
             let now = Instant::now();
             let save = |text: &str, sequence: u32| {
                 shared
@@ -1190,7 +1108,7 @@ mod startup_tests {
             };
             let kept = save("删除注册表甲", 1);
             let removed = save("删除注册表乙", 2);
-            let ids = |shared: &Arc<Shared>| {
+            let ids = |shared: &History| {
                 shared
                     .snapshot()
                     .items
@@ -1200,7 +1118,7 @@ mod startup_tests {
             };
             let third = save("删除注册表丙", 3);
             shared.set_favorite(kept, true).unwrap().unwrap();
-            let in_trash = |shared: &Arc<Shared>| {
+            let in_trash = |shared: &History| {
                 shared
                     .trash()
                     .unwrap()
@@ -1261,7 +1179,7 @@ mod startup_tests {
         let logger = Logger::with_settings(&directories, 20).unwrap();
         let history = History::new(nianlai_store::hash::sha256, logger);
         history.initialize();
-        let shared = &history.0;
+        let shared = &history;
         let now = Instant::now();
         let save = |content: Arc<Content>, sequence: u32| {
             shared
@@ -1338,7 +1256,7 @@ mod startup_tests {
         let logger = Logger::with_settings(&directories, 20).unwrap();
         let history = History::new(nianlai_store::hash::sha256, logger);
         history.initialize();
-        let shared = &history.0;
+        let shared = &history;
         let files = directory.0.join("files");
         fs::create_dir_all(&files).unwrap();
         let (kept, gone) = (files.join("在.txt"), files.join("不在.txt"));
@@ -1444,14 +1362,14 @@ mod deferred_tests {
         let logger = Logger::with_settings(&directories, 20).unwrap();
         let history = History::new(nianlai_store::hash::sha256, logger);
         history.initialize();
-        assert!(history.0.store().is_some());
+        assert!(history.store().is_some());
         history
     }
 
     fn capture(history: &History, text: &str, sequence: u32, window: Option<Duration>) -> Captured {
         let now = Instant::now();
-        Shared::capture(
-            &history.0,
+        History::capture_with(
+            history,
             Content::text(text, nianlai_store::hash::sha256).unwrap(),
             CopyEvent {
                 time_ms: now_ms() + sequence as u64,

@@ -1,9 +1,11 @@
 use crate::{
+    app::Controller,
     autocycle,
-    history::{History, Snapshot},
+    history::History,
     log::{Logger, now_ms},
     paste::{
         keys::Table,
+        outcome::{Outcome, PasteResult, Reason},
         permit::{Monitor, Permit, Selection, Session as PermitSession, reliable_control},
         request::{Callbacks, Mode as PasteMode, Request, RestorePolicy},
     },
@@ -13,7 +15,7 @@ use crate::{
 use serde_json::{Value, json};
 use std::{
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
@@ -56,86 +58,85 @@ enum NoSubmissionFinish {
 }
 
 fn generic_submission_finish(
-    result: &Value,
+    result: &Outcome,
     same_session: bool,
     visible: bool,
     interaction: Interaction,
 ) -> Option<NoSubmissionFinish> {
-    if result["paste_result"] != "generic_not_submitted"
-        && result["paste_result"] != "generic_submission_unknown"
-    {
+    if !matches!(
+        result.result,
+        Some(PasteResult::GenericNotSubmitted | PasteResult::GenericSubmissionUnknown)
+    ) {
         return None;
     }
-    Some(
-        if !same_session || (result["request_cancelled"] == true && !visible) {
-            NoSubmissionFinish::Ignore
-        } else if result["request_cancelled"] == true {
-            if interaction == Interaction::Passive {
-                NoSubmissionFinish::CloseRequested
-            } else {
-                NoSubmissionFinish::Ignore
-            }
-        } else if visible {
-            NoSubmissionFinish::CloseOnly
+    Some(if !same_session || (result.request_cancelled && !visible) {
+        NoSubmissionFinish::Ignore
+    } else if result.request_cancelled {
+        if interaction == Interaction::Passive {
+            NoSubmissionFinish::CloseRequested
         } else {
-            // 通用路径先隐藏后发送；对同一请求的未提交/部分发送必须真正显示终止反馈。
-            NoSubmissionFinish::ShowCloseOnly
-        },
-    )
+            NoSubmissionFinish::Ignore
+        }
+    } else if visible {
+        NoSubmissionFinish::CloseOnly
+    } else {
+        // 通用路径先隐藏后发送；对同一请求的未提交/部分发送必须真正显示终止反馈。
+        NoSubmissionFinish::ShowCloseOnly
+    })
 }
 
 fn no_submission_finish(
-    result: &Value,
+    result: &Outcome,
     current: bool,
     interaction: Interaction,
 ) -> Option<NoSubmissionFinish> {
-    let native = result["paste_result"] == "native_not_submitted";
+    let native = result.result == Some(PasteResult::NativeNotSubmitted);
     if !current {
         return native.then_some(NoSubmissionFinish::Ignore);
     }
-    if !native && result["clipboard_written"] != false {
+    if !native && result.clipboard_written {
         return None;
     }
-    if result["request_cancelled"] == true {
+    if result.request_cancelled {
         return if interaction == Interaction::Passive {
             Some(NoSubmissionFinish::CloseRequested)
         } else {
             native.then_some(NoSubmissionFinish::Ignore)
         };
     }
-    (native || result["reason"] == "clipboard_capture_busy")
+    (native || result.reason == Some(Reason::ClipboardCaptureBusy))
         .then_some(NoSubmissionFinish::CloseOnly)
 }
 
-fn no_submission_message(result: &Value) -> &'static str {
-    match result["reason"].as_str() {
-        Some("generic_submission_unknown") => "粘贴结果未确认，请先检查目标，避免重复粘贴",
-        Some("native_clipboard_changed" | "generic_clipboard_changed") => {
+fn no_submission_message(reason: Option<&Reason>) -> &'static str {
+    match reason {
+        Some(Reason::GenericSubmissionUnknown) => "粘贴结果未确认，请先检查目标，避免重复粘贴",
+        Some(Reason::NativeClipboardChanged | Reason::GenericClipboardChanged) => {
             "剪贴板已变化，本次未粘贴，请关闭面板后重新呼出"
         }
         Some(
-            "clipboard_capture_busy"
-            | "clipboard_busy"
-            | "native_clipboard_busy"
-            | "native_clipboard_close_failed"
-            | "generic_clipboard_busy"
-            | "generic_clipboard_close_failed",
+            Reason::ClipboardCaptureBusy
+            | Reason::ClipboardBusy
+            | Reason::NativeClipboardBusy
+            | Reason::NativeClipboardCloseFailed
+            | Reason::GenericClipboardBusy
+            | Reason::GenericClipboardCloseFailed,
         ) => "剪贴板忙，本次未粘贴，请关闭面板后重新呼出",
-        Some("record_missing") => "这条记录已不在历史里，本次未粘贴，请关闭面板后重新呼出",
-        Some("files_missing") => "原文件不在了，没有粘贴",
+        Some(Reason::RecordMissing) => "这条记录已不在历史里，本次未粘贴，请关闭面板后重新呼出",
+        Some(Reason::FilesMissing) => "原文件不在了，没有粘贴",
         Some(
-            "request_cancelled"
-            | "native_input_desktop_unavailable"
-            | "generic_input_desktop_unavailable"
-            | "invalid_target"
-            | "selection_boundary_changed"
-            | "native_modifiers_held"
-            | "generic_modifiers_held"
-            | "target_may_be_elevated"
-            | "native_target_unavailable"
-            | "generic_restore_unavailable"
-            | "conditions_changed"
-            | "preflight_timeout",
+            Reason::RequestCancelled
+            | Reason::NativeInputDesktopUnavailable
+            | Reason::GenericInputDesktopUnavailable
+            | Reason::InvalidTarget
+            | Reason::SelectionBoundaryChanged
+            | Reason::NativeModifiersHeld
+            | Reason::GenericModifiersHeld
+            | Reason::TargetMayBeElevated
+            | Reason::NativeTargetUnavailable
+            | Reason::GenericRestoreUnavailable
+            | Reason::ConditionsChanged
+            | Reason::PreflightTimeout,
         ) => "窗口状态已变化，本次未粘贴，请关闭面板后重新呼出",
         _ => "本次未粘贴，请关闭面板后重新呼出",
     }
@@ -152,37 +153,12 @@ struct AutoVisible {
     hidden_ms: f64,
 }
 
-// 实验开关：快速模式下让搜索框持有页面内焦点。启动时读一次设置，随 panel:shown 发给前端。
-#[derive(Clone, Copy, Default)]
-pub struct Experiments {
-    pub search_box_focus: bool,
-}
-impl Experiments {
-    pub fn from_settings(settings: &crate::settings::Experiments, logger: &Logger) -> Self {
-        let experiments = Self {
-            search_box_focus: settings.searchbox_focus,
-        };
-        logger.event(
-            "experiment_searchbox_focus",
-            json!({"enabled":experiments.search_box_focus}),
-        );
-        experiments
-    }
-    fn payload(self) -> Value {
-        json!({"searchBoxFocus":self.search_box_focus})
-    }
-}
 /// 呼出位置每次呼出时现读设置，保存后下次呼出就按新位置。
 fn placement_mode(app: &AppHandle) -> platform::PlacementMode {
     let store = app.state::<crate::settings::Store>();
     platform::PlacementMode::from_setting(&store.get().interaction.placement)
 }
 
-// 保留旧开关解析的既有回归测试；运行时改用设置中的布尔值。
-#[cfg(test)]
-fn flag_enabled(value: Option<&str>) -> bool {
-    value.map(str::trim) == Some("1")
-}
 // 日志行共有的会话标记。短命探针线程不持有 Panel，抄走 session 和 target 后用同一个函数盖章。
 fn stamp(mut fields: Value, session: u64, target: &Target) -> Value {
     fields["session"] = json!(session);
@@ -219,14 +195,14 @@ fn defers_hide_for_elevated(
 }
 
 // 已复制且需要被动反馈，或旧路径返回“目标可能是管理员”时停留；取消请求和其他粘贴结论不停留。
-fn dwell_after_paste(result: &Value) -> Option<Duration> {
-    if result["request_cancelled"] == true {
+fn dwell_after_paste(result: &Outcome) -> Option<Duration> {
+    if result.request_cancelled {
         return None;
     }
-    ((result["passive_hint"] == true && result["clipboard_written"] == true)
-        || (result["paste_result"] == "copied_only"
-            && result["reason"] == "target_may_be_elevated"))
-        .then_some(ELEVATED_HINT_DWELL)
+    ((result.passive_hint && result.clipboard_written)
+        || (result.result == Some(PasteResult::CopiedOnly)
+            && result.reason == Some(Reason::TargetMayBeElevated)))
+    .then_some(ELEVATED_HINT_DWELL)
 }
 
 // 停留结束的日志字段：计划时长、实际停留时长，以及是否到点自动收起；提前结束来源单独记录。
@@ -268,17 +244,7 @@ fn hint_needs_key_drain(dwelling: bool, ended_by: Option<&str>) -> bool {
     dwelling && ended_by != Some("quit")
 }
 
-pub struct Controller {
-    inner: Mutex<Panel>,
-    pub logger: Logger,
-    // 字段按声明顺序析构：没走 shutdown 就退出时（例如启动失败），也要先停采集再停剪贴板线程。
-    capture: Mutex<Option<platform::capture::Service>>,
-    clipboard: platform::clipboard::Service,
-    keys: Arc<Table>,
-    stopping: Arc<AtomicBool>,
-    history: Arc<History>,
-}
-struct Panel {
+pub(crate) struct Panel {
     window: WebviewWindow,
     mode: Mode,
     ready: bool,
@@ -305,7 +271,6 @@ struct Panel {
     auto_visible: Option<AutoVisible>,
     resuspend: Option<Duration>,
     resuspend_stop: Option<mpsc::Sender<()>>,
-    experiments: Experiments,
 }
 
 pub enum Action {
@@ -392,7 +357,7 @@ pub enum Action {
     },
     PasteFinished {
         session: u64,
-        result: Value,
+        result: Outcome,
     },
     // 管理员提示停留到点：计时线程发回，面板自动收起。
     HintElapsed {
@@ -403,151 +368,8 @@ pub enum Action {
         received: Instant,
     },
     Quit,
-    QuitFrontend,
     // 恢复快照等需要重新打开数据库的操作：按退出走完清理，再由守护者立刻拉起。
     Relaunch,
-}
-
-impl Controller {
-    pub fn new(
-        window: WebviewWindow,
-        logger: Logger,
-        plan: Option<autocycle::Plan>,
-        resuspend: Option<Duration>,
-        experiments: Experiments,
-    ) -> platform::Result<Self> {
-        let history = Arc::new(History::new(platform::hash::sha256, logger.clone()));
-        let clipboard = platform::clipboard::Service::start(logger.clone(), history.clone())?;
-        let keys = Arc::new(Table::load(&logger));
-        Ok(Self {
-            logger,
-            clipboard,
-            keys,
-            stopping: Arc::new(AtomicBool::new(false)),
-            history,
-            capture: Mutex::new(None),
-            inner: Mutex::new(Panel {
-                window,
-                mode: Mode::Hidden,
-                ready: false,
-                session: 0,
-                target: Target::default(),
-                hotkey: None,
-                hooks: None,
-                interaction: Interaction::Quick,
-                monitor: None,
-                permits: None,
-                started: None,
-                shown: None,
-                painted: false,
-                foreground_taken: false,
-                awaiting_search: false,
-                memory: Arc::new(webview::MemoryState::default()),
-                pasting: false,
-                paste_cancel: None,
-                hint: None,
-                auto_enabled: plan.is_some(),
-                auto_plan: plan,
-                auto_stop: None,
-                auto_visible: None,
-                resuspend,
-                resuspend_stop: None,
-                experiments,
-            }),
-        })
-    }
-    pub fn set_hotkey(&self, hotkey: Option<Shortcut>) {
-        let mut inner = self.inner.lock().unwrap();
-        inner.hotkey = hotkey;
-        // 就地更新放行组合，不重建钩子、不改焦点，也不丢弃已吞按键的抬起配对。
-        if let Some(hooks) = &inner.hooks
-            && let Err(error) = hooks.set_hotkey(hotkey)
-        {
-            self.logger
-                .event("hotkey_hook_update_failed", json!({"error":error}));
-        }
-    }
-    pub fn start_capture(&self, app: &AppHandle, automatic: bool) -> platform::Result<()> {
-        self.history.initialize();
-        let app = app.clone();
-        let changed: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
-            let _ = dispatch(&app, Action::HistoryChanged);
-        });
-        changed();
-        self.history.set_changed(changed.clone());
-        self.history.maintenance(changed.clone());
-        let mut capture = self.capture.lock().unwrap();
-        if self.stopping.load(Ordering::Acquire) {
-            return Ok(());
-        }
-        *capture = Some(platform::capture::Service::start(
-            self.logger.clone(),
-            self.history.clone(),
-            &self.clipboard,
-            automatic,
-            changed,
-        )?);
-        Ok(())
-    }
-    /// 完整预览里选中的文字复制到剪贴板（M2-7）：照“纯文本粘贴”的做法登记回声，不会被当成新复制记进历史。
-    #[cfg(windows)]
-    pub fn copy_selection(&self, id: usize, text: &str) -> Result<(), String> {
-        let content = self.history.get(id)?.ok_or("这条记录已不在历史里")?;
-        let copy = crate::history::content::Content::text(text, platform::hash::sha256)?;
-        self.clipboard
-            .write(
-                platform::clipboard::Record {
-                    id,
-                    fingerprint: content.fingerprint,
-                },
-                copy,
-                0,
-                false,
-            )
-            .map(drop)
-            .map_err(|error| error.to_string())
-    }
-    #[cfg(not(windows))]
-    pub fn copy_selection(&self, _: usize, _: &str) -> Result<(), String> {
-        Err("unsupported".into())
-    }
-    pub fn history_snapshot(&self) -> Snapshot {
-        self.history.snapshot()
-    }
-    /// 呼出后在后台检查看得到的文件条目是否还在（M2-3）。
-    pub fn check_visible_files(&self) {
-        self.history.check_visible_files();
-    }
-    pub fn search(
-        &self,
-        query: &str,
-        request_id: u64,
-    ) -> Result<crate::history::SearchReply, String> {
-        self.history.search(query, request_id)
-    }
-    pub fn shutdown(&self) {
-        self.stopping.store(true, Ordering::Release);
-        if let Some(capture) = self.capture.lock().unwrap().take() {
-            capture.shutdown();
-        }
-        if let Ok(mut panel) = self.inner.lock() {
-            panel.auto_stop.take();
-            panel.resuspend_stop.take();
-            if let Err(error) = panel.replay_search(&self.logger, false, "shutdown", false) {
-                panel.log(
-                    &self.logger,
-                    "replay_cleanup_failed",
-                    json!({"error":error}),
-                );
-            }
-            panel.hooks.take();
-        }
-        self.clipboard.shutdown();
-        self.history.flush_deferred();
-        self.history.summary();
-        self.logger.event("shutdown", json!({}));
-        self.logger.flush();
-    }
 }
 
 pub fn dispatch(app: &AppHandle, action: Action) -> Result<(), String> {
@@ -597,13 +419,327 @@ fn return_for_paste(
     receiver.recv_timeout(REPLAY_WAIT).ok()
 }
 
+// Action::ReturnForPaste 的内容，交给 Panel::return_focus。
+struct ReturnRequest {
+    session: u64,
+    permit: Option<Permit>,
+    passive: bool,
+    policy: RestorePolicy,
+    requested: Instant,
+    reply: mpsc::SyncSender<platform::FocusResult>,
+}
+
+// Action::Paste 的内容，交给 Panel::begin_paste。
+struct PasteCommand {
+    session: u64,
+    id: usize,
+    mode: PasteMode,
+    selection: Option<Selection>,
+    started: Instant,
+}
+
+// 粘贴工作线程需要的全部东西，由 begin_paste 在主线程上备好后整体移交给 run_paste。
+struct PasteJob {
+    app: AppHandle,
+    logger: Logger,
+    session: u64,
+    id: usize,
+    mode: PasteMode,
+    started: Instant,
+    owner: usize,
+    restricted: bool,
+    external_switch: bool,
+    copy_only_reason: Option<&'static str>,
+    permit: Option<Permit>,
+    hooks: Option<Hooks>,
+    target: Target,
+    cancelled: Arc<AtomicBool>,
+    clipboard: platform::clipboard::Service,
+    history: History,
+    keys: Arc<Table>,
+    stopping: Arc<AtomicBool>,
+}
+
+// 粘贴工作线程（线程名 paste-request）：读库、执行粘贴、补上证据，最后把结果发回主线程。
+fn run_paste(job: PasteJob) {
+    let PasteJob {
+        app,
+        logger: worker_logger,
+        session,
+        id,
+        mode,
+        started,
+        owner,
+        restricted,
+        external_switch,
+        copy_only_reason,
+        permit,
+        hooks,
+        target,
+        cancelled,
+        clipboard,
+        history,
+        keys,
+        stopping,
+    } = job;
+    // 监听线程仍在 worker 中存活；只先停止输入拦截，读库和发送期间继续记录前台。
+    let drain = || {
+        let Some(hooks) = hooks.as_ref() else {
+            return false;
+        };
+        loop {
+            if stopping.load(Ordering::Acquire) {
+                return false;
+            }
+            let abandon = cancelled.load(Ordering::Acquire)
+                || !permit
+                    .as_ref()
+                    .is_some_and(|permit| permit.current(&target, window::foreground()));
+            match hooks.stop_inputs(abandon) {
+                Ok(true) => return hooks.synchronize() && !abandon,
+                Ok(false) => std::thread::sleep(Duration::from_millis(5)),
+                Err(error) => {
+                    let waiting = Instant::now();
+                    let mut reported_waiting = false;
+                    worker_logger.event(
+                        "input_drain_fallback",
+                        json!({"session":session,
+                        "stage":"started","error":error,"counts":paste::key_state_counts()}),
+                    );
+                    while !paste::keys_released() && !stopping.load(Ordering::Acquire) {
+                        if !reported_waiting && waiting.elapsed() >= Duration::from_secs(1) {
+                            reported_waiting = true;
+                            worker_logger.event("input_drain_fallback", json!({"session":session,
+                                "stage":"waiting","elapsed_ms":waiting.elapsed().as_secs_f64()*1000.0,
+                                "counts":paste::key_state_counts()}));
+                        }
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    worker_logger.event("input_drain_fallback", json!({"session":session,
+                        "stage":"finished","elapsed_ms":waiting.elapsed().as_secs_f64()*1000.0,
+                        "stopping":stopping.load(Ordering::Acquire),"counts":paste::key_state_counts()}));
+                    return false;
+                }
+            }
+        }
+    };
+    let drained = restricted || drain();
+    let read_started = Instant::now();
+    let loaded = history.load(id).map_err(|e| e.to_string());
+    // 文件条目粘贴前现查一遍（M2-3）：全部不在就不粘贴，部分不在只粘贴还在的。
+    let mut files_skipped = 0;
+    let mut files_missing = false;
+    let loaded = match loaded {
+        Ok(Some(content)) => match history.usable_files(&content) {
+            crate::history::files::Usable::All => Ok(Some(content)),
+            crate::history::files::Usable::Partial(filtered, skipped) => {
+                files_skipped = skipped;
+                Ok(Some(filtered))
+            }
+            crate::history::files::Usable::Nothing => {
+                files_missing = true;
+                Ok(None)
+            }
+        },
+        other => other,
+    };
+    let exports = history.exports();
+    let store_read_ms = read_started.elapsed().as_secs_f64() * 1000.0;
+    let mut restored = None;
+    let sent = || {
+        let _ = dispatch(&app, Action::PasteSent { session });
+    };
+    let synchronize = || hooks.as_ref().is_some_and(|hooks| hooks.synchronize());
+    let mut result: Outcome = {
+        let restore = |policy| {
+            if restricted || stopping.load(Ordering::Acquire) {
+                return None;
+            }
+            if let Some(hooks) = hooks.as_ref() {
+                hooks.synchronize();
+            }
+            let passive = matches!(policy, RestorePolicy::NativeAfterSubmit { unknown: true });
+            return_for_paste(&app, session, permit.clone(), passive, policy)
+        };
+        match loaded {
+            Ok(Some(content)) => paste::execute(
+                Request {
+                    session,
+                    target: target.clone(),
+                    panel: owner,
+                    record_id: id,
+                    content,
+                    mode,
+                    started,
+                    external_switch: external_switch || !drained,
+                    permit: permit.clone(),
+                    copy_only_reason,
+                    cancelled: cancelled.clone(),
+                },
+                &keys,
+                &clipboard,
+                &stopping,
+                Callbacks {
+                    on_sent: &sent,
+                    restore: &restore,
+                    synchronize: &synchronize,
+                },
+                exports.as_deref(),
+            ),
+            missing => {
+                // 读库失败也要结束旧请求；主线程会再次检查会话，不能收起新的面板。
+                let focus = restore(RestorePolicy::LegacyBeforeSubmit);
+                let mut result = match missing {
+                    Ok(None) if files_missing => Outcome::not_written(Reason::FilesMissing),
+                    Ok(None) => Outcome::not_written(Reason::RecordMissing),
+                    Err(code) => {
+                        let mut result = Outcome::not_written(Reason::StoreReadFailed);
+                        result.evidence.insert("error_code".into(), json!(code));
+                        result
+                    }
+                    Ok(Some(_)) => unreachable!(),
+                };
+                if let Some(focus) = focus {
+                    result.evidence.insert("restore".into(), json!(focus));
+                }
+                result
+            }
+        }
+    };
+    if files_skipped > 0 && result.clipboard_written {
+        result
+            .evidence
+            .insert("files_skipped".into(), json!(files_skipped));
+    }
+    if !restricted {
+        result.evidence.insert(
+            "input_cleanup".into(),
+            json!(if drained {
+                hooks
+                    .as_ref()
+                    .map_or("unavailable", Hooks::input_release_evidence)
+            } else {
+                "cancelled_physical_release"
+            }),
+        );
+    }
+    if restricted {
+        let paired = drain();
+        let copied = result.clipboard_written && !cancelled.load(Ordering::Acquire);
+        result.evidence.insert(
+            "input_cleanup".into(),
+            json!(if paired {
+                hooks
+                    .as_ref()
+                    .map_or("unavailable", Hooks::input_release_evidence)
+            } else {
+                "cancelled_physical_release"
+            }),
+        );
+        if !stopping.load(Ordering::Acquire) {
+            restored = return_for_paste(
+                &app,
+                session,
+                if paired { permit } else { None },
+                copied,
+                RestorePolicy::LegacyBeforeSubmit,
+            );
+        }
+        if copied {
+            let focus = window::confirm_strict(&target);
+            result.evidence.insert(
+                "hint_message".into(),
+                json!(if restored.is_some()
+                    && focus.foreground.success
+                    && focus.focus_restored
+                    && reliable_control(&target)
+                {
+                    "已复制，请按 Ctrl+V 手动粘贴"
+                } else {
+                    "已复制，请先点击目标输入位置，再按 Ctrl+V"
+                }),
+            );
+            result.passive_hint = true;
+        }
+    }
+    if let Some(restored) = restored {
+        result.evidence.insert("restore".into(), json!(restored));
+    }
+    result.request_cancelled = cancelled.load(Ordering::Acquire);
+    result
+        .evidence
+        .insert("store_read_ms".into(), json!(store_read_ms));
+    // execute 已完成发键及内容证据收集，至此才终止前台监控。
+    drop(hooks);
+    let _ = dispatch(&app, Action::PasteFinished { session, result });
+}
+
 impl Panel {
+    pub(crate) fn new(
+        window: WebviewWindow,
+        plan: Option<autocycle::Plan>,
+        resuspend: Option<Duration>,
+    ) -> Self {
+        Self {
+            window,
+            mode: Mode::Hidden,
+            ready: false,
+            session: 0,
+            target: Target::default(),
+            hotkey: None,
+            hooks: None,
+            interaction: Interaction::Quick,
+            monitor: None,
+            permits: None,
+            started: None,
+            shown: None,
+            painted: false,
+            foreground_taken: false,
+            awaiting_search: false,
+            memory: Arc::new(webview::MemoryState::default()),
+            pasting: false,
+            paste_cancel: None,
+            hint: None,
+            auto_enabled: plan.is_some(),
+            auto_plan: plan,
+            auto_stop: None,
+            auto_visible: None,
+            resuspend,
+            resuspend_stop: None,
+        }
+    }
+    pub(crate) fn set_hotkey(&mut self, hotkey: Option<Shortcut>, logger: &Logger) {
+        self.hotkey = hotkey;
+        // 就地更新放行组合，不重建钩子、不改焦点，也不丢弃已吞按键的抬起配对。
+        if let Some(hooks) = &self.hooks
+            && let Err(error) = hooks.set_hotkey(hotkey)
+        {
+            logger.event("hotkey_hook_update_failed", json!({"error":error}));
+        }
+    }
+    /// 退出前的面板清理：停掉自动循环和重新挂起线程，结束搜索回放，拆掉键盘钩子。
+    pub(crate) fn shutdown(&mut self, logger: &Logger) {
+        self.auto_stop.take();
+        self.resuspend_stop.take();
+        if let Err(error) = self.replay_search(logger, false, "shutdown", false) {
+            self.log(logger, "replay_cleanup_failed", json!({"error":error}));
+        }
+        self.hooks.take();
+    }
     fn log(&self, logger: &Logger, event: &str, fields: Value) {
         logger.event(event, stamp(fields, self.session, &self.target));
     }
     fn emit(&self, event: &str, mut payload: Value) {
         payload["session"] = json!(self.session);
         let _ = self.window.emit(event, payload);
+    }
+    // 面板收起：通知前端，并让历史服务放掉读连接池的空闲连接和缩略图缓存
+    // （关连接很快，不会阻塞主线程；下次读再按需新开）。
+    fn emit_hidden(&self) {
+        self.emit("panel:hidden", json!({}));
+        if let Some(controller) = self.window.app_handle().try_state::<Controller>() {
+            controller.history.release_idle();
+        }
     }
     fn current(&self, session: u64) -> bool {
         session == self.session && self.mode != Mode::Hidden
@@ -612,15 +748,15 @@ impl Panel {
         if let (Some(started), Some(shown)) = (self.started, self.shown) {
             // 历史随呼出事件一起发：前端不用再取一次，呼出后马上按键也拿到的是最新列表。
             let controller = app.state::<Controller>();
-            let history = controller.history_snapshot();
+            let history = controller.history.snapshot();
             self.emit(
                 "panel:shown",
                 json!({"hotkeyToShowMs":shown.duration_since(started).as_secs_f64()*1000.0,"history":history,
-                    "experiments":self.experiments.payload(),"interaction":self.interaction,
+                    "interaction":self.interaction,
                     "terminal_feedback":self.interaction == Interaction::CloseOnly,
                     "foregroundRevision":self.monitor.as_ref().map_or(0, |monitor| monitor.revision())}),
             );
-            controller.check_visible_files();
+            controller.history.check_visible_files();
         }
     }
     fn show(
@@ -852,7 +988,7 @@ impl Panel {
             .map(|shown| shown.elapsed().as_secs_f64() * 1000.0);
         self.mode = Mode::Hidden;
         self.auto_visible = None;
-        self.emit("panel:hidden", json!({}));
+        self.emit_hidden();
         webview::set_visible_with_completion(
             &self.window,
             false,
@@ -937,7 +1073,7 @@ impl Panel {
             json!({"foreground_path":focus.foreground.path,"foreground_ok":focus.foreground.success,
             "focus_restored":focus.focus_restored,"focus_unknown":focus.focus_unknown,"external_switch":!may_restore}),
         );
-        self.emit("panel:hidden", json!({}));
+        self.emit_hidden();
         webview::set_visible(
             &self.window,
             false,
@@ -1194,6 +1330,468 @@ impl Panel {
             hint.ended_by = Some(hint_end_reason(hint.ended_by, ended_by));
         }
     }
+    fn auto_show(
+        &mut self,
+        app: &AppHandle,
+        logger: &Logger,
+        cycle: usize,
+        hidden_since: Instant,
+        triggered: Instant,
+        reply: mpsc::Sender<platform::Result<(u64, Instant)>>,
+    ) -> platform::Result<()> {
+        if !self.auto_enabled || !self.ready || self.mode != Mode::Hidden {
+            return Ok(());
+        }
+        let result = self
+            .show(
+                app,
+                logger,
+                triggered,
+                ShowSource::Auto {
+                    cycle,
+                    hidden_since,
+                },
+            )
+            .and_then(|()| {
+                self.shown
+                    .map(|at| (self.session, at))
+                    .ok_or("自动显示未完成".into())
+            });
+        let _ = reply.send(result.clone());
+        result?;
+        Ok(())
+    }
+
+    fn toggle(
+        &mut self,
+        app: &AppHandle,
+        logger: &Logger,
+        started: Instant,
+        target: Target,
+        alt: bool,
+    ) -> platform::Result<()> {
+        if self.mode == Mode::Hidden {
+            self.show(app, logger, started, ShowSource::Hotkey { target, alt })?;
+        } else {
+            if alt {
+                self.log(
+                    logger,
+                    "alt_menu_cancel",
+                    json!({"send_input":paste::cancel_alt_menu()}),
+                );
+            }
+            self.log(logger, "hide_source", json!({"source":"hotkey"}));
+            self.end_hint("hotkey");
+            self.hide(logger)?;
+        }
+        Ok(())
+    }
+
+    fn frontend_ready(&mut self, app: &AppHandle, logger: &Logger) -> platform::Result<()> {
+        let first = !self.ready;
+        self.ready = true;
+        self.log(logger, "frontend_ready", json!({}));
+        // 普通模式和自动循环模式都要启动重挂起线程。
+        if first && let Some(interval) = self.resuspend {
+            self.resuspend_stop = Some(resuspend::spawn(
+                app.clone(),
+                logger.clone(),
+                interval,
+                self.memory.clone(),
+            )?);
+        }
+        if self.auto_enabled {
+            if first {
+                let plan = self.auto_plan.take().ok_or("自动循环计划不存在")?;
+                let (ready, hidden) = mpsc::channel();
+                window::hide(&self.window)?;
+                webview::set_visible_with_completion(
+                    &self.window,
+                    false,
+                    logger.clone(),
+                    self.session,
+                    self.memory.clone(),
+                    Some(ready),
+                )?;
+                self.auto_stop = Some(autocycle::spawn(app.clone(), logger.clone(), plan, hidden)?);
+            }
+            return Ok(());
+        }
+        if self.mode == Mode::Hidden {
+            webview::set_visible(
+                &self.window,
+                false,
+                logger.clone(),
+                self.session,
+                self.memory.clone(),
+            )?;
+        } else {
+            self.shown_event(app);
+        }
+        Ok(())
+    }
+
+    // 粘贴线程请求把焦点还给原窗口：主线程做完再用 reply 回给线程。
+    fn return_focus(
+        &mut self,
+        app: &AppHandle,
+        logger: &Logger,
+        request: ReturnRequest,
+    ) -> platform::Result<()> {
+        let ReturnRequest {
+            session,
+            permit,
+            passive,
+            policy,
+            requested,
+            reply,
+        } = request;
+        if session != self.session || !self.pasting || self.mode == Mode::Hidden {
+            let _ = reply.send(platform::FocusResult {
+                foreground: platform::ForegroundResult {
+                    path: "stale_request",
+                    success: false,
+                },
+                focus_restored: false,
+                focus_unknown: true,
+            });
+            return Ok(());
+        }
+        let mut focus = window::confirm(&self.target);
+        if session == self.session && self.pasting && self.mode != Mode::Hidden {
+            let native_unknown =
+                matches!(policy, RestorePolicy::NativeAfterSubmit { unknown: true });
+            if native_unknown && self.hint.is_none() {
+                self.hint = Some(Hint {
+                    since: Instant::now(),
+                    dwell: None,
+                    ended_by: None,
+                    reason: "native_submission_unknown",
+                });
+            }
+            let foreground = window::foreground();
+            let can_restore = requested.elapsed() < REPLAY_WAIT
+                && !app.state::<Controller>().stopping.load(Ordering::Acquire)
+                && window::valid(&self.target)
+                && permit
+                    .as_ref()
+                    .is_some_and(|permit| permit.current(&self.target, foreground));
+            if passive {
+                self.set_interaction(Interaction::Passive);
+            }
+            window::no_activate(&self.window, true)?;
+            let armed_at = window::tick_count();
+            if !can_restore && let Some(permit) = permit.as_ref() {
+                permit.revoke();
+            }
+            if can_restore
+                && permit
+                    .as_ref()
+                    .is_some_and(|permit| permit.arm_return(foreground, armed_at))
+            {
+                if foreground == window::handle(&self.window)? {
+                    // WinEvent 与 GetTickCount 同 tick 时无法证明先后，跨到下一 tick 再进行受控归还。
+                    let waiting = Instant::now();
+                    while window::tick_count() == armed_at
+                        && waiting.elapsed() < Duration::from_millis(30)
+                    {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    if window::tick_count() != armed_at
+                        && requested.elapsed() < REPLAY_WAIT
+                        && !app.state::<Controller>().stopping.load(Ordering::Acquire)
+                        && let Some(permit) = permit.as_ref()
+                        && permit.return_pending(&self.target, window::foreground())
+                    {
+                        focus = window::restore_for_paste(
+                            &self.target,
+                            permit,
+                            matches!(policy, RestorePolicy::NativeAfterSubmit { .. }),
+                        );
+                    } else if let Some(permit) = permit.as_ref() {
+                        // 等待期间切走、到期或退出后只复制，不能让提前观察到的目标事件保留发送资格。
+                        permit.revoke();
+                    }
+                } else {
+                    focus = window::confirm(&self.target);
+                }
+            }
+            if !passive {
+                self.mode = Mode::Hidden;
+                self.awaiting_search = false;
+                window::hide(&self.window)?;
+                self.emit_hidden();
+                webview::set_visible(
+                    &self.window,
+                    false,
+                    logger.clone(),
+                    session,
+                    self.memory.clone(),
+                )?;
+                self.log(logger, "hidden", json!({"source":"paste"}));
+            }
+        }
+        let _ = reply.send(focus);
+        Ok(())
+    }
+
+    fn begin_paste(
+        &mut self,
+        app: &AppHandle,
+        logger: &Logger,
+        command: PasteCommand,
+    ) -> platform::Result<()> {
+        let PasteCommand {
+            session,
+            id,
+            mode,
+            selection,
+            started,
+        } = command;
+        let owner = window::handle(&self.window)?;
+        let foreground = window::foreground();
+        let search = self.mode == Mode::Search;
+        let restricted = self.interaction == Interaction::Activated;
+        let external_switch = !search
+            && self
+                .hooks
+                .as_ref()
+                .is_some_and(|hooks| hooks.switched_to() != 0);
+        let permits = self.permits.as_mut().ok_or("前台监控尚未建立")?;
+        let permit = if search {
+            match selection {
+                Some(selection) => match permits.select(session, id, mode, selection, foreground) {
+                    Ok(permit) => Some(permit),
+                    Err(reason) => {
+                        self.log(logger, "paste_rejected", json!({"reason":reason}));
+                        self.emit(
+                            "panel:error",
+                            json!({"message":"选择期间窗口状态已变化，请重新选择条目。"}),
+                        );
+                        return Ok(());
+                    }
+                },
+                None => {
+                    self.emit(
+                        "panel:error",
+                        json!({"message":"请在搜索面板重新选择条目。"}),
+                    );
+                    return Ok(());
+                }
+            }
+        } else if selection.is_some() {
+            self.emit(
+                "panel:error",
+                json!({"message":"面板模式已变化，请重新选择条目。"}),
+            );
+            return Ok(());
+        } else {
+            Some(permits.quick(id, mode))
+        };
+        let mut copy_only_reason = None;
+        if search && !reliable_control(&self.target) && copy_only_reason.is_none() {
+            copy_only_reason = Some("target_control_unverified");
+        }
+        if restricted && mode != PasteMode::Copy {
+            copy_only_reason = Some("target_may_be_elevated");
+        }
+        if restricted {
+            self.hint = Some(Hint {
+                since: Instant::now(),
+                dwell: None,
+                ended_by: None,
+                reason: "target_may_be_elevated",
+            });
+        }
+        let hooks = self.hooks.take();
+        let target = self.target.clone();
+        self.pasting = true;
+        let cancelled = Arc::new(AtomicBool::new(false));
+        self.paste_cancel = Some(cancelled.clone());
+        let controller = app.state::<Controller>();
+        let clipboard = controller.clipboard.clone();
+        let history = controller.history.clone();
+        let keys = controller.keys.clone();
+        let stopping = controller.stopping.clone();
+        let job = PasteJob {
+            app: app.clone(),
+            logger: logger.clone(),
+            session,
+            id,
+            mode,
+            started,
+            owner,
+            restricted,
+            external_switch,
+            copy_only_reason,
+            permit,
+            hooks,
+            target,
+            cancelled,
+            clipboard,
+            history,
+            keys,
+            stopping,
+        };
+        if std::thread::Builder::new()
+            .name("paste-request".into())
+            .spawn(move || run_paste(job))
+            .is_err()
+        {
+            self.pasting = false;
+            return Err("粘贴线程启动失败".into());
+        }
+        Ok(())
+    }
+
+    fn finish_paste(
+        &mut self,
+        app: &AppHandle,
+        logger: &Logger,
+        session: u64,
+        mut result: Outcome,
+    ) -> platform::Result<()> {
+        // 证据收集期间可能已经再次呼出，日志要用这次粘贴自己的会话号和目标，不能用当前的。
+        result.evidence.insert("session".into(), json!(session));
+        if session == self.session
+            && self
+                .paste_cancel
+                .as_ref()
+                .is_some_and(|cancel| cancel.load(Ordering::Acquire))
+        {
+            result.request_cancelled = true;
+        }
+        logger.event("paste", result.to_value());
+        if session == self.session && result.clipboard_written && self.mode != Mode::Hidden {
+            self.emit("panel:history-changed", json!({}));
+        }
+        if session == self.session {
+            self.pasting = false;
+            self.paste_cancel = None;
+            match generic_submission_finish(
+                &result,
+                true,
+                self.mode != Mode::Hidden,
+                self.interaction,
+            )
+            .or_else(|| no_submission_finish(&result, self.current(session), self.interaction))
+            {
+                Some(NoSubmissionFinish::CloseRequested) => {
+                    // 写前/写后均兑现等待中的关闭；Passive 禁止归还或抢回前台。
+                    self.hide(logger)?;
+                    return Ok(());
+                }
+                Some(
+                    finish @ (NoSubmissionFinish::CloseOnly | NoSubmissionFinish::ShowCloseOnly),
+                ) => {
+                    // 未提交保留真实写入事实，但不承诺剪贴板仍有此内容，不提供重试。
+                    self.hint.take();
+                    if finish == NoSubmissionFinish::ShowCloseOnly {
+                        self.show_submission_feedback(app, logger)?;
+                    } else {
+                        self.set_interaction(Interaction::CloseOnly);
+                    }
+                    self.emit(
+                                "panel:error",
+                                json!({"message":no_submission_message(result.reason.as_ref()),"close_only":true}),
+                            );
+                    // 必须绕过 paste-result 和 deferred hide；前端继续复用已有 CloseOnly。
+                    return Ok(());
+                }
+                Some(NoSubmissionFinish::Ignore) => return Ok(()),
+                None => {}
+            }
+            // cleanup 回执超时也必须显示未知结果；不再尝试归还，也不允许用户误重试。
+            let native_unknown = result.result == Some(PasteResult::NativeSubmissionUnknown);
+            if native_unknown && self.current(session) && !result.request_cancelled {
+                self.hint.get_or_insert(Hint {
+                    since: Instant::now(),
+                    dwell: None,
+                    ended_by: None,
+                    reason: "native_submission_unknown",
+                });
+                self.set_interaction(Interaction::Passive);
+            }
+            // 预判时没收起的面板：按实际结论决定是停留提示还是现在收起。
+            let deferred = self.hint.take().is_some() && self.current(session);
+            let dwell = if deferred {
+                dwell_after_paste(&result)
+            } else {
+                None
+            };
+            if !result.clipboard_written
+                && result.reason != Some(Reason::RequestCancelled)
+                && !result.request_cancelled
+            {
+                let message = match result.reason {
+                    Some(Reason::RecordMissing) => "这条记录已不在历史里",
+                    Some(Reason::FilesMissing) => "原文件不在了，没有粘贴",
+                    Some(Reason::StoreReadFailed) => "读取历史失败，未改写剪贴板。",
+                    Some(Reason::ClipboardCaptureBusy) => {
+                        "剪贴板忙，本次未提交，请关闭面板后重新呼出"
+                    }
+                    _ => "写入剪贴板失败，请重试。",
+                };
+                self.emit("panel:error", json!({"message":message,"close_only":false}));
+            } else if result.clipboard_written {
+                if let Some(dwell) = dwell {
+                    // 告诉前端面板还开着、要停留：页脚当场显示提示，停留期间不再发起粘贴。
+                    result
+                        .evidence
+                        .insert("hint_dwell_ms".into(), json!(dwell.as_millis() as u64));
+                }
+                self.emit("panel:paste-result", result.to_value());
+            }
+            if deferred {
+                match dwell {
+                    Some(dwell) => self.begin_hint(
+                        app,
+                        logger,
+                        dwell,
+                        if native_unknown {
+                            "native_submission_unknown"
+                        } else {
+                            "target_may_be_elevated"
+                        },
+                    )?,
+                    None => {
+                        // 预判要停留但结论不是"管理员、只复制"（期间目标关了、用户切走、记录没了）：
+                        // 不扩大停留范围，现在收起。
+                        self.log(
+                            logger,
+                            "hide_source",
+                            json!({"source":"paste_without_hint"}),
+                        );
+                        self.hide(logger)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn quit(&mut self, app: &AppHandle, logger: &Logger, relaunch: bool) {
+        app.state::<Controller>()
+            .stopping
+            .store(true, Ordering::Release);
+        self.auto_stop.take();
+        self.resuspend_stop.take();
+        self.end_hint("quit");
+        if self.mode != Mode::Hidden
+            && let Err(error) = self.hide(logger)
+        {
+            self.log(logger, "quit_cleanup_failed", json!({"error":error}));
+        }
+        self.hooks.take();
+        self.log(logger, "quit_requested", json!({"relaunch":relaunch}));
+        logger.flush();
+        app.exit(if relaunch {
+            crate::recovery::RELAUNCH_CODE
+        } else {
+            0
+        });
+    }
+
     fn act(&mut self, app: &AppHandle, logger: &Logger, action: Action) -> platform::Result<()> {
         if self.auto_enabled {
             let command = match &action {
@@ -1201,7 +1799,6 @@ impl Panel {
                 Action::Search { .. } => Some("start_search"),
                 Action::SearchReady { .. } => Some("search_ready"),
                 Action::Hide { .. } => Some("hide_panel"),
-                Action::QuitFrontend => Some("quit_prototype"),
                 _ => None,
             };
             if let Some(command) = command {
@@ -1222,28 +1819,7 @@ impl Panel {
                 hidden_since,
                 triggered,
                 reply,
-            } => {
-                if !self.auto_enabled || !self.ready || self.mode != Mode::Hidden {
-                    return Ok(());
-                }
-                let result = self
-                    .show(
-                        app,
-                        logger,
-                        triggered,
-                        ShowSource::Auto {
-                            cycle,
-                            hidden_since,
-                        },
-                    )
-                    .and_then(|()| {
-                        self.shown
-                            .map(|at| (self.session, at))
-                            .ok_or("自动显示未完成".into())
-                    });
-                let _ = reply.send(result.clone());
-                result?;
-            }
+            } => self.auto_show(app, logger, cycle, hidden_since, triggered, reply)?,
             Action::AutoHide {
                 cycle,
                 session,
@@ -1262,65 +1838,8 @@ impl Panel {
                 started,
                 target,
                 alt,
-            } if !self.auto_enabled => {
-                if self.mode == Mode::Hidden {
-                    self.show(app, logger, started, ShowSource::Hotkey { target, alt })?;
-                } else {
-                    if alt {
-                        self.log(
-                            logger,
-                            "alt_menu_cancel",
-                            json!({"send_input":paste::cancel_alt_menu()}),
-                        );
-                    }
-                    self.log(logger, "hide_source", json!({"source":"hotkey"}));
-                    self.end_hint("hotkey");
-                    self.hide(logger)?;
-                }
-            }
-            Action::FrontendReady => {
-                let first = !self.ready;
-                self.ready = true;
-                self.log(logger, "frontend_ready", json!({}));
-                // 普通模式和自动循环模式都要启动重挂起线程。
-                if first && let Some(interval) = self.resuspend {
-                    self.resuspend_stop = Some(resuspend::spawn(
-                        app.clone(),
-                        logger.clone(),
-                        interval,
-                        self.memory.clone(),
-                    )?);
-                }
-                if self.auto_enabled {
-                    if first {
-                        let plan = self.auto_plan.take().ok_or("自动循环计划不存在")?;
-                        let (ready, hidden) = mpsc::channel();
-                        window::hide(&self.window)?;
-                        webview::set_visible_with_completion(
-                            &self.window,
-                            false,
-                            logger.clone(),
-                            self.session,
-                            self.memory.clone(),
-                            Some(ready),
-                        )?;
-                        self.auto_stop =
-                            Some(autocycle::spawn(app.clone(), logger.clone(), plan, hidden)?);
-                    }
-                    return Ok(());
-                }
-                if self.mode == Mode::Hidden {
-                    webview::set_visible(
-                        &self.window,
-                        false,
-                        logger.clone(),
-                        self.session,
-                        self.memory.clone(),
-                    )?;
-                } else {
-                    self.shown_event(app);
-                }
-            }
+            } if !self.auto_enabled => self.toggle(app, logger, started, target, alt)?,
+            Action::FrontendReady => self.frontend_ready(app, logger)?,
             Action::ForegroundRevision { session, revision } if self.current(session) => {
                 self.emit("panel:foreground-revision", json!({"revision":revision}));
             }
@@ -1339,94 +1858,15 @@ impl Panel {
                 requested,
                 reply,
             } => {
-                if session != self.session || !self.pasting || self.mode == Mode::Hidden {
-                    let _ = reply.send(platform::FocusResult {
-                        foreground: platform::ForegroundResult {
-                            path: "stale_request",
-                            success: false,
-                        },
-                        focus_restored: false,
-                        focus_unknown: true,
-                    });
-                    return Ok(());
-                }
-                let mut focus = window::confirm(&self.target);
-                if session == self.session && self.pasting && self.mode != Mode::Hidden {
-                    let native_unknown =
-                        matches!(policy, RestorePolicy::NativeAfterSubmit { unknown: true });
-                    if native_unknown && self.hint.is_none() {
-                        self.hint = Some(Hint {
-                            since: Instant::now(),
-                            dwell: None,
-                            ended_by: None,
-                            reason: "native_submission_unknown",
-                        });
-                    }
-                    let foreground = window::foreground();
-                    let can_restore = requested.elapsed() < REPLAY_WAIT
-                        && !app.state::<Controller>().stopping.load(Ordering::Acquire)
-                        && window::valid(&self.target)
-                        && permit
-                            .as_ref()
-                            .is_some_and(|permit| permit.current(&self.target, foreground));
-                    if passive {
-                        self.set_interaction(Interaction::Passive);
-                    }
-                    window::no_activate(&self.window, true)?;
-                    let armed_at = window::tick_count();
-                    if !can_restore && let Some(permit) = permit.as_ref() {
-                        permit.revoke();
-                    }
-                    if can_restore
-                        && permit
-                            .as_ref()
-                            .is_some_and(|permit| permit.arm_return(foreground, armed_at))
-                    {
-                        if foreground == window::handle(&self.window)? {
-                            // WinEvent 与 GetTickCount 同 tick 时无法证明先后，跨到下一 tick 再进行受控归还。
-                            let waiting = Instant::now();
-                            while window::tick_count() == armed_at
-                                && waiting.elapsed() < Duration::from_millis(30)
-                            {
-                                std::thread::sleep(Duration::from_millis(1));
-                            }
-                            if window::tick_count() != armed_at
-                                && requested.elapsed() < REPLAY_WAIT
-                                && !app.state::<Controller>().stopping.load(Ordering::Acquire)
-                                && let Some(permit) = permit.as_ref()
-                                && permit.return_pending(&self.target, window::foreground())
-                            {
-                                focus = window::restore_for_paste(
-                                    &self.target,
-                                    permit,
-                                    logger,
-                                    session,
-                                    matches!(policy, RestorePolicy::NativeAfterSubmit { .. }),
-                                );
-                            } else if let Some(permit) = permit.as_ref() {
-                                // 等待期间切走、到期或退出后只复制，不能让提前观察到的目标事件保留发送资格。
-                                permit.revoke();
-                            }
-                        } else {
-                            focus = window::confirm(&self.target);
-                        }
-                    }
-                    if !passive {
-                        self.mode = Mode::Hidden;
-                        self.awaiting_search = false;
-                        window::hide(&self.window)?;
-                        self.emit("panel:hidden", json!({}));
-                        webview::set_visible(
-                            &self.window,
-                            false,
-                            logger.clone(),
-                            session,
-                            self.memory.clone(),
-                        )?;
-                        self.log(logger, "hidden", json!({"source":"paste"}));
-                    }
-                }
-                let _ = reply.send(focus);
+                let request = ReturnRequest {
+                    session,
+                    permit,
+                    passive,
+                    policy,
+                    requested,
+                    reply,
+                };
+                self.return_focus(app, logger, request)?
             }
             Action::Key { session, key }
                 if self.current(session)
@@ -1518,326 +1958,20 @@ impl Panel {
                     Interaction::Quick | Interaction::Activated
                 ) =>
             {
-                let owner = window::handle(&self.window)?;
-                let foreground = window::foreground();
-                let search = self.mode == Mode::Search;
-                let restricted = self.interaction == Interaction::Activated;
-                let external_switch = !search
-                    && self
-                        .hooks
-                        .as_ref()
-                        .is_some_and(|hooks| hooks.switched_to() != 0);
-                let permits = self.permits.as_mut().ok_or("前台监控尚未建立")?;
-                let permit = if search {
-                    match selection {
-                        Some(selection) => {
-                            match permits.select(session, id, mode, selection, foreground) {
-                                Ok(permit) => Some(permit),
-                                Err(reason) => {
-                                    self.log(logger, "paste_rejected", json!({"reason":reason}));
-                                    self.emit("panel:error", json!({"message":"选择期间窗口状态已变化，请重新选择条目。"}));
-                                    return Ok(());
-                                }
-                            }
-                        }
-                        None => {
-                            self.emit(
-                                "panel:error",
-                                json!({"message":"请在搜索面板重新选择条目。"}),
-                            );
-                            return Ok(());
-                        }
-                    }
-                } else if selection.is_some() {
-                    self.emit(
-                        "panel:error",
-                        json!({"message":"面板模式已变化，请重新选择条目。"}),
-                    );
-                    return Ok(());
-                } else {
-                    Some(permits.quick(id, mode))
+                let command = PasteCommand {
+                    session,
+                    id,
+                    mode,
+                    selection,
+                    started,
                 };
-                let mut copy_only_reason = None;
-                if search && !reliable_control(&self.target) && copy_only_reason.is_none() {
-                    copy_only_reason = Some("target_control_unverified");
-                }
-                if restricted && mode != PasteMode::Copy {
-                    copy_only_reason = Some("target_may_be_elevated");
-                }
-                if restricted {
-                    self.hint = Some(Hint {
-                        since: Instant::now(),
-                        dwell: None,
-                        ended_by: None,
-                        reason: "target_may_be_elevated",
-                    });
-                }
-                let hooks = self.hooks.take();
-                let target = self.target.clone();
-                self.pasting = true;
-                let cancelled = Arc::new(AtomicBool::new(false));
-                self.paste_cancel = Some(cancelled.clone());
-                let controller = app.state::<Controller>();
-                let clipboard = controller.clipboard.clone();
-                let history = controller.history.clone();
-                let keys = controller.keys.clone();
-                let stopping = controller.stopping.clone();
-                let worker_logger = logger.clone();
-                let app = app.clone();
-                if std::thread::Builder::new().name("paste-request".into()).spawn(move || {
-                    // 监听线程仍在 worker 中存活；只先停止输入拦截，读库和发送期间继续记录前台。
-                    let drain = || {
-                        let Some(hooks) = hooks.as_ref() else { return false; };
-                        loop {
-                            if stopping.load(Ordering::Acquire) { return false; }
-                            let abandon = cancelled.load(Ordering::Acquire)
-                                || !permit.as_ref().is_some_and(|permit| permit.current(&target, window::foreground()));
-                            match hooks.stop_inputs(abandon) {
-                                Ok(true) => return hooks.synchronize() && !abandon,
-                                Ok(false) => std::thread::sleep(Duration::from_millis(5)),
-                                Err(error) => {
-                                    let waiting = Instant::now();
-                                    let mut reported_waiting = false;
-                                    worker_logger.event("input_drain_fallback", json!({"session":session,
-                                        "stage":"started","error":error,"counts":paste::key_state_counts()}));
-                                    while !paste::keys_released() && !stopping.load(Ordering::Acquire) {
-                                        if !reported_waiting && waiting.elapsed() >= Duration::from_secs(1) {
-                                            reported_waiting = true;
-                                            worker_logger.event("input_drain_fallback", json!({"session":session,
-                                                "stage":"waiting","elapsed_ms":waiting.elapsed().as_secs_f64()*1000.0,
-                                                "counts":paste::key_state_counts()}));
-                                        }
-                                        std::thread::sleep(Duration::from_millis(5));
-                                    }
-                                    worker_logger.event("input_drain_fallback", json!({"session":session,
-                                        "stage":"finished","elapsed_ms":waiting.elapsed().as_secs_f64()*1000.0,
-                                        "stopping":stopping.load(Ordering::Acquire),"counts":paste::key_state_counts()}));
-                                    return false;
-                                }
-                            }
-                        }
-                    };
-                    let drained = restricted || drain();
-                    let read_started = Instant::now();
-                    let loaded = history.get(id);
-                    // 文件条目粘贴前现查一遍（M2-3）：全部不在就不粘贴，部分不在只粘贴还在的。
-                    let mut files_skipped = 0;
-                    let mut files_missing = false;
-                    let loaded = match loaded {
-                        Ok(Some(content)) => match history.usable_files(&content) {
-                            crate::history::files::Usable::All => Ok(Some(content)),
-                            crate::history::files::Usable::Partial(filtered, skipped) => {
-                                files_skipped = skipped;
-                                Ok(Some(filtered))
-                            }
-                            crate::history::files::Usable::Nothing => {
-                                files_missing = true;
-                                Ok(None)
-                            }
-                        },
-                        other => other,
-                    };
-                    let exports = history.exports();
-                    let store_read_ms = read_started.elapsed().as_secs_f64()*1000.0;
-                    let mut restored = None;
-                    let sent = || { let _ = dispatch(&app, Action::PasteSent { session }); };
-                    let synchronize = || hooks.as_ref().is_some_and(|hooks| hooks.synchronize());
-                    let mut result = {
-                        let restore = |policy| {
-                            if restricted || stopping.load(Ordering::Acquire) { return None; }
-                            if let Some(hooks) = hooks.as_ref() { hooks.synchronize(); }
-                            let passive = matches!(policy, RestorePolicy::NativeAfterSubmit { unknown: true });
-                            return_for_paste(&app, session, permit.clone(), passive, policy)
-                        };
-                        match loaded {
-                            Ok(Some(content)) => paste::execute(Request {
-                                session, target:target.clone(), panel:owner, record_id:id, content, mode, started,
-                                external_switch:external_switch || !drained, permit:permit.clone(), copy_only_reason, cancelled:cancelled.clone(),
-                            }, &keys, &clipboard, &stopping, Callbacks { on_sent: &sent, restore: &restore, synchronize: &synchronize }, exports.as_deref()),
-                            missing => {
-                                // 读库失败也要结束旧请求；主线程会再次检查会话，不能收起新的面板。
-                                let focus = restore(RestorePolicy::LegacyBeforeSubmit);
-                                let mut result = match missing {
-                                    Ok(None) if files_missing => json!({"clipboard_written":false,"reason":"files_missing"}),
-                                    Ok(None) => json!({"clipboard_written":false,"reason":"record_missing"}),
-                                    Err(code) => json!({"clipboard_written":false,"reason":"store_read_failed","error_code":code}),
-                                    Ok(Some(_)) => unreachable!(),
-                                };
-                                if let Some(focus) = focus { result["restore"] = json!(focus); }
-                                result
-                            }
-                        }
-                    };
-                    if files_skipped > 0 && result["clipboard_written"] == true {
-                        result["files_skipped"] = json!(files_skipped);
-                    }
-                    if !restricted {
-                        result["input_cleanup"] = json!(if drained {
-                            hooks.as_ref().map_or("unavailable", Hooks::input_release_evidence)
-                        } else { "cancelled_physical_release" });
-                    }
-                    if restricted {
-                        let paired = drain();
-                        let copied = result["clipboard_written"] == true && !cancelled.load(Ordering::Acquire);
-                        result["input_cleanup"] = json!(if paired {
-                            hooks.as_ref().map_or("unavailable", Hooks::input_release_evidence)
-                        } else { "cancelled_physical_release" });
-                        if !stopping.load(Ordering::Acquire) {
-                            restored = return_for_paste(&app, session, if paired { permit } else { None }, copied, RestorePolicy::LegacyBeforeSubmit);
-                        }
-                        if copied {
-                        let focus = window::confirm_strict(&target);
-                        result["hint_message"] = json!(if restored.is_some() && focus.foreground.success
-                            && focus.focus_restored && reliable_control(&target) {
-                            "已复制，请按 Ctrl+V 手动粘贴"
-                        } else {
-                            "已复制，请先点击目标输入位置，再按 Ctrl+V"
-                        });
-                        result["passive_hint"] = json!(true);
-                        }
-                    }
-                    if let Some(restored) = restored { result["restore"] = json!(restored); }
-                    result["request_cancelled"] = json!(cancelled.load(Ordering::Acquire));
-                    result["store_read_ms"] = json!(store_read_ms);
-                    // execute 已完成发键及内容证据收集，至此才终止前台监控。
-                    drop(hooks);
-                    let _ = dispatch(&app, Action::PasteFinished { session, result });
-                }).is_err() {
-                    self.pasting = false;
-                    return Err("粘贴线程启动失败".into());
-                }
+                self.begin_paste(app, logger, command)?
             }
             Action::PasteSent { session } if session == self.session => {
                 self.pasting = false;
             }
-            Action::PasteFinished {
-                session,
-                mut result,
-            } => {
-                // 证据收集期间可能已经再次呼出，日志要用这次粘贴自己的会话号和目标，不能用当前的。
-                result["session"] = json!(session);
-                if session == self.session
-                    && self
-                        .paste_cancel
-                        .as_ref()
-                        .is_some_and(|cancel| cancel.load(Ordering::Acquire))
-                {
-                    result["request_cancelled"] = json!(true);
-                }
-                logger.event("paste", result.clone());
-                if session == self.session
-                    && result["clipboard_written"] == true
-                    && self.mode != Mode::Hidden
-                {
-                    self.emit("panel:history-changed", json!({}));
-                }
-                if session == self.session {
-                    self.pasting = false;
-                    self.paste_cancel = None;
-                    match generic_submission_finish(
-                        &result,
-                        true,
-                        self.mode != Mode::Hidden,
-                        self.interaction,
-                    )
-                    .or_else(|| {
-                        no_submission_finish(&result, self.current(session), self.interaction)
-                    }) {
-                        Some(NoSubmissionFinish::CloseRequested) => {
-                            // 写前/写后均兑现等待中的关闭；Passive 禁止归还或抢回前台。
-                            self.hide(logger)?;
-                            return Ok(());
-                        }
-                        Some(
-                            finish @ (NoSubmissionFinish::CloseOnly
-                            | NoSubmissionFinish::ShowCloseOnly),
-                        ) => {
-                            // 未提交保留真实写入事实，但不承诺剪贴板仍有此内容，不提供重试。
-                            self.hint.take();
-                            if finish == NoSubmissionFinish::ShowCloseOnly {
-                                self.show_submission_feedback(app, logger)?;
-                            } else {
-                                self.set_interaction(Interaction::CloseOnly);
-                            }
-                            self.emit(
-                                "panel:error",
-                                json!({"message":no_submission_message(&result),"close_only":true}),
-                            );
-                            // 必须绕过 paste-result 和 deferred hide；前端继续复用已有 CloseOnly。
-                            return Ok(());
-                        }
-                        Some(NoSubmissionFinish::Ignore) => return Ok(()),
-                        None => {}
-                    }
-                    // cleanup 回执超时也必须显示未知结果；不再尝试归还，也不允许用户误重试。
-                    let native_unknown = result["paste_result"] == "native_submission_unknown";
-                    if native_unknown
-                        && self.current(session)
-                        && result["request_cancelled"] != true
-                    {
-                        self.hint.get_or_insert(Hint {
-                            since: Instant::now(),
-                            dwell: None,
-                            ended_by: None,
-                            reason: "native_submission_unknown",
-                        });
-                        self.set_interaction(Interaction::Passive);
-                    }
-                    // 预判时没收起的面板：按实际结论决定是停留提示还是现在收起。
-                    let deferred = self.hint.take().is_some() && self.current(session);
-                    let dwell = if deferred {
-                        dwell_after_paste(&result)
-                    } else {
-                        None
-                    };
-                    if result["clipboard_written"] == false
-                        && result["reason"] != "request_cancelled"
-                        && result["request_cancelled"] != true
-                    {
-                        let message = if result["reason"] == "record_missing" {
-                            "这条记录已不在历史里"
-                        } else if result["reason"] == "files_missing" {
-                            "原文件不在了，没有粘贴"
-                        } else if result["reason"] == "store_read_failed" {
-                            "读取历史失败，未改写剪贴板。"
-                        } else if result["reason"] == "clipboard_capture_busy" {
-                            "剪贴板忙，本次未提交，请关闭面板后重新呼出"
-                        } else {
-                            "写入剪贴板失败，请重试。"
-                        };
-                        self.emit("panel:error", json!({"message":message,"close_only":false}));
-                    } else if result["clipboard_written"] == true {
-                        if let Some(dwell) = dwell {
-                            // 告诉前端面板还开着、要停留：页脚当场显示提示，停留期间不再发起粘贴。
-                            result["hint_dwell_ms"] = json!(dwell.as_millis() as u64);
-                        }
-                        self.emit("panel:paste-result", result);
-                    }
-                    if deferred {
-                        match dwell {
-                            Some(dwell) => self.begin_hint(
-                                app,
-                                logger,
-                                dwell,
-                                if native_unknown {
-                                    "native_submission_unknown"
-                                } else {
-                                    "target_may_be_elevated"
-                                },
-                            )?,
-                            None => {
-                                // 预判要停留但结论不是"管理员、只复制"（期间目标关了、用户切走、记录没了）：
-                                // 不扩大停留范围，现在收起。
-                                self.log(
-                                    logger,
-                                    "hide_source",
-                                    json!({"source":"paste_without_hint"}),
-                                );
-                                self.hide(logger)?;
-                            }
-                        }
-                    }
-                }
+            Action::PasteFinished { session, result } => {
+                self.finish_paste(app, logger, session, result)?
             }
             Action::HintElapsed { session }
                 if self.current(session)
@@ -1887,27 +2021,9 @@ impl Panel {
                     let _ = reply.send((self.session, generation));
                 }
             }
-            Action::Quit | Action::QuitFrontend | Action::Relaunch => {
+            Action::Quit | Action::Relaunch => {
                 let relaunch = matches!(action, Action::Relaunch);
-                app.state::<Controller>()
-                    .stopping
-                    .store(true, Ordering::Release);
-                self.auto_stop.take();
-                self.resuspend_stop.take();
-                self.end_hint("quit");
-                if self.mode != Mode::Hidden
-                    && let Err(error) = self.hide(logger)
-                {
-                    self.log(logger, "quit_cleanup_failed", json!({"error":error}));
-                }
-                self.hooks.take();
-                self.log(logger, "quit_requested", json!({"relaunch":relaunch}));
-                logger.flush();
-                app.exit(if relaunch {
-                    crate::recovery::RELAUNCH_CODE
-                } else {
-                    0
-                });
+                self.quit(app, logger, relaunch);
             }
             _ => {}
         }
@@ -1918,6 +2034,31 @@ impl Panel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn outcome(
+        result: Option<PasteResult>,
+        reason: Option<&str>,
+        written: bool,
+        cancelled: bool,
+    ) -> Outcome {
+        let mut outcome =
+            Outcome::from_report(result, json!({"clipboard_written":written,"reason":reason}));
+        outcome.request_cancelled = cancelled;
+        outcome
+    }
+
+    // 平台层的做法：结论和原因映射写进报告，再变成有类型的结果。
+    fn reported(
+        result: impl FnOnce(&mut Value) -> PasteResult,
+        written: bool,
+        cancelled: bool,
+    ) -> Outcome {
+        let mut report = json!({"clipboard_written":written,"request_cancelled":false});
+        let result = result(&mut report);
+        let mut outcome = Outcome::from_report(Some(result), report);
+        outcome.request_cancelled = cancelled;
+        outcome
+    }
 
     #[test]
     fn generic_terminal_results_are_consumed_for_visible_hidden_cancelled_and_new_sessions() {
@@ -1934,8 +2075,8 @@ mod tests {
                 Ok(Completion::NotSubmitted("generic_clipboard_close_failed")),
                 Ok(Completion::Submitted(Submission::Unknown)),
             ] {
-                let mut result = json!({"clipboard_written":written,"request_cancelled":false});
-                result["paste_result"] = json!(generic_outcome(completion, &mut result));
+                let mut result =
+                    reported(|report| generic_outcome(completion, report), written, false);
                 for visible in [false, true] {
                     assert_eq!(
                         generic_submission_finish(&result, true, visible, Interaction::Activated),
@@ -1949,11 +2090,11 @@ mod tests {
                         generic_submission_finish(&result, false, visible, Interaction::Activated),
                         Some(NoSubmissionFinish::Ignore)
                     );
-                    let message = no_submission_message(&result);
+                    let message = no_submission_message(result.reason.as_ref());
                     assert!(!message.contains("已复制"));
                     assert!(!message.contains("Ctrl+V"));
                 }
-                result["request_cancelled"] = json!(true);
+                result.request_cancelled = true;
                 assert_eq!(
                     generic_submission_finish(&result, true, false, Interaction::Passive),
                     Some(NoSubmissionFinish::Ignore)
@@ -1964,30 +2105,30 @@ mod tests {
                 );
             }
         }
-        let mut result = json!({"clipboard_written":true,"request_cancelled":false});
-        result["paste_result"] = json!(generic_outcome(
-            Ok(Completion::Submitted(Submission::Sent)),
-            &mut result
-        ));
+        let result = reported(
+            |report| generic_outcome(Ok(Completion::Submitted(Submission::Sent)), report),
+            true,
+            false,
+        );
         assert_eq!(
             generic_submission_finish(&result, true, false, Interaction::Activated),
             None
         );
         assert_eq!(
-            no_submission_message(&json!({"reason":"generic_submission_unknown"})),
+            no_submission_message(Some(&Reason::GenericSubmissionUnknown)),
             "粘贴结果未确认，请先检查目标，避免重复粘贴"
         );
     }
 
     #[test]
     fn unwritten_busy_is_close_only_but_requested_close_and_new_session_win() {
-        let mut result = json!({"clipboard_written":false,"reason":"clipboard_capture_busy","request_cancelled":false});
+        let mut result = outcome(None, Some("clipboard_capture_busy"), false, false);
         assert_eq!(
             no_submission_finish(&result, true, Interaction::Activated),
             Some(NoSubmissionFinish::CloseOnly)
         );
         // 即使busy已产出，UI接收前的Esc也以当前取消标记为准。
-        result["request_cancelled"] = json!(true);
+        result.request_cancelled = true;
         assert_eq!(
             no_submission_finish(&result, true, Interaction::Passive),
             Some(NoSubmissionFinish::CloseRequested)
@@ -1996,12 +2137,12 @@ mod tests {
             no_submission_finish(&result, false, Interaction::Passive),
             None
         );
-        result["reason"] = json!("request_cancelled");
+        result.reason = Some(Reason::RequestCancelled);
         assert_eq!(
             no_submission_finish(&result, true, Interaction::Passive),
             Some(NoSubmissionFinish::CloseRequested)
         );
-        result["clipboard_written"] = json!(true);
+        result.clipboard_written = true;
         assert_eq!(
             no_submission_finish(&result, true, Interaction::Passive),
             None
@@ -2011,25 +2152,13 @@ mod tests {
     }
 
     #[test]
-    fn experiment_flag_only_accepts_one() {
-        assert!(flag_enabled(Some("1")));
-        assert!(flag_enabled(Some(" 1 ")));
-        for value in [
-            None,
-            Some(""),
-            Some("0"),
-            Some("true"),
-            Some("yes"),
-            Some("11"),
-        ] {
-            assert!(!flag_enabled(value), "{value:?}");
-        }
-    }
-
-    #[test]
     fn written_native_not_submitted_result_keeps_only_a_close_entry() {
-        let result = json!({"paste_result":"native_not_submitted",
-            "clipboard_written":true,"reason":"native_clipboard_busy","request_cancelled":false});
+        let result = outcome(
+            Some(PasteResult::NativeNotSubmitted),
+            Some("native_clipboard_busy"),
+            true,
+            false,
+        );
         assert_eq!(
             no_submission_finish(&result, true, Interaction::Activated),
             Some(NoSubmissionFinish::CloseOnly)
@@ -2049,8 +2178,12 @@ mod tests {
                         Interaction::Passive,
                         Interaction::CloseOnly,
                     ] {
-                        let result = json!({"paste_result":"native_not_submitted", "clipboard_written":written,
-                            "reason":"native_clipboard_busy", "request_cancelled":cancelled});
+                        let result = outcome(
+                            Some(PasteResult::NativeNotSubmitted),
+                            Some("native_clipboard_busy"),
+                            written,
+                            cancelled,
+                        );
                         let expected =
                             if !current || (cancelled && interaction != Interaction::Passive) {
                                 NoSubmissionFinish::Ignore
@@ -2075,20 +2208,24 @@ mod tests {
             "native_clipboard_close_failed",
         ] {
             assert_eq!(
-                no_submission_message(&json!({"reason":reason})),
+                no_submission_message(Some(&Reason::from(reason))),
                 "剪贴板忙，本次未粘贴，请关闭面板后重新呼出"
             );
         }
         assert_eq!(
-            no_submission_message(&json!({"reason":"native_clipboard_changed"})),
+            no_submission_message(Some(&Reason::NativeClipboardChanged)),
             "剪贴板已变化，本次未粘贴，请关闭面板后重新呼出"
         );
     }
 
     #[test]
     fn written_cancelled_native_result_hides_quietly_and_late_session_is_ignored() {
-        let result = json!({"paste_result":"native_not_submitted", "clipboard_written":true,
-            "reason":"request_cancelled", "request_cancelled":true});
+        let result = outcome(
+            Some(PasteResult::NativeNotSubmitted),
+            Some("request_cancelled"),
+            true,
+            true,
+        );
         assert_eq!(
             no_submission_finish(&result, true, Interaction::Passive),
             Some(NoSubmissionFinish::CloseRequested)
@@ -2105,7 +2242,7 @@ mod tests {
     fn actual_native_error_shapes_are_terminal_without_reopening_a_legacy_retry() {
         use crate::paste::{
             native::{Completion, Submission},
-            request::{Outcome, native_outcome},
+            request::native_outcome,
         };
         for written in [false, true] {
             for reason in [
@@ -2116,12 +2253,15 @@ mod tests {
                 "request_cancelled",
             ] {
                 let cancelled = reason == "request_cancelled";
-                let mut result = json!({"clipboard_written":written,"paste_result":null,"reason":null,"request_cancelled":cancelled});
-                // execute 使用同一个映射，覆盖锁前/Service.write Err，而不是只构造新 Outcome 字符串。
-                result["paste_result"] = json!(native_outcome(Err(reason.to_owned()), &mut result));
-                assert_eq!(result["clipboard_written"], written);
-                assert_eq!(result["reason"], reason);
-                assert_eq!(result["paste_result"], "native_not_submitted");
+                // execute 使用同一个映射，覆盖锁前/Service.write Err，而不是只构造新的结论。
+                let result = reported(
+                    |report| native_outcome(Err(reason.to_owned()), report),
+                    written,
+                    cancelled,
+                );
+                assert_eq!(result.clipboard_written, written);
+                assert_eq!(result.reason, Some(Reason::from(reason)));
+                assert_eq!(result.result, Some(PasteResult::NativeNotSubmitted));
                 assert_eq!(
                     no_submission_finish(
                         &result,
@@ -2145,17 +2285,19 @@ mod tests {
             }
         }
         for submission in [Submission::Sent, Submission::Unknown] {
-            let mut result = json!({"clipboard_written":true,"request_cancelled":true});
-            let outcome = native_outcome(Ok(Completion::Submitted(submission)), &mut result);
-            assert_eq!(
-                outcome,
-                if submission == Submission::Sent {
-                    Outcome::Sent
-                } else {
-                    Outcome::NativeSubmissionUnknown
-                }
+            let result = reported(
+                |report| native_outcome(Ok(Completion::Submitted(submission)), report),
+                true,
+                true,
             );
-            result["paste_result"] = json!(outcome);
+            assert_eq!(
+                result.result,
+                Some(if submission == Submission::Sent {
+                    PasteResult::Sent
+                } else {
+                    PasteResult::NativeSubmissionUnknown
+                })
+            );
             assert_eq!(
                 no_submission_finish(&result, true, Interaction::Passive),
                 None
@@ -2164,7 +2306,7 @@ mod tests {
         // Legacy 没有调用 native_outcome，普通写失败继续走原有错误提示。
         assert_eq!(
             no_submission_finish(
-                &json!({"paste_result":null,"clipboard_written":false,"reason":"clipboard_write_failed"}),
+                &outcome(None, Some("clipboard_write_failed"), false, false),
                 true,
                 Interaction::Quick
             ),
@@ -2173,27 +2315,15 @@ mod tests {
     }
 
     #[test]
-    fn shown_payload_carries_the_experiment() {
-        assert_eq!(
-            Experiments {
-                search_box_focus: true
-            }
-            .payload(),
-            json!({"searchBoxFocus":true})
-        );
-        assert_eq!(
-            Experiments::default().payload(),
-            json!({"searchBoxFocus":false})
-        );
-    }
-
-    #[test]
     fn only_elevated_copy_only_results_keep_the_panel() {
         assert_eq!(ELEVATED_HINT_DWELL, Duration::from_secs(3));
         assert_eq!(
-            dwell_after_paste(
-                &json!({"paste_result":"copied_only","reason":"target_may_be_elevated"})
-            ),
+            dwell_after_paste(&outcome(
+                Some(PasteResult::CopiedOnly),
+                Some("target_may_be_elevated"),
+                false,
+                false
+            )),
             Some(ELEVATED_HINT_DWELL)
         );
         // 其他 copied_only 原因保持现状，不停留。
@@ -2206,39 +2336,58 @@ mod tests {
             "user_copy",
         ] {
             assert_eq!(
-                dwell_after_paste(&json!({"paste_result":"copied_only","reason":reason})),
+                dwell_after_paste(&outcome(
+                    Some(PasteResult::CopiedOnly),
+                    Some(reason),
+                    false,
+                    false
+                )),
                 None,
                 "{reason}"
             );
         }
         // 真发了键、或 Shift+Enter 只复制：不管原因字段写什么都不停留。
-        for result in ["copied", "sent", "confirmed"] {
+        for result in [
+            PasteResult::Copied,
+            PasteResult::Sent,
+            PasteResult::Confirmed,
+        ] {
             assert_eq!(
-                dwell_after_paste(
-                    &json!({"paste_result":result,"reason":"target_may_be_elevated"})
-                ),
+                dwell_after_paste(&outcome(
+                    Some(result),
+                    Some("target_may_be_elevated"),
+                    false,
+                    false
+                )),
                 None,
-                "{result}"
+                "{result:?}"
             );
         }
         // 没写进剪贴板（记录不存在、读库失败）和线程报错时结论为空，不停留。
         assert_eq!(
-            dwell_after_paste(
-                &json!({"paste_result":null,"reason":"record_missing","clipboard_written":false})
-            ),
+            dwell_after_paste(&Outcome::not_written(Reason::RecordMissing)),
             None
         );
-        assert_eq!(dwell_after_paste(&json!({})), None);
+        assert_eq!(dwell_after_paste(&outcome(None, None, false, false)), None);
         assert_eq!(
-            dwell_after_paste(&json!({"paste_result":"copied", "clipboard_written":true,
-            "passive_hint":true})),
+            dwell_after_paste(&{
+                let mut result = outcome(Some(PasteResult::Copied), None, true, false);
+                result.passive_hint = true;
+                result
+            }),
             Some(ELEVATED_HINT_DWELL)
         );
         assert_eq!(
-            dwell_after_paste(
-                &json!({"paste_result":"copied_only", "reason":"target_may_be_elevated",
-            "clipboard_written":true, "passive_hint":true, "request_cancelled":true})
-            ),
+            dwell_after_paste(&{
+                let mut result = outcome(
+                    Some(PasteResult::CopiedOnly),
+                    Some("target_may_be_elevated"),
+                    true,
+                    true,
+                );
+                result.passive_hint = true;
+                result
+            }),
             None
         );
     }

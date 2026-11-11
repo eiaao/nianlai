@@ -9,7 +9,6 @@ pub mod hash;
 pub mod hook;
 pub mod image;
 pub mod ime;
-mod ime_association;
 pub mod memory;
 pub mod paste;
 pub mod time;

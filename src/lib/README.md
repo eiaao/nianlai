@@ -1,6 +1,6 @@
 # 前端结构（src/lib）
 
-M0-7 把原来一个文件的 `src/App.svelte` 拆成下面这些文件，外观和行为与拆分前一致。M1 按正式设计稿重做界面时，在这个结构上改。
+这份说明讲前端各文件管什么、状态怎么流。后端见 [`src-tauri/README.md`](../../src-tauri/README.md)。
 
 ## 目录
 
@@ -9,7 +9,7 @@ M0-7 把原来一个文件的 `src/App.svelte` 拆成下面这些文件，外观
 | `../main.ts`、`../app.css` | 面板入口（`index.html`）；`app.css` 只放全局基础样式 |
 | `theme.css` | v7 主题 tokens（A/B/C 材质、共享状态色、动效时长），深浅两套；面板和设置窗口共用 |
 | `preferences.ts` | 布局、主题、动效、密度的类型、默认值与设置页应用逻辑；alpha.3 有效布局为 A/B/C |
-| `ipc.ts` | 和后端的全部往来：命令（invoke）、事件（listen）、载荷类型。命令名、事件名只在这里出现 |
+| `ipc.ts` | 和后端的全部往来：命令（invoke）、事件（listen）、载荷类型。命令名、事件名只在这里出现（例外：设置窗口的 `settings:navigate` 在 `Settings.svelte` 里直接监听） |
 | `state.svelte.ts` | `PanelState`：会话、模式、收藏顺序、可见/可操作序列、选中项、搜索词、预览与粘贴反馈 |
 | `panel/Panel.svelte` | 三布局根组件：共享搜索输入框、记录横幅、布局宿主和页脚；grid 行显式绑定 |
 | `panel/SplitPreview.svelte` | A 的索引 + 常驻预览与工具栏 |
@@ -17,12 +17,28 @@ M0-7 把原来一个文件的 `src/App.svelte` 拆成下面这些文件，外观
 | `panel/CardFlow.svelte`、`panel/FlowCard.svelte` | C 的弹簧轨道、附近卡片、RECENT 分隔线、信息条和细节浮层 |
 | `panel/SearchBox.svelte` | 搜索框、搜索态与结果计数 |
 | `panel/HistoryList.svelte`、`panel/HistoryItem.svelte` | 收藏/最近分区、双行索引项、来源图标、星标和搜索高亮 |
-| `panel/Preview.svelte` | 文本/长文/代码/链接/图片元信息/颜色/文件预览；图片资源 URL 尚未由后端提供 |
+| `panel/Preview.svelte` | 文本/长文/代码/链接/图片/颜色/文件预览；图片用 `get_image` 取缩略图（480px）或原图，文件逐个显示是否还在 |
 | `panel/PreviewOverlay.svelte` | 原窗口内的完整预览浮层 |
 | `panel/RecordBanner.svelte`、`panel/Footer.svelte` | J01 记录状态、上次结果、仅复制/失败结果条 |
 | `panel/SourceIcon.svelte` | `convertFileSrc` 图标与首字形降级 |
 | `panel/motion.ts`、`panel/SelectionRail.svelte` | 共用 SpringValue 与选中指示轨 |
-| `../settings/`、`/settings.html` | 设置窗口：通用页的布局、呼出快捷键、主题、动效、紧凑密度；其余分区占位 |
+| `../settings/`、`/settings.html` | 设置窗口，见下面“设置窗口” |
+
+## 设置窗口（src/settings）
+
+| 文件 | 作用 |
+|---|---|
+| `Settings.svelte` | 窗口外壳和导航；“通用”页（布局、快捷键、主题、动效、密度）；“关于”页还是占位 |
+| `CapturePage.svelte` | 隐私与记录：暂停和“忽略下一次复制”、排除应用、敏感内容规则、记录哪些类型、文字上限、临时内容等待时间 |
+| `StoragePage.svelte` | 数据与备份：占用统计、垃圾清理、快照、回收站、备份导出导入的入口 |
+| `SnapshotSection.svelte`、`TrashSection.svelte`、`ImagePicker.svelte` | 数据与备份页里的快照列表、回收站、图片清理 |
+| `BackupExport.svelte`、`BackupImport.svelte` | 备份导出、导入向导（三步校验，合并或覆盖） |
+| `OrganizePage.svelte` | 整理：收藏排序、标题和备注、粘贴后是否移到最前 |
+| `InteractionPage.svelte` | 交互：呼出位置、单击和中键行为 |
+| `HotkeyEditor.svelte`、`ConfirmButton.svelte`、`RollingNumber.svelte` | 快捷键录制、两步确认按钮、滚动数字 |
+| `format.ts`、`settings.css` | 大小 / 数量 / 时间的显示格式；设置页共用样式 |
+
+设置页的组件直接调 `ipc.ts` 里的命令，没有像面板那样的集中状态对象；设置保存后后端广播 `settings:changed`，面板和设置窗口都据此更新。
 
 ## 状态流向
 
@@ -71,7 +87,7 @@ M0-7 把原来一个文件的 `src/App.svelte` 拆成下面这些文件，外观
 3. 普通 Quick 进入搜索：聚焦搜索框后等两帧（两次 requestAnimationFrame）再发 `search_ready`，后端才补发首键。Activated 沿用已聚焦的同一输入框，握手期间不再 focus，后端只结束空缓冲流程，不补发或做会打断组合的焦点探针。
 4. `onbeforeinput` 上报补发后的第一个输入是直接上屏还是进了输入法（只报类型和时序，不报内容）。
 5. Ctrl+Enter 粘贴为文本（`paste_item` 的 mode 为 `text`）；输入法上屏后 50 ms 内的 Ctrl+Enter、Ctrl+1–9、Enter、Esc、↑↓ 不处理。
-6. `class:quiet` 和 `caret-color: transparent`：实验开关 NIANLAI_G0_SEARCHBOX_FOCUS 开着时，普通 `quick` 下搜索框持有焦点但不显示光标和焦点色；Activated 可编辑以承载自然首字，数字与提交键通过 `preventDefault` 保持快速取用语义。
+6. `caret-color: transparent`：搜索框默认不显示光标，只有 `.active`（搜索态）才显示；普通 `quick` 下搜索框是 `readonly`、不持有焦点，按键由后端钩子转发。Activated 可编辑以承载自然首字，数字与提交键通过 `preventDefault` 保持快速取用语义。
 7. 搜索结果高亮按 `searchedQuery`（已经拿到回复的那次搜索词），不按正在输入的 `query`。
 8. M0 批准的激活式交互：粘贴结果带 `hint_dwell_ms` 时转为 `passive`，只显示后端 `hint_message` 和明确鼠标关闭入口，`busy` 保持到收起。没有消息时用中性的“已复制，请先点击目标输入位置，再按 Ctrl+V”，不猜管理员权限或原输入控件已恢复。归还前台后的被动提示不承诺吞键、Ctrl+V 或 Esc 立即关闭，也不凭提示结束宣称已粘贴。
 9. M0-5 页脚版本号：启动时 `getVersion()`（`ipc.appVersion`）。

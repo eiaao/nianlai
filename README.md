@@ -101,6 +101,7 @@ cargo test --workspace
 pnpm check
 node tools/test-panel-key-repeat.mjs
 python -X utf8 -I tools/check_release_versions.py
+python -X utf8 -I tools/check_ps1_encoding.py
 python -X utf8 -I -m unittest discover -s tools -p "test_release*.py" -v
 ```
 
