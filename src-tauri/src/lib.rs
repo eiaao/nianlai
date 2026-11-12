@@ -118,7 +118,7 @@ struct SnapshotState {
 fn store_directory(history: &History) -> Result<std::path::PathBuf, String> {
     history
         .store_directory()
-        .ok_or_else(|| "历史库未打开，暂时不能使用快照".to_owned())
+        .ok_or_else(|| "历史库未打开，暂时不能使用存档".to_owned())
 }
 
 #[tauri::command]
@@ -139,7 +139,7 @@ async fn create_snapshot(history: State<'_, History>, app: AppHandle) -> Result<
         history::snapshots::manual(&directory, &app.state::<Controller>().logger)
     })
     .await
-    .map_err(|_| "快照任务未完成，请重试".to_owned())?
+    .map_err(|_| "存档任务未完成，请重试".to_owned())?
 }
 
 #[tauri::command]
@@ -476,6 +476,68 @@ fn paste_item(
     )
 }
 #[tauri::command]
+fn start_queue(
+    app: AppHandle,
+    session: u64,
+    ids: Vec<usize>,
+    automatic: bool,
+    mode: paste::request::Mode,
+    selection: Option<paste::permit::Selection>,
+) -> Result<(), String> {
+    // 数量、重复在这里就用中文直接回给前端；面板里还会再查一次。
+    paste::queue::validate_ids(&ids)?;
+    if mode == paste::request::Mode::Copy {
+        return Err("逐张粘贴只支持粘贴模式，请重新选择。".into());
+    }
+    panel::dispatch(
+        &app,
+        Action::StartQueue {
+            session,
+            ids,
+            automatic,
+            mode,
+            selection,
+        },
+    )
+}
+
+#[tauri::command]
+fn cancel_queue(app: AppHandle, session: u64) -> Result<(), String> {
+    panel::dispatch(&app, Action::QueueCancel { session })
+}
+
+// 命中区域和避让外形都用 CSS 像素、窗口客户区坐标；后端按窗口 DPI 换算。
+// - regions：点击区域（窗口裁剪），空数组按清除处理；
+// - avoid：当前姿态的避让外形 {left, top, width, height}，只用于定位；省略或 null 时绝不挪窗口；
+// - session：可省，给出时只对当前会话生效；
+// - scale：旧调用传的 devicePixelRatio，仍接受但不再使用。
+// 坐标无效直接报错，不派发。
+#[tauri::command]
+fn set_hit_regions(
+    app: AppHandle,
+    regions: Vec<platform::HitRegion>,
+    armed: Option<bool>,
+    session: Option<u64>,
+    scale: Option<f64>,
+    avoid: Option<platform::window::Avoid>,
+) -> Result<(), String> {
+    let _ = scale;
+    platform::window::validate_hit_regions(&regions)?;
+    if let Some(avoid) = avoid {
+        platform::window::convert_avoid(avoid, 1.0)?;
+    }
+    panel::dispatch(
+        &app,
+        Action::SetHitRegions {
+            session,
+            regions,
+            armed: armed.unwrap_or(true),
+            avoid,
+        },
+    )
+}
+
+#[tauri::command]
 fn report_painted(app: AppHandle, session: u64) -> Result<(), String> {
     panel::dispatch(
         &app,
@@ -573,6 +635,9 @@ pub fn run() {
             retry_activation,
             hide_panel,
             paste_item,
+            start_queue,
+            cancel_queue,
+            set_hit_regions,
             report_painted,
             report_search_input,
             settings_window::open_settings

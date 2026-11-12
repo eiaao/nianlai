@@ -690,6 +690,8 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
                 0x24 => Some("Home"),
                 0x23 => Some("End"),
                 0x0D => Some("Enter"),
+                0x09 => Some("Tab"),
+                0x08 => Some("Backspace"),
                 0x1B => Some("Escape"),
                 0x20 => Some("Space"),
                 0x2E => Some("Delete"),
@@ -700,10 +702,10 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
                 0x35 | 0x65 => Some("5"),
                 0x36 | 0x66 => Some("6"),
                 0x37 | 0x67 => Some("7"),
-                0x38 | 0x68 => Some("8"),
-                0x39 | 0x69 => Some("9"),
                 _ => None,
             }
+        } else if mods == (Modifiers::CONTROL | Modifiers::SHIFT) && vk == 0x0D {
+            Some("Ctrl+Shift+Enter")
         } else if mods == Modifiers::SHIFT && vk == 0x0D {
             Some("Shift+Enter")
         } else if mods == Modifiers::CONTROL && vk == 0x0D {
@@ -733,6 +735,7 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
                 name,
                 "Enter"
                     | "Shift+Enter"
+                    | "Ctrl+Shift+Enter"
                     | "Ctrl+Enter"
                     | "Ctrl+D"
                     | "Ctrl+Z"
@@ -740,6 +743,8 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
                     | "Z"
                     | "Delete"
                     | "Escape"
+                    | "Tab"
+                    | "Backspace"
                     | "Space"
                     | "1"
                     | "2"
@@ -748,8 +753,6 @@ unsafe extern "system" fn keyboard(code: i32, wparam: WPARAM, lparam: LPARAM) ->
                     | "5"
                     | "6"
                     | "7"
-                    | "8"
-                    | "9"
             ) {
                 // 删除收藏要按住 Delete（B12）：按下先报一次，松开照常投递 "Delete"，前端据此计时。
                 if name == "Delete" && first_press {
@@ -941,6 +944,9 @@ fn report_drain(
 }
 
 unsafe extern "system" fn mouse(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    // 鼠标移动直接放过：不加锁、不换算坐标、不碰窗口。只有按下时判断是不是点在面板外。
+    // 点击穿透完全由主线程设置的窗口区域负责；这里不改任何窗口样式（跨线程改样式会同步等
+    // 主线程，而主线程收面板时正在等本线程退出）。
     if code >= 0
         && matches!(
             wparam.0 as u32,
@@ -950,15 +956,18 @@ unsafe extern "system" fn mouse(code: i32, wparam: WPARAM, lparam: LPARAM) -> LR
         let mouse = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
         CONTEXT.with(|context| {
             if let Some(context) = context.borrow().as_ref() {
+                // 用窗口当前位置（呼出后可能为让开光标行挪过）；GetWindowRect 不发消息。
                 let r = context.bounds;
-                if mouse.pt.x < r.left
-                    || mouse.pt.x >= r.right
-                    || mouse.pt.y < r.top
-                    || mouse.pt.y >= r.bottom
+                let current = super::window::rect(context.window).unwrap_or(r);
+                let (x, y) = (mouse.pt.x, mouse.pt.y);
+                if x < current.left
+                    || x >= current.right
+                    || y < current.top
+                    || y >= current.bottom
+                    || super::window::passes_through(context.window, x, y)
                 {
-                    let current = super::window::rect(context.window).unwrap_or_default();
                     let _ = context.sender.try_send(HookEvent::Outside {
-                        point: [mouse.pt.x, mouse.pt.y],
+                        point: [x, y],
                         bounds: [r.left, r.top, r.right, r.bottom],
                         current: [current.left, current.top, current.right, current.bottom],
                     });

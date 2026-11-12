@@ -12,7 +12,7 @@ export type HistoryItem = {
   source_name: string | null; source_icon: string | null;
   // M2-3：文件条目的失效检查结论；文件都在时没有这个字段。
   file_state?: FileMark;
-  // M2-6：收藏的标题和备注（E04）；没有时不带。
+  // M2-6：常用的标题和备注（E04）；没有时不带。
   title?: string;
   note?: string;
 };
@@ -37,7 +37,6 @@ export type HistorySnapshot = { items: HistoryItem[]; total: number; recording: 
 export type AppSettings = {
   hotkey?: string;
   theme?: "system" | "light" | "dark";
-  panel?: { layout?: "a" | "b" | "c"; density?: "compact" | "comfortable" };
   feedback?: { motion?: "none" | "soft" | "spring"; follow_system?: boolean };
   capture?: Partial<CaptureSettings>;
   snapshots?: { max_mb?: number };
@@ -75,6 +74,7 @@ export type SearchReply = { request_id: number; items: HistoryItem[] };
 export type SessionEvent = { session: number };
 export type Timing = SessionEvent & { hotkeyToShowMs: number; showToPaintMs?: number };
 export type PanelInteraction = "quick" | "activation_pending" | "activation_failed" | "activated" | "passive" | "close_only";
+// panel:shown 还带 caret / placement（后端避让结果），前端不用，所以不声明。
 export type PanelShown = Timing & { history: HistorySnapshot; interaction: PanelInteraction; foregroundRevision: number; terminal_feedback?: boolean };
 export type PanelInteractionEvent = SessionEvent & { interaction: PanelInteraction };
 export type ForegroundRevision = SessionEvent & { revision: number };
@@ -82,6 +82,22 @@ export type PanelKey = SessionEvent & { key: string };
 export type PanelMode = SessionEvent & { mode: "search" };
 export type PanelError = SessionEvent & { message: string; close_only?: boolean };
 export type PasteMode = "paste" | "copy" | "text";
+export type QueueState = SessionEvent & {
+  remaining: number;
+  total: number;
+  automatic: boolean;
+  busy: boolean;
+  error?: string | null;
+  /** 逐张放时跳过（已不在、复制模式不支持等）的张数。 */
+  skipped?: number;
+  /** 队列结束的原因名（done / cancelled / escape 是正常结束，其余如 idle_timeout 是异常停止），只在结束时出现。 */
+  stopped?: string | null;
+  /** 异常停止时没放出去的条目 id（按原顺序）。 */
+  remaining_ids?: number[];
+};
+export type HitRegion = { left: number; top: number; right: number; bottom: number };
+/** 避让外形（窗口客户区 CSS 像素）：后端只按它挪窗口避开光标行；regions 只管点击。 */
+export type Outline = { left: number; top: number; width: number; height: number };
 export type SearchSelection = Readonly<{ revision: number; nonce: number }>;
 export type PasteResult = SessionEvent & {
   paste_result: "copied" | "sent" | "confirmed" | "copied_only" | "native_submission_unknown";
@@ -162,6 +178,13 @@ export const searchReady = (session: number) => invoke("search_ready", { session
 export const hidePanel = (session: number) => invoke("hide_panel", { session });
 export const pasteItem = (session: number, id: number, mode: PasteMode, selection?: SearchSelection) =>
   invoke("paste_item", { session, id, mode, ...(selection ? { selection } : {}) });
+export const startQueue = (session: number, ids: number[], automatic: boolean, mode: PasteMode, selection?: SearchSelection) =>
+  invoke("start_queue", { session, ids, automatic, mode, ...(selection ? { selection } : {}) });
+export const cancelQueue = (session: number) => invoke("cancel_queue", { session });
+// 原生命中区域使用 CSS 像素；后端按当前 devicePixelRatio 转成窗口客户区坐标。
+// session 用于后端丢弃旧会话迟到的上报。avoid：undefined 表示这次不带（沿用上次），null 表示没有避让外形。
+export const setHitRegions = (regions: HitRegion[], scale: number, armed = true, session?: number, avoid?: Outline | null) =>
+  invoke<void>("set_hit_regions", { regions, scale, armed, ...(session === undefined ? {} : { session }), ...(avoid === undefined ? {} : { avoid }) });
 export const reportPainted = (session: number) => invoke("report_painted", { session });
 // 只报输入类型和时序，不报内容。
 export const reportSearchInput = (session: number, inputType: string, composing: boolean, afterReadyMs: number) =>
@@ -178,7 +201,8 @@ export const onForegroundRevision = on<ForegroundRevision>("panel:foreground-rev
 export const onPanelKey = on<PanelKey>("panel:key");
 export const onHistoryChanged = on<SessionEvent>("panel:history-changed");
 export const onPanelMode = on<PanelMode>("panel:mode");
-export const onPanelHidden = on<SessionEvent>("panel:hidden");
+export const onPanelHidden = on<SessionEvent & { queue?: boolean }>("panel:hidden");
+export const onQueueChanged = on<QueueState>("queue:changed");
 export const onPanelTiming = on<Timing>("panel:timing");
 export const onPanelError = on<PanelError>("panel:error");
 export const onPasteResult = on<PasteResult>("panel:paste-result");

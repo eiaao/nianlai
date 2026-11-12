@@ -10,7 +10,7 @@ use std::{
 };
 use tauri::WebviewWindow;
 use webview2_com::{Microsoft::Web::WebView2::Win32::*, TrySuspendCompletedHandler};
-use windows::core::Interface;
+use windows::{Win32::Graphics::Dwm::DwmFlush, core::Interface};
 
 #[derive(Default)]
 pub struct MemoryState {
@@ -71,6 +71,14 @@ pub fn set_visible_with_completion(
         let controller = webview.controller();
         let outcome = (|| -> windows::core::Result<()> {
             controller.SetIsVisible(visible)?;
+            if !visible {
+                // SetIsVisible 停止 WebView 提交；DwmFlush 等已排队的合成更新落地。
+                // 调用方随后才隐藏原生透明窗口，避免最后一帧被 DWM 留成残影。
+                // 刷新失败不阻断原生隐藏，也不改变下面的内存挂起策略。
+                if let Err(error) = DwmFlush() {
+                    logger.event("webview_composition_flush_failed", json!({"session":session,"error":error.to_string()}));
+                }
+            }
             let core = controller.CoreWebView2()?;
             let suspend = core.cast::<ICoreWebView2_3>()?;
             if visible {

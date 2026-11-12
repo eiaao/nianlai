@@ -10,7 +10,7 @@
   import type { AppSettings, CaptureSettings, InteractionSettings, SettingsUpdate } from "../lib/ipc";
   import {
     applyPreferences, DEFAULT_PREFERENCES, normalizePreferences,
-    type DensityPreference, type MotionPreference, type Preferences, type ThemePreference,
+    type MotionPreference, type Preferences, type ThemePreference,
   } from "../lib/preferences";
 
   const pages = [
@@ -109,7 +109,7 @@
 
 <section class="settings" aria-label="拈来设置">
   <nav class="nav" aria-label="设置分区">
-    <div class="nav-brand"><span class="nav-mark">N</span><span><strong>拈来</strong><small>取历史之一缕，付当前之一键</small><em>SCOPE / SETTINGS</em></span></div>
+    <div class="nav-brand"><span class="nav-mark">N</span><span><strong>拈来</strong><small>取历史之一缕，付当前之一键</small><em>本机设置</em></span></div>
     {#each pages as entry}
       <button type="button" class:active={page === entry.id} aria-current={page === entry.id ? "page" : undefined} onclick={() => navigate(entry.id)}>{entry.label}</button>
     {/each}
@@ -117,39 +117,17 @@
   </nav>
 
   <main class="main">
-    <header class="main-head"><h1>{pages.find((entry) => entry.id === page)?.label}</h1><span>SNAPSHOT / LOCAL ONLY</span></header>
+    <header class="main-head"><h1>{pages.find((entry) => entry.id === page)?.label}</h1><span>本地记录 · 仅此设备</span></header>
     <div class="content">
       {#if page === "general"}
         <section class="page">
-          <div><h2>面板与呼出</h2><p class="page-intro">布局、主题和动效是独立维度。A/B/C 共用历史、收藏、搜索与选中项。</p></div>
-          <div class="group">
-            <span class="group-title">面板布局</span>
-            <div class="layout-options" role="radiogroup" aria-label="面板布局">
-              <button class="layout-option" type="button" role="radio" aria-checked={preferences.layout === "a"} disabled={loading || saving} onclick={() => save({ panel: { layout: "a" } }, "已使用分栏预览")}>
-                <span class="layout-check">{preferences.layout === "a" ? "✓" : ""}</span>
-                <svg class="mini" viewBox="0 0 180 62" aria-hidden="true"><rect x="66" y="19" width="102" height="34" fill="currentColor" opacity=".12"/><path d="M62 0v62M0 16h180M74 25h92M74 35h74M74 45h58M10 27h40M10 39h40M10 51h40" stroke="currentColor" fill="none"/></svg>
-                <strong>分栏预览</strong><small>默认。窄列表与常驻大预览，适合核对内容。</small>
-              </button>
-              <button class="layout-option" type="button" role="radio" aria-checked={preferences.layout === "b"} disabled={loading || saving} onclick={() => save({ panel: { layout: "b" } }, "已使用极简列表")}>
-                <span class="layout-check">{preferences.layout === "b" ? "✓" : ""}</span>
-                <svg class="mini" viewBox="0 0 180 62" aria-hidden="true"><path d="M0 19h180" stroke="currentColor" stroke-width="3"/><path d="M12 9h130M12 30h150M12 42h138M12 54h120" stroke="currentColor" fill="none"/><path d="M4 25v34" stroke="currentColor" stroke-width="3"/></svg>
-                <strong>极简列表</strong><small>大搜索行、排印列表与底部预览抽屉。</small>
-              </button>
-              <button class="layout-option" type="button" role="radio" aria-checked={preferences.layout === "c"} disabled={loading || saving} onclick={() => save({ panel: { layout: "c" } }, "已使用卡片流")}>
-                <span class="layout-check">{preferences.layout === "c" ? "✓" : ""}</span>
-                <svg class="mini" viewBox="0 0 180 62" aria-hidden="true"><path d="M0 15h180M0 51h180" stroke="currentColor" fill="none"/><path d="M18 17h34v34H18zM128 17h34v34h-34z" fill="currentColor" opacity=".16"/><path d="M66 7h48v48H66z" fill="currentColor" opacity=".28" stroke="currentColor" stroke-width="2"/></svg>
-                <strong>卡片流</strong><small>视觉缩略卡横向移动，Space 查看完整细节。</small>
-              </button>
-            </div>
-          </div>
-
+          <div><h2>面板与呼出</h2><p class="page-intro">面板使用手牌布局；主题和动效独立保存。</p></div>
           <HotkeyEditor {hotkey} disabled={loading || saving} onsave={save} />
 
           <div class="group"><span class="group-title">外观与反馈</span><div class="card">
-            <label class="setting"><span class="setting-copy"><strong>主题</strong><small>跟随系统，或独立固定为浅色 / 深色；切换布局不会覆盖它。</small></span><select value={preferences.theme} disabled={loading || saving} onchange={(event) => save({ theme: event.currentTarget.value as ThemePreference }, "主题已保存并应用")}><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></label>
+            <label class="setting"><span class="setting-copy"><strong>主题</strong><small>跟随系统，或独立固定为浅色 / 深色；只改变配色，不改变手牌操作。</small></span><select value={preferences.theme} disabled={loading || saving} onchange={(event) => save({ theme: event.currentTarget.value as ThemePreference }, "主题已保存并应用")}><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></label>
             <label class="setting"><span class="setting-copy"><strong>动效强度</strong><small>默认“弹簧”，动画最完整；“关闭”后直接落位。</small></span><select value={preferences.motion} disabled={loading || saving} onchange={(event) => save({ feedback: { motion: event.currentTarget.value as MotionPreference } }, "动效强度已保存并应用")}><option value="spring">弹簧</option><option value="soft">柔和</option><option value="none">关闭</option></select></label>
             <label class="setting"><span class="setting-copy"><strong>跟随系统的“减少动画效果”</strong><small>打开后，Windows 关掉动画效果时（例如远程桌面连接）拈来也只做简单淡出。{systemReduced ? "系统现在关着动画效果。" : ""}</small></span><input class="switch" type="checkbox" role="switch" checked={preferences.followSystemMotion} disabled={loading || saving} onchange={(event) => save({ feedback: { follow_system: event.currentTarget.checked } }, event.currentTarget.checked ? "已改为跟随系统的动画设置" : "已改为始终播放动画")}></label>
-            <label class="setting"><span class="setting-copy"><strong>列表密度</strong><small>v0.1 提供紧凑密度；舒适档将在后续版本开放。</small></span><select value={preferences.density} disabled={loading || saving} onchange={(event) => save({ panel: { density: event.currentTarget.value as DensityPreference } }, "列表密度已保存")}><option value="compact">紧凑</option><option value="comfortable" disabled>舒适（后续版本）</option></select></label>
           </div></div>
         </section>
       {:else if page === "record"}
@@ -186,16 +164,9 @@
   .nav-foot { margin-top: auto; padding: 13px 12px 0; border-top: 1px solid var(--settings-line); color: var(--settings-muted); font-size: 10px; line-height: 1.6; }
   .main { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
   .main-head { height: 70px; flex: none; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 28px; border-bottom: 1px solid var(--settings-line); }
-  .main-head h1 { margin: 0; font: 600 21px var(--font-display); }
+  .main-head h1 { margin: 0; font: 600 20px var(--font-ui); }
   .main-head > span { color: var(--settings-muted); font: 9px var(--font-mono); letter-spacing: .08em; }
   .content { flex: 1; min-height: 0; overflow: auto; padding: 24px 28px 30px; }
-  .layout-options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
-  .layout-option { position: relative; display: grid; align-content: start; gap: 9px; padding: 12px; border: 1px solid var(--settings-line); border-radius: var(--radius-sm); background: transparent; color: var(--settings-text); text-align: left; }
-  .layout-option[aria-checked="true"] { border-color: var(--settings-accent); background: var(--settings-selected); box-shadow: inset 3px 0 0 var(--settings-accent); }
-  .layout-option strong { font-size: 12px; }
-  .layout-option small { color: var(--settings-muted); font-size: 10px; line-height: 1.5; }
-  .layout-check { position: absolute; right: 9px; top: 8px; color: var(--settings-accent); font: 11px var(--font-mono); }
-  .mini { width: 100%; height: 62px; border: 1px solid currentColor; color: var(--settings-accent); background: var(--a-preview); }
   footer { min-height: 34px; flex: none; padding: 9px 28px; border-top: 1px solid var(--settings-line); color: var(--settings-muted); font-size: 10px; }
   footer.failed { color: var(--state-critical); }
   .placeholder { color: var(--settings-muted); font-size: 12px; line-height: 1.8; }
@@ -203,7 +174,6 @@
   .placeholder p { max-width: 480px; margin: 0; }
   @media (max-width: 720px) {
     .settings { grid-template-columns: 150px minmax(0, 1fr); }
-    .layout-options { grid-template-columns: 1fr; }
     .main-head, .content, footer { padding-left: 18px; padding-right: 18px; }
     .setting { align-items: flex-start; flex-direction: column; gap: 9px; }
     select { width: 100%; }

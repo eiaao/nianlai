@@ -57,7 +57,7 @@
   <div class="setting">
     <span class="setting-copy">
       {#if summary}
-        <strong>包含 {count(summary.items)} 条历史 · {count(summary.favorites)} 条收藏 · {count(summary.icons)} 个来源图标</strong>
+        <strong>包含 {count(summary.items)} 条历史 · {count(summary.favorites)} 条常用 · {count(summary.icons)} 个来源图标</strong>
         <small>回收站里的不导出。文件类条目只有路径，不包含文件本身</small>
       {:else if !error}
         <strong>正在统计…</strong>
@@ -74,7 +74,7 @@
   </div>
   {#if result}
     <div class="setting result" role="status">
-      <span class="setting-copy"><strong>已导出 {size(result.bytes)}</strong><small>{count(result.items)} 条历史 · {count(result.favorites)} 条收藏 · {count(result.icons)} 个图标</small></span>
+      <span class="setting-copy"><strong>已导出 {size(result.bytes)}</strong><small>{count(result.items)} 条历史 · {count(result.favorites)} 条常用 · {count(result.icons)} 个图标</small></span>
       <button type="button" class="link" onclick={() => result && ipc.revealInExplorer(result.path).catch((value) => { error = message(value); })}>在资源管理器里显示</button>
     </div>
   {/if}

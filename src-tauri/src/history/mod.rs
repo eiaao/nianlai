@@ -107,11 +107,11 @@ fn memory_store(hash: Hash) -> Store {
 // 把存储层的错误码翻成给用户看的话。
 fn label_error(error: nianlai_store::Error) -> String {
     match error {
-        nianlai_store::Error::Invalid("reorder_duplicate") => "收藏顺序里有重复的条目".into(),
+        nianlai_store::Error::Invalid("reorder_duplicate") => "常用顺序里有重复的条目".into(),
         nianlai_store::Error::Invalid("reorder_mismatch") => {
-            "收藏顺序与当前收藏不一致，请刷新后重试".into()
+            "常用顺序与当前常用不一致，请刷新后重试".into()
         }
-        nianlai_store::Error::Invalid("not_favorite") => "只有收藏的条目才能设置标题和备注".into(),
+        nianlai_store::Error::Invalid("not_favorite") => "只有常用的条目才能设置标题和备注".into(),
         other => user_message(&other),
     }
 }
@@ -136,7 +136,7 @@ pub(crate) fn user_message(error: &nianlai_store::Error) -> String {
             "数据文件是只读的或没有权限，请检查数据目录的权限".into()
         }
         Error::Sqlite(code) if matches!(code & 0xff, 11 | 26) => {
-            "历史库文件已损坏，可以从快照恢复".into()
+            "历史库文件已损坏，可以从存档恢复".into()
         }
         Error::Sqlite(code) if code & 0xff == 14 => {
             "找不到或无法打开数据文件，可能已被移动、删除或被占用".into()
@@ -1018,7 +1018,7 @@ mod startup_tests {
             // 错误：重复、非收藏、缺项；不改变顺序，并给中文提示。
             for bad in [vec![c, c, b], vec![c, a, 9999], vec![c, a]] {
                 let error = shared.reorder_favorites(&bad).err().unwrap();
-                assert!(error.contains("收藏"), "{error}");
+                assert!(error.contains("常用"), "{error}");
                 assert_eq!(order(shared), vec![c, a, b]);
             }
             // 标题备注：清理、上限、非收藏报错。

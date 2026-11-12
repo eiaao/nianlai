@@ -4,15 +4,16 @@
   import type { HistoryItem, ImageView, PathCheck, TextChunk } from "../ipc";
   import { count } from "../format";
   import { formatTime, type PanelState } from "../state.svelte";
-  import { colorValue, linkParts, relativeTime, sourceName, visualKind } from "./content";
+  import { cardKind, colorValue, linkParts, relativeTime, sourceName } from "../cards";
   import { SpringValue } from "./motion";
 
   let { panel, item, expanded = false, compact = false }: { panel: PanelState; item: HistoryItem | null; expanded?: boolean; compact?: boolean } = $props();
   let root: HTMLDivElement;
   let previousId: number | null | undefined;
-  const kind = $derived(item ? visualKind(item) : "short");
-  const link = $derived(item ? linkParts(item) : null);
-  const color = $derived(item ? colorValue(item) : null);
+  const kind = $derived(item ? cardKind(item) : "short");
+  const rich = $derived(item?.kind === "富文本");
+  const link = $derived(item ? linkParts(item.preview ?? "") : null);
+  const color = $derived(item ? colorValue(item.preview ?? "") : null);
   const y = new SpringValue(0, (value) => { if (root) root.style.transform = `translate3d(0, ${value}px, 0)`; }, () => panel.motion);
   const opacity = new SpringValue(1, (value) => { if (root) root.style.opacity = String(Math.max(0, Math.min(1, value))); }, () => panel.motion, 0.22);
 
@@ -37,7 +38,7 @@
   let pathsFor = -1;
   $effect(() => {
     const id = item?.id ?? -1;
-    const files = kind === "files";
+    const files = kind === "file";
     if (id === pathsFor) return;
     pathsFor = id;
     paths = null;
@@ -96,7 +97,7 @@
   let full = $state<TextChunk | null>(null);
   let fullFor = -1;
   let loadingRest = false;
-  const textual = $derived(kind === "short" || kind === "long" || kind === "code" || kind === "rich" || kind === "link");
+  const textual = $derived(kind !== "image" && kind !== "file");
   $effect(() => {
     const id = expanded && item && textual ? item.id : -1;
     if (id === fullFor) return;
@@ -131,16 +132,15 @@
 <div bind:this={root} class="preview-swap" class:expanded class:compact>
   {#if !item}
     <div class="empty-preview">
-      <strong>{panel.query ? "没有可预览的匹配项" : "还没有记录"}</strong>
-      <p>{panel.query ? "试试更短的关键词；Esc 返回完整历史。" : "复制文字、图片或文件，它们会按时间出现在这里。"}</p>
+      <strong>{panel.query ? "没有可看的匹配项" : "还没有复制过东西"}</strong>
+      <p>{panel.query ? "试试更短的词；Esc 清空搜索。" : "复制文字、图片或文件，它们会按时间出现在这里。"}</p>
     </div>
   {:else}
     <div class="preview-eyebrow">
-      <span>{sourceName(item)} / {relativeTime(item.copied_ms)}</span>
-      <span>SNAPSHOT {String(item.id).padStart(3, "0")} / LOCAL</span>
+      <span>{sourceName(item)} · {relativeTime(item.copied_ms)}</span>
     </div>
     {#if item.favorite && (item.title || item.note)}
-      <!-- M2-6：收藏的标题和备注在设置“整理”页里编辑，这里只显示。 -->
+      <!-- M2-6：常用的标题和备注在设置“整理”页里编辑，这里只显示。 -->
       <div class="label-block">
         {#if item.title}<strong>{item.title}</strong>{/if}
         {#if item.note}<p>{item.note}</p>{/if}
@@ -156,21 +156,21 @@
             <span class="image-missing">这张图片没法显示</span>
           {/if}
         </div>
-        {#if image}<div class="image-meta"><span>{image.width} × {image.height} · {size(image.bytes)}</span><span>{fit ? `适应 · ${Math.round(scale * 100)}%` : "原尺寸 · 100%"} · Z 切换</span></div>{/if}
+        {#if image}<div class="image-meta"><span>{image.width} × {image.height} · {size(image.bytes)}</span><span>{fit ? `适应 · ${Math.round(scale * 100)}%` : "原图 · 100%"}</span></div>{/if}
       {:else}
         <div class="image-frame" role="img" aria-label={item.preview || "图片记录"}>
           {#if image}<img src={image.url} alt="" draggable="false" />{:else if imageFailed}<span class="image-missing">这张图片没法显示</span>{/if}
         </div>
-        <div class="image-meta"><span>{image ? `${image.width} × ${image.height} · ${size(image.bytes)}` : item.preview}</span><span>{compact ? formatTime(item.copied_ms) : "Space 查看原图"}</span></div>
+        <div class="image-meta"><span>{image ? `${image.width} × ${image.height} · ${size(image.bytes)}` : item.preview}</span><span>{formatTime(item.copied_ms)}</span></div>
       {/if}
     {:else if kind === "color" && color}
-      <div class="color-block" role="img" style={`background-color: ${color.value}`} aria-label={`颜色 ${color.value}`}></div>
+      <div class="color-block" role="img" style={`background-color: ${color.hex}`} aria-label={`颜色 ${color.value}`}></div>
       <div class="color-value">{color.value}</div>
-      {#if color.rgb}<div class="color-channels">RGB　{color.rgb.join(" · ")}</div>{/if}
+      <div class="color-channels">HEX　{color.hex}<br>RGB　{color.rgb.join(", ")}<br>HSL　{color.hsl[0]}°, {color.hsl[1]}%, {color.hsl[2]}%</div>
       <p class="preview-note">取用时粘贴原始颜色值，不会自动转换格式。</p>
     {:else if kind === "link" && link}
       <div class="link-host">{link.host}</div>
-      <div class="link-url">{link.url.href}</div>
+      <div class="link-url">{link.href}</div>
       <div class="link-rule"></div>
       <p class="preview-note">不会自动访问链接，也不会抓取网页标题。取用时粘贴原始网址。</p>
     {:else if expanded && full && kind !== "link"}
@@ -178,10 +178,10 @@
       {#if full.shown < full.total}
         <div class="cut" use:loadRest>已显示前 {count(full.shown)} 字 · 滚到底自动加载其余 {count(full.total - full.shown)} 字</div>
       {/if}
-      {#if kind === "rich"}<p class="preview-note">显示的是保存的纯文本，不还原富文本样式。</p>{/if}
+      {#if rich}<p class="preview-note">显示的是保存的纯文本，不还原富文本样式。</p>{/if}
     {:else if kind === "code"}
       <pre class="code-sheet">{item.preview || "（空文本）"}</pre>
-    {:else if kind === "files"}
+    {:else if kind === "file"}
       <h2 class="preview-title">{item.file_names.length === 1 ? item.file_names[0] : `${item.file_names.length} 个文件`}</h2>
       <ul class="file-list">
         {#if paths}
@@ -212,8 +212,8 @@
     {:else if kind === "short"}
       <h2 class="preview-title">{item.preview || "（空文本）"}</h2>
     {:else}
-      <p class="preview-text" class:muted={kind === "long" || kind === "rich"}>{item.preview || "（空文本）"}</p>
-      {#if kind === "rich"}<p class="preview-note">当前预览为已保存的纯文本摘要，不还原富文本样式。</p>{/if}
+      <p class="preview-text" class:muted={kind === "long" || rich}>{item.preview || "（空文本）"}</p>
+      {#if rich}<p class="preview-note">当前预览为已保存的纯文本摘要，不还原富文本样式。</p>{/if}
     {/if}
     {#if item.partial}<p class="partial">部分格式未保存；此处只显示可用内容。</p>{/if}
   {/if}
@@ -222,16 +222,16 @@
 <style>
   .label-block { display: grid; gap: 4px; margin: 0 0 12px; padding: 0 0 10px 10px; border-left: 2px solid var(--accent); border-bottom: 1px solid var(--line-soft); }
   .label-block strong { color: var(--text); font-size: 13px; font-weight: 650; }
-  .label-block p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.6; white-space: pre-wrap; }
+  .label-block p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.6; white-space: pre-wrap; }
   .preview-swap { min-height: 100%; will-change: transform, opacity; }
-  .preview-eyebrow { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-3); margin-bottom: 13px; color: var(--faint); font: 9px/1.5 var(--font-mono); letter-spacing: .05em; }
+  .preview-eyebrow { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-3); margin-bottom: 13px; color: var(--faint); font: 12px/1.5 var(--font-mono); }
   .preview-eyebrow span:last-child { text-align: right; white-space: nowrap; }
-  .preview-title { margin: 0 0 15px; color: var(--text); font: 600 22px/1.35 var(--font-display); letter-spacing: -.02em; overflow-wrap: anywhere; white-space: pre-wrap; }
-  .preview-text { margin: 0; color: var(--text); font-size: 14px; line-height: 1.85; overflow-wrap: anywhere; white-space: pre-wrap; }
+  .preview-title { margin: 0 0 15px; color: var(--text); font: 600 20px/1.4 var(--font-ui); overflow-wrap: anywhere; white-space: pre-wrap; }
+  .preview-text { margin: 0; color: var(--text); font-size: 13px; line-height: 1.85; overflow-wrap: anywhere; white-space: pre-wrap; }
   .preview-text.muted, .preview-note { color: var(--muted); }
   .preview-note { margin: var(--space-4) 0 0; font-size: 12px; line-height: 1.75; }
   .code-sheet { margin: 0; padding: 17px; overflow: auto; border: 1px solid var(--line); border-left: 3px solid var(--accent); background: var(--panel); color: var(--text); font: 12px/1.75 var(--font-mono); white-space: pre; }
-  .link-host { margin: 8px 0 12px; color: var(--accent); font: 600 27px/1.2 var(--font-display); overflow-wrap: anywhere; }
+  .link-host { margin: 8px 0 12px; color: var(--accent); font: 600 20px/1.3 var(--font-ui); overflow-wrap: anywhere; }
   .link-url { color: var(--muted); font: 12px/1.7 var(--font-mono); overflow-wrap: anywhere; }
   .link-rule { width: 46px; height: 3px; margin: 23px 0; background: var(--accent); }
   .image-frame { height: 210px; display: grid; place-items: center; overflow: hidden; border: 1px solid var(--line); background: repeating-conic-gradient(color-mix(in srgb, var(--line) 22%, transparent) 0 25%, transparent 0 50%) 0 0 / 14px 14px; }
@@ -243,55 +243,55 @@
   .image-stage.original { display: block; overflow: auto; cursor: grab; scrollbar-width: none; }
   .image-stage.original::-webkit-scrollbar { display: none; }
   .image-stage.original:active { cursor: grabbing; }
-  .image-missing { color: var(--faint); font-size: 11px; }
+  .image-missing { color: var(--faint); font-size: 12px; }
   .selectable { user-select: text; cursor: text; }
   .selectable::selection, .selectable *::selection { background: color-mix(in srgb, var(--accent) 30%, transparent); }
-  .cut { display: flex; align-items: center; gap: 10px; margin: 14px 0 0; color: var(--faint); font: 10px var(--font-mono); white-space: nowrap; }
+  .cut { display: flex; align-items: center; gap: 10px; margin: 14px 0 0; color: var(--faint); font: 12px var(--font-mono); white-space: nowrap; }
   .cut::before, .cut::after { content: ""; flex: 1; height: 1px; background: repeating-linear-gradient(90deg, var(--line) 0 4px, transparent 4px 8px); }
-  .image-meta { display: flex; justify-content: space-between; gap: var(--space-2); margin-top: 10px; color: var(--muted); font: 10px var(--font-mono); }
+  .image-meta { display: flex; justify-content: space-between; gap: var(--space-2); margin-top: 10px; color: var(--muted); font: 12px var(--font-mono); }
   .color-block { height: 154px; border: 1px solid var(--line); }
-  .color-value { margin-top: 13px; font: 600 26px var(--font-mono); overflow-wrap: anywhere; }
+  .color-value { margin-top: 13px; font: 600 20px var(--font-mono); overflow-wrap: anywhere; }
   .color-channels { margin-top: 7px; color: var(--muted); font: 12px/1.8 var(--font-mono); }
   .file-list { margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--line); }
   .file-list li { display: flex; align-items: flex-start; gap: 8px; padding: 12px 0; border-bottom: 1px solid var(--line-soft); font-size: 12px; overflow-wrap: anywhere; }
   .file-list svg { width: 18px; height: 18px; flex: none; }
-  .file-state { width: 18px; flex: none; text-align: center; font: 600 13px/18px var(--font-mono); }
+  .file-state { width: 18px; flex: none; text-align: center; font: 600 12px/18px var(--font-mono); }
   .file-list li.missing .file-state, .file-list li.missing small { color: var(--state-caution); }
   .file-list li.unknown .file-state, .file-list li.unknown small { color: var(--faint); }
   .file-list li.missing .file-copy > span { color: var(--muted); }
   .file-copy { min-width: 0; flex: 1; display: grid; gap: 3px; }
-  .file-copy code { color: var(--faint); font: 10px/1.5 var(--font-mono); overflow-wrap: anywhere; }
-  .file-list small { flex: none; font-size: 10px; line-height: 18px; }
-  .file-note { margin: var(--space-4) 0 0; padding: 8px 10px; border-left: 2px solid var(--state-caution); background: color-mix(in srgb, var(--state-caution) 8%, transparent); color: var(--muted); font-size: 11px; line-height: 1.7; }
+  .file-copy code { color: var(--faint); font: 12px/1.5 var(--font-mono); overflow-wrap: anywhere; }
+  .file-list small { flex: none; font-size: 12px; line-height: 18px; }
+  .file-note { margin: var(--space-4) 0 0; padding: 8px 10px; border-left: 2px solid var(--state-caution); background: color-mix(in srgb, var(--state-caution) 8%, transparent); color: var(--muted); font-size: 12px; line-height: 1.7; }
   .file-note.neutral { border-left-color: var(--line); background: color-mix(in srgb, var(--line) 12%, transparent); }
-  .partial { margin: var(--space-4) 0 0; color: var(--state-caution); font-size: 11px; line-height: 1.6; }
+  .partial { margin: var(--space-4) 0 0; color: var(--state-caution); font-size: 12px; line-height: 1.6; }
   .empty-preview { padding: var(--space-6) 0; color: var(--muted); line-height: 1.8; }
-  .empty-preview strong { color: var(--text); font-size: 14px; }
+  .empty-preview strong { color: var(--text); font-size: 15px; }
   .empty-preview p { margin: var(--space-2) 0 0; font-size: 12px; }
-  .expanded .preview-title { font-size: 25px; }
+  .expanded .preview-title { font-size: 20px; }
   .expanded .preview-text { font-size: 15px; }
   .compact .preview-eyebrow { display: none; }
-  .compact .preview-title { margin-bottom: 8px; font-size: 17px; }
+  .compact .preview-title { margin-bottom: 8px; font-size: 15px; }
   .compact .preview-text { font-size: 13px; line-height: 1.72; }
-  .compact .preview-note { margin-top: 8px; font-size: 11px; }
-  .compact .code-sheet { padding: 9px 11px; font-size: 11px; line-height: 1.65; }
-  .compact .link-host { margin: 0 0 6px; font-size: 20px; }
-  .compact .link-url { font-size: 11px; }
+  .compact .preview-note { margin-top: 8px; font-size: 12px; }
+  .compact .code-sheet { padding: 9px 11px; font-size: 12px; line-height: 1.65; }
+  .compact .link-host { margin: 0 0 6px; font-size: 15px; }
+  .compact .link-url { font-size: 12px; }
   .compact .link-rule { margin: 10px 0; }
   .compact .image-frame { height: 82px; }
-  .compact .image-meta { margin-top: 6px; font-size: 9px; }
+  .compact .image-meta { margin-top: 6px; font-size: 12px; }
   .compact .color-block { height: 52px; }
-  .compact .color-value { margin-top: 8px; font-size: 19px; }
-  .compact .color-channels { margin-top: 3px; font-size: 10px; }
+  .compact .color-value { margin-top: 8px; font-size: 15px; }
+  .compact .color-channels { margin-top: 3px; font-size: 12px; }
   .compact .file-list li { padding: 6px 0; }
-  .compact .file-note { margin-top: 8px; font-size: 10px; }
+  .compact .file-note { margin-top: 8px; font-size: 12px; }
   .compact .empty-preview { padding: 8px 0; }
   .compact .partial { margin-top: 8px; }
   @media (max-width: 599px) {
     .preview-eyebrow span:last-child { display: none; }
-    .preview-title { font-size: 18px; }
+    .preview-title { font-size: 15px; }
     .preview-text { font-size: 13px; }
-    .code-sheet { padding: var(--space-3); font-size: 11px; }
-    .link-host { font-size: 22px; }
+    .code-sheet { padding: var(--space-3); font-size: 12px; }
+    .link-host { font-size: 15px; }
   }
 </style>

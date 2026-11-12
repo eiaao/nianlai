@@ -1,7 +1,13 @@
 pub use super::outcome::PasteResult;
 use crate::{history::content::Content, platform::Target};
 use serde::Deserialize;
-use std::{sync::Arc, time::Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
+
+/// 普通粘贴的修饰键宽限：发键前确认最长等 300ms，期间修饰键仍按着才补发抬起（原行为）。
+pub const MODIFIER_GRACE: Duration = Duration::from_millis(300);
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -96,6 +102,15 @@ pub struct Request {
     pub external_switch: bool,
     pub permit: Option<super::permit::Permit>,
     pub copy_only_reason: Option<&'static str>,
+    // 一叠一起放下（automatic 队列）且这一张不是最后一条时置 true：实际写入的文本尾部
+    // 追加分隔（as_text::append_separator；单行编辑框用空格，其余换行）。指纹按实际写入登记回声。
+    pub text_separator: bool,
+    /// 发键前确认里，其余条件都满足、只剩修饰键按着时，等多久才补发修饰键抬起。
+    /// 普通粘贴固定 `MODIFIER_GRACE`（与原来的 300ms 确认期一致）；逐张放是用户按住 Ctrl
+    /// 连按 V 的明确操作，传 0 立即补抬起，不再白等。
+    pub modifier_grace: Duration,
+    /// 逐张放由剪贴板线程据此取得写租约；普通单条粘贴为 None，行为保持不变。
+    pub clipboard_guard: Option<Arc<super::queue::Guard>>,
     pub cancelled: Arc<std::sync::atomic::AtomicBool>,
 }
 

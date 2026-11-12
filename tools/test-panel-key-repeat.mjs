@@ -13,17 +13,22 @@ const require = createRequire(import.meta.url);
 const { compileModule } = require("svelte/compiler");
 const ts = require("typescript");
 
+const transpile = (path) => ts.transpileModule(readFileSync(join(root, path), "utf8"), {
+  compilerOptions: { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.ESNext },
+}).outputText;
+
 async function compilePanel() {
   const temporaryBase = resolve(tmpdir());
   const temporary = mkdtempSync(join(temporaryBase, "nianlai-panel-key-repeat-"));
   const ipcPath = join(temporary, "ipc.mjs");
   const compiledPath = join(temporary, "state.svelte.mjs");
   const preferencesPath = join(temporary, "preferences.mjs");
+  const cardsPath = join(temporary, "cards.mjs");
   const cleanup = () => {
     assert.equal(dirname(temporary), temporaryBase);
     assert.ok(basename(temporary).startsWith("nianlai-panel-key-repeat-"));
-    // 只删除本次创建的两个文件和空目录，不递归清理任何路径。
-    for (const path of [compiledPath, preferencesPath, ipcPath]) if (existsSync(path)) unlinkSync(path);
+    // 只删除本次创建的几个文件和空目录，不递归清理任何路径。
+    for (const path of [compiledPath, preferencesPath, cardsPath, ipcPath]) if (existsSync(path)) unlinkSync(path);
     rmdirSync(temporary);
     assert.equal(existsSync(temporary), false);
   };
@@ -33,13 +38,15 @@ export const calls = [];
 let rejectNext = false;
 let rejectSearch = false;
 let pendingPaste = null;
+let rejectQueue = false;
 const handlers = new Map();
 export const previewKeys = [];
 export async function setPreviewKeys(open) { previewKeys.push(open); }
 export async function copySelection(id, text) { calls.push({ command: "copySelection", id, text }); }
-export function reset() { calls.length = 0; previewKeys.length = 0; rejectNext = false; rejectSearch = false; pendingPaste = null; handlers.clear();
+export function reset() { calls.length = 0; previewKeys.length = 0; rejectNext = false; rejectSearch = false; rejectQueue = false; pendingPaste = null; handlers.clear();
   store.history = null; store.favorites = []; store.deletable = true; store.undoable = null; }
 export function rejectNextPaste() { rejectNext = true; }
+export function rejectNextQueue(reason = true) { rejectQueue = reason; }
 export function rejectNextSearch() { rejectSearch = true; }
 export function deferNextPaste() {
   let resolve, reject;
@@ -55,6 +62,12 @@ export async function pasteItem(session, id, mode, selection) {
   if (pending) await pending;
 }
 export async function hidePanel(session) { calls.push({ command: "hidePanel", session }); }
+export async function startQueue(session, ids, automatic, mode, selection) {
+  calls.push({ command: "startQueue", session, ids, automatic, mode, ...(selection ? { selection } : {}) });
+  if (rejectQueue) { const reason = rejectQueue; rejectQueue = false; throw typeof reason === "string" ? reason : new Error("模拟队列 IPC 失败"); }
+}
+export async function cancelQueue(session) { calls.push({ command: "cancelQueue", session }); }
+export async function setHitRegions() {}
 export async function retryActivation(session) { calls.push({ command: "retryActivation", session }); }
 export async function startSearch(session) {
   calls.push({ command: "startSearch", session });
@@ -92,6 +105,7 @@ export const onPanelKey = subscribe("key");
 export const onHistoryChanged = subscribe("history-changed");
 export const onPanelMode = subscribe("mode");
 export const onPanelHidden = subscribe("hidden");
+export const onQueueChanged = subscribe("queue");
 export const onPanelTiming = subscribe("timing");
 export const onPanelError = subscribe("error");
 export const onPasteResult = subscribe("paste-result");
@@ -108,18 +122,21 @@ export function emit(name, payload) { return handlers.get(name)?.(payload); }
       ["svelte", clientUrl],
       ["./ipc", pathToFileURL(ipcPath).href],
       ["./preferences", pathToFileURL(preferencesPath).href],
+      ["./cards", pathToFileURL(cardsPath).href],
     ]);
+    writeFileSync(cardsPath, transpile("src/lib/cards.ts"));
     // 真实的 preferences.ts 一并转译，面板与设置页用同一份偏好映射。
     writeFileSync(preferencesPath, ts.transpileModule(readFileSync(join(root, "src/lib/preferences.ts"), "utf8"), {
       compilerOptions: { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.ESNext },
     }).outputText);
     const compiled = compileModule(stripped, { filename: "state.svelte.js", generate: "client", dev: false }).js.code
-      .replace(/(from\s+)(["'])(svelte\/internal\/client|svelte|\.\/ipc|\.\/preferences)\2/g,
+      .replace(/(from\s+)(["'])(svelte\/internal\/client|svelte|\.\/ipc|\.\/preferences|\.\/cards)\2/g,
         (_, prefix, _quote, specifier) => prefix + JSON.stringify(imports.get(specifier)));
     writeFileSync(compiledPath, compiled);
     const { PanelState } = await import(pathToFileURL(compiledPath).href);
     const ipc = await import(pathToFileURL(ipcPath).href);
-    return { PanelState, ipc, cleanup };
+    const cards = await import(pathToFileURL(cardsPath).href);
+    return { PanelState, ipc, cards, cleanup };
   } catch (error) {
     cleanup();
     throw error;
@@ -241,7 +258,7 @@ test("通用终止反馈只恢复当前隐藏会话的关闭提示", async (suit
 test("Activated DOM 快速取用、焦点准备与自然搜索输入", async (suite) => {
   const { PanelState, ipc, cleanup } = await compilePanel();
   suite.after(cleanup);
-  const actions = submissions.map((action) => action.name.startsWith("Ctrl+") && action.key !== "Enter"
+  const actions = submissions.filter((action) => action.key === "Enter" || Number(action.key) <= 7).map((action) => action.name.startsWith("Ctrl+") && action.key !== "Enter"
     ? { ...action, name: action.key, ctrlKey: false } : action);
   const expected = (action) => ({ command: "pasteItem", session: 37, id: 101 + action.index, mode: action.mode });
 
@@ -301,19 +318,20 @@ test("Activated DOM 快速取用、焦点准备与自然搜索输入", async (su
 
   await suite.test("方向和翻页键允许重复导航，确认还要等待其它已观察键抬起", async (context) => {
     const { panel } = await activatedPanel(context, PanelState, ipc);
-    keydown(panel, { key: "ArrowDown" });
-    keydown(panel, { key: "ArrowDown", repeat: true });
+    keydown(panel, { key: "ArrowRight" });
+    keydown(panel, { key: "ArrowRight", repeat: true });
     assert.equal(panel.selected, 3);
     keydown(panel, { key: "End" });
     keyup(panel, { key: "End" });
-    assert.equal(panel.selected, 8);
-    keydown(panel, { key: "PageUp" });
-    keyup(panel, { key: "PageUp" });
+    assert.equal(panel.selected, 6, "扇面里 End 停在第 7 张，不越出扇面");
+    keydown(panel, { key: "Home" });
+    keyup(panel, { key: "Home" });
+    keydown(panel, { key: "ArrowRight" });
     assert.equal(panel.selected, 1);
     keydown(panel, { key: "Enter" });
     keyup(panel, { key: "Enter" });
     assert.deepEqual(ipc.calls, []);
-    keyup(panel, { key: "ArrowDown" });
+    keyup(panel, { key: "ArrowRight" });
     assert.deepEqual(ipc.calls, [{ command: "pasteItem", session: 37, id: 102, mode: "paste" }]);
   });
 
@@ -568,16 +586,16 @@ test("Activated DOM 快速取用、焦点准备与自然搜索输入", async (su
 
   await suite.test("迟到的其它键或修饰键 keyup 不清除当前待选择的 held 证据", async (context) => {
     const { panel, advance } = await activatedPanel(context, PanelState, ipc);
-    keydown(panel, { key: "ArrowDown" });
+    keydown(panel, { key: "ArrowRight" });
     advance(1);
     keydown(panel, { key: "Enter", ctrlKey: true });
     keyup(panel, { key: "Enter", ctrlKey: true });
     keyup(panel, { key: "Control", code: "ControlLeft", timeStamp: 1000 });
-    keyup(panel, { key: "ArrowDown", timeStamp: 1000 });
+    keyup(panel, { key: "ArrowRight", timeStamp: 1000 });
     assert.deepEqual(ipc.calls, []);
     keyup(panel, { key: "Control", code: "ControlLeft" });
     assert.deepEqual(ipc.calls, []);
-    keyup(panel, { key: "ArrowDown" });
+    keyup(panel, { key: "ArrowRight" });
     assert.equal(ipc.calls.length, 1);
     assert.equal(ipc.calls[0].id, 103);
   });
@@ -612,7 +630,8 @@ async function createPanel(context, PanelState, ipc, options = {}) {
   context.after(() => { disconnect(); restoreGlobals.forEach((restore) => restore()); });
   await flush();
   ipc.emit("shown", shown(options));
-  if (!options.interaction || options.interaction === "quick") panel.mode = "search";
+  // 普通 quick 的夹具代表“搜索中”：搜索词非空，结果就是 searchItems（总是摊开）。
+  if (!options.interaction || options.interaction === "quick") { panel.mode = "search"; panel.query = "合成"; }
   panel.searchItems = items();
   panel.selected = 1;
   assert.equal(panel.busy, false);
@@ -738,6 +757,11 @@ test("搜索提交键的首次按下、自动重复和组合输入保护", async
       const { panel } = await createPanel(context, PanelState, ipc);
       const event = keydown(panel, action);
       assert.equal(event.defaultPrevented, true);
+      if (Number(action.key) > 7) {
+        assert.deepEqual(ipc.calls, [], "Ctrl+8/9 只拦截，不取用任何牌");
+        assert.equal(panel.busy, false);
+        return;
+      }
       assert.deepEqual(ipc.calls, [expectedPaste(action)]);
     });
     await suite.test(`${action.name} 自动重复不得提交，即使 busy=false`, async (context) => {
@@ -1131,19 +1155,19 @@ test("搜索选择快照与受限激活交互的反例", async (suite) => {
   });
 });
 
-test("普通 Quick 的 Space 与 Esc 浮层分层键位", async (suite) => {
+test("普通 Quick 的 Tab 与 Esc 浮层分层键位", async (suite) => {
   const { PanelState, ipc, cleanup } = await compilePanel();
   suite.after(cleanup);
 
-  await suite.test("Space 开合，Esc 先关浮层、再次 Esc 才请求收起", async (context) => {
+  await suite.test("Tab 开合，Esc 先关浮层、再次 Esc 才请求收起", async (context) => {
     const { panel } = await createPanel(context, PanelState, ipc);
     panel.mode = "quick";
     assert.equal(panel.previewOpen, false);
-    ipc.emit("key", { session: 37, key: "Space" });
+    ipc.emit("key", { session: 37, key: "Tab" });
     assert.equal(panel.previewOpen, true);
-    ipc.emit("key", { session: 37, key: "Space" });
+    ipc.emit("key", { session: 37, key: "Tab" });
     assert.equal(panel.previewOpen, false);
-    ipc.emit("key", { session: 37, key: "Space" });
+    ipc.emit("key", { session: 37, key: "Tab" });
     assert.equal(panel.previewOpen, true);
     ipc.emit("key", { session: 37, key: "Escape" });
     assert.equal(panel.previewOpen, false);
@@ -1158,7 +1182,7 @@ test("普通 Quick 的 Space 与 Esc 浮层分层键位", async (suite) => {
     panel.mode = "quick";
     ipc.emit("key", { session: 37, key: "Z" });
     assert.equal(panel.previewZoom, "fit", "预览没开，Z 不起作用");
-    ipc.emit("key", { session: 37, key: "Space" });
+    ipc.emit("key", { session: 37, key: "Tab" });
     assert.deepEqual(ipc.previewKeys, [true], "打开预览时通知钩子");
     ipc.emit("key", { session: 37, key: "Z" });
     assert.equal(panel.previewZoom, "original");
@@ -1167,7 +1191,7 @@ test("普通 Quick 的 Space 与 Esc 浮层分层键位", async (suite) => {
     ipc.emit("key", { session: 37, key: "Z" });
     ipc.emit("key", { session: 37, key: "Escape" });
     assert.deepEqual(ipc.previewKeys, [true, false], "关闭预览时通知钩子");
-    ipc.emit("key", { session: 37, key: "Space" });
+    ipc.emit("key", { session: 37, key: "Tab" });
     assert.equal(panel.previewZoom, "fit", "重新打开从“适应”开始");
   });
 
@@ -1175,12 +1199,12 @@ test("普通 Quick 的 Space 与 Esc 浮层分层键位", async (suite) => {
     const { panel } = await createPanel(context, PanelState, ipc);
     panel.mode = "quick";
     const start = panel.selected;
-    ipc.emit("key", { session: 37, key: "Space" });
+    ipc.emit("key", { session: 37, key: "Tab" });
     for (const key of ["ArrowDown", "ArrowUp", "PageDown", "End", "Home"]) ipc.emit("key", { session: 37, key });
     assert.equal(panel.selected, start, "预览开着时不切换条目");
     assert.equal(panel.previewOpen, true);
-    ipc.emit("key", { session: 37, key: "Space" });
-    ipc.emit("key", { session: 37, key: "ArrowDown" });
+    ipc.emit("key", { session: 37, key: "Tab" });
+    ipc.emit("key", { session: 37, key: "ArrowRight" });
     assert.equal(panel.selected, start + 1, "关掉预览后方向键照常切换");
   });
 
@@ -1193,7 +1217,7 @@ test("普通 Quick 的 Space 与 Esc 浮层分层键位", async (suite) => {
     context.after(() => { globalThis.window = original; });
     ipc.emit("key", { session: 37, key: "Ctrl+C" });
     assert.deepEqual(ipc.calls, [], "预览没开时不处理");
-    ipc.emit("key", { session: 37, key: "Space" });
+    ipc.emit("key", { session: 37, key: "Tab" });
     ipc.emit("key", { session: 37, key: "Ctrl+C" });
     await flush();
     assert.deepEqual(ipc.calls, []);
@@ -1207,17 +1231,13 @@ test("普通 Quick 的 Space 与 Esc 浮层分层键位", async (suite) => {
     assert.equal(panel.previewOpen, true, "复制后预览和面板都不关");
   });
 
-  await suite.test("搜索模式 Space 仍交给输入框，C 的左右键不改变其它布局", async (context) => {
+  await suite.test("搜索模式 Space 仍交给输入框，手牌左右键始终换牌", async (context) => {
     const { panel } = await createPanel(context, PanelState, ipc);
     const before = panel.selected;
     const event = keydown(panel, { key: " ", code: "Space" });
     assert.equal(event.defaultPrevented, false);
     assert.deepEqual(ipc.calls, []);
     panel.mode = "quick";
-    panel.preferences = { ...panel.preferences, layout: "a" };
-    ipc.emit("key", { session: 37, key: "ArrowRight" });
-    assert.equal(panel.selected, before);
-    panel.preferences = { ...panel.preferences, layout: "c" };
     ipc.emit("key", { session: 37, key: "ArrowRight" });
     assert.equal(panel.selected, before + 1);
     ipc.emit("key", { session: 37, key: "ArrowLeft" });
@@ -1242,20 +1262,18 @@ test("交互优化：收藏不占槽位、本次呼出不挪位置、删除可�
     return harness;
   };
 
-  await suite.test("收藏排在前面但不占 1–9，数字从最近区第一条开始", async (context) => {
+  await suite.test("常用排在前面但不占数字槽，数字从最近区当前页第一张开始", async (context) => {
     const { panel } = await quick(context);
     assert.deepEqual(panel.filtered.slice(0, 3).map((item) => item.id), [108, 109, 101]);
-    assert.equal(panel.favoriteCount, 2);
-    assert.equal(panel.slotLabel(0), null);
-    assert.equal(panel.slotLabel(2), "01");
-    assert.equal(panel.slotLabel(10), "09");
+    assert.deepEqual(panel.handSource.map((item) => item.id), [101, 102, 103, 104, 105, 106, 107]);
+    assert.equal(panel.fanItems.length, 7);
     ipc.emit("key", { session: 37, key: "1" });
     assert.deepEqual(ipc.calls, [{ command: "pasteItem", session: 37, id: 101, mode: "paste" }]);
   });
 
   await suite.test("面板开着时收藏/取消只换星标不挪位置，下次呼出才重排", async (context) => {
     const { panel } = await quick(context);
-    panel.selected = 4;
+    panel.selected = 2;
     const before = panel.filtered.map((item) => item.id);
     ipc.emit("key", { session: 37, key: "Ctrl+D" });
     await flush();
@@ -1263,9 +1281,10 @@ test("交互优化：收藏不占槽位、本次呼出不挪位置、删除可�
     assert.deepEqual(panel.filtered.map((item) => item.id), before, "收藏后顺序不变");
     assert.equal(panel.currentItem.id, 103);
     assert.equal(panel.currentItem.favorite, true);
-    assert.equal(panel.slotLabel(4), "03", "槽位也不变");
-    ipc.emit("key", { session: 37, key: "ArrowDown" });
+    assert.equal(panel.handSource[2].id, 103, "数字与当前页键帽保持一致");
+    ipc.emit("key", { session: 37, key: "ArrowRight" });
     assert.equal(panel.currentItem.id, 104, "紧接着的方向键落在原来的下一条");
+    panel.switchHandList("favorites");
     panel.selected = 0;
     ipc.emit("key", { session: 37, key: "Ctrl+D" });
     await flush();
@@ -1280,7 +1299,7 @@ test("交互优化：收藏不占槽位、本次呼出不挪位置、删除可�
   await suite.test("Delete 移到回收站并停在原位置，Ctrl+Z 撤销回来", async (context) => {
     const { panel } = await quick(context);
     const full = pinnedHistory();
-    panel.selected = 3;
+    panel.selected = 1;
     ipc.emit("key", { session: 37, key: "Delete:down" });
     await flush();
     assert.deepEqual(ipc.calls, [{ command: "deleteItem", id: 102 }], "普通条目按下就删");
@@ -1309,6 +1328,7 @@ test("交互优化：收藏不占槽位、本次呼出不挪位置、删除可�
   await suite.test("收藏的要按住 Delete：按满才删，提前松开或移开选择都取消", async (context) => {
     context.mock.timers.enable({ apis: ["setTimeout"] });
     const { panel } = await quick(context);
+    panel.switchHandList("favorites");
     panel.selected = 0;
     const pinned = panel.currentItem;
     assert.equal(pinned.favorite, true);
@@ -1336,18 +1356,16 @@ test("交互优化：收藏不占槽位、本次呼出不挪位置、删除可�
     await flush();
     assert.deepEqual(ipc.calls, []);
 
+    panel.switchHandList("favorites");
     panel.selected = 0;
     ipc.emit("key", { session: 37, key: "Delete:down" });
     ipc.emit("key", { session: 37, key: "Delete:down" });
     context.mock.timers.tick(600);
     await flush();
     assert.deepEqual(ipc.calls, [{ command: "deleteItem", id: pinned.id }], "按满才删，且只删一次");
-    assert.equal(panel.leavingId, pinned.id, "只有删掉的这条播放粉碎");
     assert.equal(panel.holdDelete.phase, "holding", "拍底版之前进度保持铺满");
     context.mock.timers.tick(100);
     assert.equal(panel.holdDelete, null);
-    context.mock.timers.tick(800);
-    assert.equal(panel.leavingId, null);
     assert.equal(panel.undo.id, pinned.id, "删掉后照常给撤销标签");
     ipc.emit("key", { session: 37, key: "Delete" });
     await flush();
@@ -1357,6 +1375,7 @@ test("交互优化：收藏不占槽位、本次呼出不挪位置、删除可�
   await suite.test("主线程忙、计时器晚到时，松开按实际按住的时长算：已满就删", async (context) => {
     context.mock.timers.enable({ apis: ["setTimeout"] });
     const { panel } = await quick(context);
+    panel.switchHandList("favorites");
     panel.selected = 0;
     const pinned = panel.currentItem;
     ipc.emit("key", { session: 37, key: "Delete:down" });
@@ -1404,7 +1423,7 @@ test("交互优化：收藏不占槽位、本次呼出不挪位置、删除可�
 
   await suite.test("新一次呼出清掉上一会话的撤销提示，Ctrl+Z 仍能撤销", async (context) => {
     const { panel } = await quick(context);
-    panel.selected = 3;
+    panel.selected = 1;
     ipc.emit("key", { session: 37, key: "Delete:down" });
     await flush();
     assert.ok(panel.undo);
@@ -1518,5 +1537,684 @@ test("鼠标点条目的行为按设置选择粘贴模式（M2-8）", async (sui
     await panel.choose(0, "text", auxclick({ isTrusted: false }));
     await panel.choose(0, "text", auxclick({ detail: 0 }));
     assert.deepEqual(ipc.calls, []);
+  });
+});
+
+test("v10 手牌：分页、拈一叠、逐张放和数字搜索", async (suite) => {
+  const { PanelState, ipc, cleanup } = await compilePanel();
+  suite.after(cleanup);
+
+  await suite.test("扇面 → 摊开 → 扇面：同一批条目、顺序不变，选中项按规则保留", async (context) => {
+    const { panel } = await createPanel(context, PanelState, ipc);
+    panel.mode = "quick";
+    panel.selected = 3;
+    assert.equal(panel.pose, "fan");
+    const order = panel.handSource.map((item) => item.id);
+    assert.deepEqual(panel.fanItems.map((item) => item.id), order.slice(0, 7));
+    ipc.emit("key", { session: 37, key: "ArrowDown" });
+    assert.equal(panel.pose, "spread", "最近扇面 ↓ 摊开");
+    assert.equal(panel.currentItem.id, 104, "↓ 摊开后选中的还是同一张");
+    assert.deepEqual(panel.handSource.map((item) => item.id), order, "摊开不重排");
+    ipc.emit("key", { session: 37, key: "ArrowDown" });
+    assert.equal(panel.currentItem.id, 105, "摊开里 ↓ 逐条");
+    ipc.emit("key", { session: 37, key: "Escape" });
+    assert.equal(panel.pose, "fan");
+    assert.equal(panel.currentItem.id, 105, "收回后原来选中的在前 7 张里就保持选中");
+    assert.deepEqual(ipc.calls, []);
+    ipc.emit("key", { session: 37, key: "PageDown" });
+    assert.equal(panel.pose, "spread");
+    assert.equal(panel.selected, 7, "PgDn 摊开到第 8 条");
+    ipc.emit("key", { session: 37, key: "Home" });
+    assert.equal(panel.pose, "fan");
+    assert.equal(panel.selected, 0, "第 8 条以后收回时回到第 1 张");
+    panel.selected = 6;
+    ipc.emit("key", { session: 37, key: "ArrowRight" });
+    assert.equal(panel.pose, "spread", "第 7 张再按 → 摊开");
+    assert.equal(panel.selected, 7);
+    panel.selected = 0;
+    ipc.emit("key", { session: 37, key: "ArrowUp" });
+    assert.equal(panel.pose, "fan", "第一条按 ↑ 收回");
+    assert.deepEqual(panel.handSource.map((item) => item.id), order);
+  });
+
+  await suite.test("← → 在扇面、摊开、搜索三种状态都是上一张 / 下一张", async (context) => {
+    const { panel } = await createPanel(context, PanelState, ipc);
+    const before = panel.selected;
+    const right = keydown(panel, { key: "ArrowRight" });
+    assert.equal(right.defaultPrevented, true, "搜索中 → 不移动输入光标");
+    assert.equal(panel.selected, before + 1);
+    keydown(panel, { key: "ArrowLeft" });
+    assert.equal(panel.selected, before);
+    panel.mode = "quick"; panel.selected = 2;
+    ipc.emit("key", { session: 37, key: "ArrowRight" });
+    assert.equal(panel.selected, 3, "扇面");
+    panel.spreadOpen(3);
+    ipc.emit("key", { session: 37, key: "ArrowRight" });
+    assert.equal(panel.selected, 4, "摊开");
+    ipc.emit("key", { session: 37, key: "ArrowLeft" });
+    assert.equal(panel.selected, 3);
+    assert.equal(panel.pose, "spread");
+  });
+
+  await suite.test("常用扇面：↑ ↓ 都回到最近，PgDn 才摊开（超过 7 张时）", async (context) => {
+    const list = items().map((item, index) => ({ ...item, favorite: true, favorite_position: index + 1 }));
+    const history = { items: [...list, { ...items()[0], id: 300 }], total: 10, recording: true, last_recorded_ms: null, store_status: null };
+    const { panel } = await createPanel(context, PanelState, ipc, { history });
+    panel.mode = "quick"; panel.selected = 0;
+    ipc.emit("key", { session: 37, key: "ArrowUp" });
+    assert.equal(panel.handList, "favorites");
+    ipc.emit("key", { session: 37, key: "ArrowDown" });
+    assert.equal(panel.handList, "recent", "常用里 ↓ 只回到最近");
+    assert.equal(panel.pose, "fan");
+    ipc.emit("key", { session: 37, key: "ArrowUp" });
+    ipc.emit("key", { session: 37, key: "PageDown" });
+    assert.equal(panel.pose, "spread");
+    assert.equal(panel.handList, "favorites");
+    assert.equal(panel.selected, 7);
+  });
+
+  await suite.test("最近为空而常用有内容时落到常用", async (context) => {
+    const list = items().slice(0, 3).map((item, index) => ({ ...item, favorite: true, favorite_position: index + 1 }));
+    const { panel } = await createPanel(context, PanelState, ipc, { history: { items: list, total: 3, recording: true, last_recorded_ms: null, store_status: null } });
+    assert.equal(panel.handList, "favorites");
+  });
+
+  await suite.test("Shift+Enter 始终只复制，Ctrl+Shift+Enter 才逐张放", async (context) => {
+    const { panel } = await createPanel(context, PanelState, ipc);
+    panel.mode = "quick";
+    panel.selected = 1;
+    ipc.emit("key", { session: 37, key: "Space" });
+    ipc.emit("key", { session: 37, key: "Space" });
+    assert.deepEqual(panel.stack.map((item) => item.id), [102, 103]);
+    ipc.emit("key", { session: 37, key: "Shift+Enter" });
+    assert.deepEqual(ipc.calls, [], "有已选时 Shift+Enter 不执行");
+    assert.match(panel.notice, /已选 2 张，Shift\+↵ 不会丢掉它们/);
+    assert.deepEqual(panel.stack.map((item) => item.id), [102, 103], "已选没有被悄悄丢掉");
+    panel.stack = [];
+    ipc.emit("key", { session: 37, key: "Shift+Enter" });
+    assert.deepEqual(ipc.calls, [{ command: "pasteItem", session: 37, id: 104, mode: "copy" }], "没有已选时只复制当前一张");
+    panel.busy = false;
+    panel.stack = items().slice(1, 3);
+    ipc.emit("key", { session: 37, key: "Ctrl+Shift+Enter" });
+    assert.deepEqual(ipc.calls.at(-1), { command: "startQueue", session: 37, ids: [102, 103], automatic: false, mode: "paste" });
+    panel.busy = false;
+    ipc.emit("key", { session: 37, key: "Enter" });
+    assert.deepEqual(ipc.calls.at(-1), { command: "startQueue", session: 37, ids: [102, 103], automatic: true, mode: "paste" });
+    panel.busy = false;
+    ipc.emit("key", { session: 37, key: "Ctrl+Enter" });
+    assert.deepEqual(ipc.calls.at(-1), { command: "startQueue", session: 37, ids: [102, 103], automatic: true, mode: "text" });
+  });
+
+  await suite.test("Backspace 放回最后一张，已拈条目不会重复进叠", async (context) => {
+    const { panel } = await createPanel(context, PanelState, ipc);
+    panel.mode = "quick";
+    panel.selected = 0;
+    ipc.emit("key", { session: 37, key: "Space" });
+    ipc.emit("key", { session: 37, key: "ArrowLeft" });
+    ipc.emit("key", { session: 37, key: "Space" });
+    assert.deepEqual(panel.stack.map((item) => item.id), [101]);
+    ipc.emit("key", { session: 37, key: "Backspace" });
+    assert.equal(panel.stack.length, 0);
+    assert.equal(panel.currentItem.id, 101);
+  });
+
+  await suite.test("搜索框的plain数字不取用，Ctrl+数字才取用", async (context) => {
+    const { panel } = await createPanel(context, PanelState, ipc);
+    const plain = keydown(panel, { key: "1" });
+    assert.equal(plain.defaultPrevented, false);
+    assert.deepEqual(ipc.calls, []);
+    keydown(panel, { key: "1", ctrlKey: true });
+    assert.deepEqual(ipc.calls, [{ command: "pasteItem", session: 37, id: 101, mode: "paste", selection: { revision: 3, nonce: 1 } }]);
+  });
+
+  await suite.test("Activated 逐张放也等 Enter、Ctrl、Shift 全部真实松开", async (context) => {
+    const { panel } = await activatedPanel(context, PanelState, ipc);
+    panel.selected = 1;
+    keydown(panel, { key: " ", code: "Space" });
+    keyup(panel, { key: " ", code: "Space" });
+    keydown(panel, { key: " ", code: "Space" });
+    keyup(panel, { key: " ", code: "Space" });
+    keydown(panel, { key: "Enter", ctrlKey: true, shiftKey: true });
+    keyup(panel, { key: "Enter", ctrlKey: true, shiftKey: true });
+    keyup(panel, { key: "Control", code: "ControlLeft", shiftKey: true });
+    assert.deepEqual(ipc.calls, []);
+    keyup(panel, { key: "Shift", code: "ShiftLeft" });
+    assert.deepEqual(ipc.calls, [{ command: "startQueue", session: 37, ids: [102, 103], automatic: false, mode: "paste" }]);
+    assert.deepEqual(panel.stack.map((item) => item.id), [102, 103]);
+    // 松键提交路径同样在 IPC Promise continuation 之前接受入队事件。
+    ipc.emit("queue", { session: 37, remaining: 2, total: 2, automatic: false, busy: false });
+    assert.equal(panel.stack.length, 0);
+    await flush();
+  });
+
+  await suite.test("被动提示仍保留当前那张牌，不回跳第一条", async (context) => {
+    const { panel } = await createPanel(context, PanelState, ipc);
+    panel.selected = 3;
+    ipc.emit("paste-result", pasteResult({ hint_dwell_ms: 3000, hint_message: "只复制提示" }));
+    assert.equal(panel.interaction, "passive");
+    assert.equal(panel.currentItem.id, 104);
+  });
+});
+
+test("v10 前端审查：冻结手牌、当前页数字、一叠和边界保护", async (suite) => {
+  const { PanelState, ipc, cleanup } = await compilePanel();
+  suite.after(cleanup);
+
+  await suite.test("搜索结果含常用时 Ctrl+数字取到的就是键帽上那一条；只认 1–7", async (context) => {
+    const { panel } = await createPanel(context, PanelState, ipc);
+    // 搜索结果里 108、109 是常用：排在最前，自成一组；键帽从看得见的第一条开始数。
+    panel.searchItems = items().map((item) => item.id >= 108 ? { ...item, favorite: true, favorite_position: item.id - 107 } : item);
+    panel.selected = 0;
+    assert.equal(panel.pose, "spread");
+    const keycap = (digit) => panel.handSource[panel.spread.visible[digit - 1]].id;
+    assert.equal(keycap(1), 108);
+    for (const digit of [1, 2, 3, 7]) {
+      const expected = keycap(digit);
+      keydown(panel, { key: String(digit), ctrlKey: true });
+      assert.equal(ipc.calls.at(-1)?.id, expected, `Ctrl+${digit} 等于键帽 ${digit} 那张`);
+      panel.busy = false;
+    }
+    ipc.calls.length = 0;
+    for (const key of ["8", "9", "0"]) {
+      const event = keydown(panel, { key, ctrlKey: true });
+      assert.equal(event.defaultPrevented, true);
+    }
+    assert.deepEqual(ipc.calls, [], "Ctrl+8/9/0 不取用");
+    // 选中滚到下面后，键帽跟着看得见的行重排，数字仍对应眼前的条目。
+    const many = Array.from({ length: 30 }, (_, index) => ({ ...items()[0], id: 401 + index }));
+    panel.searchItems = many;
+    panel.selected = 25;
+    const first = panel.handSource[panel.spread.visible[0]].id;
+    assert.ok(first > 401, "滚动后第一条可见行不是第 1 条");
+    keydown(panel, { key: "1", ctrlKey: true });
+    assert.equal(ipc.calls.at(-1)?.id, first);
+  });
+
+  await suite.test("多选 2 张 → 进入搜索 → Enter / Ctrl+Enter 发出队列", async (context) => {
+    for (const action of [{ key: "Enter", mode: "paste" }, { key: "Enter", ctrlKey: true, mode: "text" }]) {
+      await context.test(`普通 quick 搜索 ${action.ctrlKey ? "Ctrl+" : ""}Enter`, async (subcontext) => {
+        const { panel } = await createPanel(subcontext, PanelState, ipc);
+        panel.mode = "quick"; panel.selected = 0;
+        ipc.emit("key", { session: 37, key: "Space" });
+        ipc.emit("key", { session: 37, key: "Space" });
+        assert.deepEqual(panel.stack.map((item) => item.id), [101, 102]);
+        panel.mode = "search"; panel.query = "别的词";
+        panel.searchItems = items().slice(5);
+        keydown(panel, action);
+        assert.deepEqual(ipc.calls.at(-1), { command: "startQueue", session: 37, ids: [101, 102], automatic: true, mode: action.mode, selection: { revision: 3, nonce: 1 } });
+        assert.doesNotMatch(panel.message, /无法确认/);
+      });
+      await context.test(`Activated 搜索 ${action.ctrlKey ? "Ctrl+" : ""}Enter（已选不在当前结果里）`, async (subcontext) => {
+        const { panel } = await activatedSearch(subcontext, PanelState, ipc);
+        panel.stack = [{ ...items()[0], id: 900 }, { ...items()[0], id: 901 }];
+        keydown(panel, action); keyup(panel, action);
+        if (action.ctrlKey) keyup(panel, { key: "Control", code: "ControlLeft" });
+        assert.deepEqual(ipc.calls.at(-1), { command: "startQueue", session: 37, ids: [900, 901], automatic: true, mode: action.mode, selection: { revision: 3, nonce: 1 } });
+      });
+    }
+  });
+
+  await suite.test("面板可见时来了新复制：数字 1–7 对应的 id 不变，只给“新来 N 张”", async (context) => {
+    const { panel } = await createPanel(context, PanelState, ipc);
+    panel.mode = "quick";
+    const before = [1, 2, 3, 4, 5, 6, 7].map((digit) => panel.handSource[panel.digitTarget(digit)].id);
+    ipc.store.history = { ...panel.history, items: [{ ...items()[0], id: 200 }, { ...items()[0], id: 201 }, ...items()] };
+    ipc.emit("history-changed", { session: 37 });
+    await flush(); await flush();
+    assert.deepEqual([1, 2, 3, 4, 5, 6, 7].map((digit) => panel.handSource[panel.digitTarget(digit)].id), before);
+    assert.equal(panel.arrivals, 2);
+    ipc.emit("key", { session: 37, key: "1" });
+    assert.deepEqual(ipc.calls.at(-1), { command: "pasteItem", session: 37, id: before[0], mode: "paste" });
+  });
+
+  await suite.test("Esc 逐层退出：看全 → 搜索 → 已选（可撤销）→ 摊开 → 收起", async (context) => {
+    context.mock.timers.enable({ apis: ["setTimeout"] });
+    const { panel } = await createPanel(context, PanelState, ipc);
+    panel.stack = items().slice(0, 2);
+    panel.navigate("Tab");
+    assert.equal(panel.previewOpen, true, "搜索中 Tab 也能看全");
+    keydown(panel, { key: "Escape" });
+    assert.equal(panel.previewOpen, false);
+    assert.equal(panel.query, "合成");
+    keydown(panel, { key: "Escape" });
+    assert.equal(panel.query, "", "第二下清空搜索");
+    assert.equal(panel.pose, "fan", "并收回扇面");
+    assert.equal(panel.stack.length, 2);
+    keydown(panel, { key: "Escape" });
+    assert.equal(panel.stack.length, 0, "第三下清空已选");
+    assert.match(panel.notice, /Ctrl\+Z 恢复/);
+    const undo = keydown(panel, { key: "z", ctrlKey: true });
+    assert.equal(undo.defaultPrevented, true);
+    assert.deepEqual(panel.stack.map((item) => item.id), [101, 102], "Ctrl+Z 恢复已选");
+    panel.stack = [];
+    keydown(panel, { key: "ArrowDown" });
+    assert.equal(panel.pose, "spread");
+    keydown(panel, { key: "Escape" });
+    assert.equal(panel.pose, "fan", "第四层收回扇面");
+    assert.deepEqual(ipc.calls, []);
+    keydown(panel, { key: "Escape" });
+    assert.deepEqual(ipc.calls, [{ command: "hidePanel", session: 37 }], "最后才收起面板");
+  });
+
+  await suite.test("搜索框删空回到扇面后：数字直接取用、空格多选，字母仍是搜索", async (context) => {
+    const { panel } = await createPanel(context, PanelState, ipc);
+    panel.query = "";
+    assert.equal(panel.pose, "fan");
+    const space = keydown(panel, { key: " ", code: "Space" });
+    assert.equal(space.defaultPrevented, true);
+    assert.equal(panel.stack.length, 1);
+    const letter = keydown(panel, { key: "a", code: "KeyA" });
+    assert.equal(letter.defaultPrevented, false, "字母交给输入框");
+    const digit = keydown(panel, { key: "3", code: "Digit3" });
+    assert.equal(digit.defaultPrevented, true);
+    assert.equal(ipc.calls.at(-1)?.id, panel.handSource[2].id);
+  });
+
+  await suite.test("鼠标悬停：只有真实 pointermove 之后、且不忙不在看全时才改选中", async (context) => {
+    const { panel } = await createPanel(context, PanelState, ipc);
+    panel.mode = "quick"; panel.selected = 0;
+    panel.hoverSelect(3);
+    assert.equal(panel.selected, 0, "没有 pointermove 时静止的光标不改选中");
+    panel.pointerMoved();
+    panel.hoverSelect(3);
+    assert.equal(panel.selected, 3);
+    ipc.emit("key", { session: 37, key: "ArrowRight" });
+    panel.hoverSelect(1);
+    assert.equal(panel.selected, 4, "键盘换牌后要重新移动鼠标");
+    panel.pointerMoved(); panel.busy = true;
+    panel.hoverSelect(1);
+    assert.equal(panel.selected, 4, "busy 时不改");
+    panel.busy = false; panel.previewOpen = true;
+    panel.hoverSelect(1);
+    assert.equal(panel.selected, 4, "看全打开时不改");
+    panel.previewOpen = false;
+    panel.spreadOpen(4);
+    panel.hoverSelect(1);
+    assert.equal(panel.selected, 4, "摊开里悬停只加底色");
+  });
+
+  await suite.test("滚轮：扇面向下摊开，摊开里逐条，第一条再向上收回", async (context) => {
+    const { panel } = await createPanel(context, PanelState, ipc);
+    panel.mode = "quick"; panel.selected = 2;
+    panel.wheel(-1);
+    assert.equal(panel.pose, "fan");
+    panel.wheel(1);
+    assert.equal(panel.pose, "spread");
+    assert.equal(panel.selected, 2);
+    panel.wheel(1);
+    assert.equal(panel.selected, 3);
+    panel.selected = 0;
+    panel.wheel(-1);
+    assert.equal(panel.pose, "fan");
+  });
+
+  await suite.test("新复制和复用置顶不重排冻结手牌，下次呼出才采用新顺序", async (context) => {
+    const { panel } = await createPanel(context, PanelState, ipc);
+    panel.mode = "quick";
+    const before = panel.handSource.map((item) => item.id);
+    const added = { ...items()[0], id: 100 };
+    const next = [added, ...items()];
+    ipc.store.history = { ...panel.history, items: next };
+    ipc.emit("history-changed", { session: 37 });
+    await flush(); await flush();
+    assert.deepEqual(panel.handSource.map((item) => item.id), before);
+    const reused = [next[5], ...next.filter((item) => item.id !== next[5].id)];
+    ipc.store.history = { ...panel.history, items: reused };
+    ipc.emit("history-changed", { session: 37 });
+    await flush(); await flush();
+    assert.deepEqual(panel.handSource.map((item) => item.id), before);
+    ipc.emit("shown", shown({ session: 38, history: { ...panel.history, items: next } }));
+    assert.equal(panel.handSource[0].id, 100);
+  });
+
+  await suite.test("一叠跨隐藏和呼出保留，Backspace 退回及队列确认入队才清空", async (context) => {
+    const { panel } = await createPanel(context, PanelState, ipc);
+    panel.mode = "quick";
+    panel.selected = 0;
+    panel.takeCurrent(); panel.takeCurrent();
+    assert.deepEqual(panel.stack.map((item) => item.id), [101, 102]);
+    ipc.emit("hidden", { session: 37 });
+    assert.equal(panel.stack.length, 2);
+    ipc.emit("shown", shown({ session: 38 }));
+    assert.deepEqual(panel.stack.map((item) => item.id), [101, 102]);
+    panel.untake();
+    assert.deepEqual(panel.stack.map((item) => item.id), [101]);
+    const starting = panel.startStackQueue(false, "paste");
+    assert.deepEqual(ipc.calls.at(-1), { command: "startQueue", session: 38, ids: [101], automatic: false, mode: "paste" });
+    assert.equal(panel.stack.length, 1, "IPC resolve 之前不能先清 stack");
+    // 事件故意先于 startQueue 的 Promise continuation 到达，回归早到事件被漏掉的竞态。
+    ipc.emit("queue", { session: 38, remaining: 1, total: 1, automatic: false, busy: false });
+    assert.equal(panel.stack.length, 0);
+    await starting;
+  });
+
+  await suite.test("旧会话或参数不匹配的队列事件不能清栈，真正确认仍可随后到达", async (context) => {
+    const { panel } = await createPanel(context, PanelState, ipc);
+    panel.mode = "quick";
+    panel.stack = items().slice(0, 2);
+    const starting = panel.startStackQueue(true, "paste");
+    assert.equal(ipc.calls.at(-1)?.command, "startQueue");
+    for (const event of [
+      { session: 36, remaining: 2, total: 2, automatic: true, busy: false },
+      { session: 37, remaining: 1, total: 1, automatic: true, busy: false },
+      { session: 37, remaining: 2, total: 2, automatic: false, busy: false },
+    ]) {
+      ipc.emit("queue", event);
+      assert.deepEqual(panel.stack.map((item) => item.id), [101, 102]);
+    }
+    ipc.emit("queue", { session: 37, remaining: 2, total: 2, automatic: true, busy: true });
+    assert.equal(panel.stack.length, 0);
+    await starting;
+  });
+
+  await suite.test("入队确认只消费提交时的快照，提交后变化的一叠必须保留", async (context) => {
+    const { panel } = await createPanel(context, PanelState, ipc);
+    panel.mode = "quick";
+    panel.stack = items().slice(0, 2);
+    const starting = panel.startStackQueue(false, "paste");
+    assert.equal(ipc.calls.at(-1)?.command, "startQueue");
+    panel.stack = [...panel.stack, items()[2]];
+    ipc.emit("queue", { session: 37, remaining: 2, total: 2, automatic: false, busy: false });
+    assert.deepEqual(panel.stack.map((item) => item.id), [101, 102, 103]);
+    // 后续进度事件没有待确认快照，也不能把后来的一叠清掉。
+    ipc.emit("queue", { session: 37, remaining: 1, total: 2, automatic: false, busy: true });
+    assert.deepEqual(panel.stack.map((item) => item.id), [101, 102, 103]);
+    await starting;
+  });
+
+  await suite.test("队列 IPC 失败保留一叠，之后的无关确认不能补清", async (context) => {
+    const { panel } = await createPanel(context, PanelState, ipc);
+    panel.mode = "quick";
+    panel.stack = items().slice(0, 2);
+    ipc.rejectNextQueue();
+    await panel.startStackQueue(true, "paste");
+    await flush();
+    assert.equal(ipc.calls.at(-1)?.command, "startQueue");
+    assert.deepEqual(panel.stack.map((item) => item.id), [101, 102]);
+    assert.equal(panel.busy, false);
+    ipc.emit("queue", { session: 37, remaining: 2, total: 2, automatic: true, busy: false });
+    assert.deepEqual(panel.stack.map((item) => item.id), [101, 102]);
+  });
+
+  await suite.test("搜索一叠接受普通、Ctrl、Ctrl+Shift Enter，拒绝 Shift+Enter 启动队列", async (context) => {
+    for (const action of [
+      { key: "Enter", automatic: true, mode: "paste" },
+      { key: "Enter", ctrlKey: true, automatic: true, mode: "text" },
+      { key: "Enter", ctrlKey: true, shiftKey: true, automatic: false, mode: "paste" },
+    ]) {
+      await context.test(`${action.ctrlKey ? "Ctrl+" : ""}${action.shiftKey ? "Shift+" : ""}Enter`, async (subcontext) => {
+        const { panel } = await activatedSearch(subcontext, PanelState, ipc);
+        panel.stack = items().slice(0, 2);
+        keydown(panel, action); keyup(panel, action);
+        if (action.ctrlKey) keyup(panel, { key: "Control", code: "ControlLeft", shiftKey: action.shiftKey });
+        if (action.shiftKey) keyup(panel, { key: "Shift", code: "ShiftLeft" });
+        assert.deepEqual(ipc.calls.at(-1), { command: "startQueue", session: 37, ids: [101, 102], automatic: action.automatic, mode: action.mode, selection: { revision: 3, nonce: 1 } });
+      });
+    }
+    await context.test("Shift+Enter", async (subcontext) => {
+      const { panel } = await activatedSearch(subcontext, PanelState, ipc);
+      panel.stack = items().slice(0, 2); panel.selected = 2;
+      const action = { key: "Enter", shiftKey: true };
+      keydown(panel, action); keyup(panel, action);
+      keyup(panel, { key: "Shift", code: "ShiftLeft" });
+      assert.deepEqual(ipc.calls, [], "有已选时 Shift+Enter 不执行，也不启动队列");
+      assert.match(panel.notice, /不会丢掉它们/);
+      assert.equal(panel.stack.length, 2);
+    });
+  });
+
+  await suite.test("首尾边界：扇面 PgUp 不动，摊开首条 PgUp、末条 PgDn 不动", async (context) => {
+    const { panel } = await createPanel(context, PanelState, ipc);
+    panel.mode = "quick"; panel.selected = 0;
+    ipc.emit("key", { session: 37, key: "PageUp" });
+    assert.equal(panel.selected, 0);
+    assert.equal(panel.pose, "fan");
+    ipc.emit("key", { session: 37, key: "PageDown" });
+    assert.equal(panel.pose, "spread");
+    assert.equal(panel.selected, 7);
+    ipc.emit("key", { session: 37, key: "PageDown" });
+    assert.equal(panel.selected, 8, "翻一屏但不越过最后一条");
+    ipc.emit("key", { session: 37, key: "PageDown" });
+    assert.equal(panel.selected, 8, "末条 PgDn 不动");
+    ipc.emit("key", { session: 37, key: "End" });
+    assert.equal(panel.selected, 8);
+    ipc.emit("key", { session: 37, key: "PageUp" });
+    ipc.emit("key", { session: 37, key: "PageUp" });
+    assert.equal(panel.selected, 0);
+    ipc.emit("key", { session: 37, key: "PageUp" });
+    assert.equal(panel.selected, 0, "首条 PgUp 不动");
+    assert.equal(panel.pose, "spread", "PgUp 不收回");
+    // 不足 7 张时扇面 PgDn 没有第 8 条可去，不动。
+    panel.collapse();
+    panel.history = { ...panel.history, items: items().slice(0, 5) };
+    ipc.emit("shown", shown({ session: 38, history: { ...panel.history, items: items().slice(0, 5) } }));
+    ipc.emit("key", { session: 38, key: "PageDown" });
+    assert.equal(panel.pose, "fan");
+  });
+
+  await suite.test("已选的牌不响应数字和单击单独取用；删除时同步移出已选", async (context) => {
+    const { panel } = await createPanel(context, PanelState, ipc);
+    panel.mode = "quick"; panel.selected = 0;
+    panel.takeCurrent(); panel.selected = 0;
+    await panel.choose(0, "paste");
+    panel.chooseByMouse(0, click());
+    ipc.emit("key", { session: 37, key: "1" });
+    assert.deepEqual(ipc.calls, []);
+    assert.match(panel.notice, /已在已选里/);
+    ipc.emit("key", { session: 37, key: "Delete:down" });
+    await flush();
+    assert.deepEqual(ipc.calls, [{ command: "deleteItem", id: 101 }]);
+    assert.equal(panel.stack.length, 0, "删掉的牌从已选里移除");
+  });
+
+  await suite.test("start_queue 返回的中文原因原样显示，不当成通用失败", async (context) => {
+    const { panel } = await createPanel(context, PanelState, ipc);
+    panel.mode = "quick";
+    panel.stack = items().slice(0, 2);
+    ipc.rejectNextQueue("逐张放不支持“只复制”模式");
+    await panel.startStackQueue(false, "paste");
+    await flush();
+    assert.equal(panel.message, "逐张放不支持“只复制”模式");
+    assert.equal(panel.busy, false);
+    assert.equal(panel.stack.length, 2);
+  });
+
+  await suite.test("避让外形：扇面 / 摊开各自固定，不随选中变化；拖牌时不带；没有手牌画面时为 null", async (context) => {
+    const { panel } = await createPanel(context, PanelState, ipc);
+    panel.mode = "quick"; panel.selected = 0;
+    const fan = { left: 28, top: 27, width: 929, height: 502 };
+    assert.deepEqual({ ...panel.avoidOutline }, fan);
+    for (const index of [3, 6]) { panel.selected = index; assert.deepEqual({ ...panel.avoidOutline }, fan, `拈起第 ${index + 1} 张时外形不变`); }
+    panel.spreadOpen(0);
+    assert.deepEqual({ ...panel.avoidOutline }, { left: 96, top: 0, width: 648, height: 540 });
+    panel.selected = 8;
+    assert.deepEqual({ ...panel.avoidOutline }, { left: 96, top: 0, width: 648, height: 540 });
+    panel.dragging = true;
+    assert.equal(panel.avoidOutline, undefined, "拖牌期间不带 avoid");
+    panel.dragging = false;
+    ipc.emit("hidden", { session: 37 });
+    assert.equal(panel.avoidOutline, null);
+  });
+
+  await suite.test("逐张放异常停止：小指示停留显示原因，没放出去的下次呼出放回已选并提示", async (context) => {
+    context.mock.timers.enable({ apis: ["setTimeout"] });
+    const { panel } = await createPanel(context, PanelState, ipc);
+    panel.stack = [];
+    ipc.emit("hidden", { session: 37, queue: true });
+    const stop = { session: 37, remaining: 0, total: 4, automatic: false, busy: false, error: "两分钟没有放牌，逐张放已停止；请重新选择剩余条目。", stopped: "idle_timeout", remaining_ids: [103, 999, 101] };
+    ipc.emit("queue", stop);
+    ipc.emit("hidden", { session: 37 });
+    assert.equal(panel.queue?.error, stop.error, "收起后小指示仍显示原因");
+    context.mock.timers.tick(3300);
+    assert.equal(panel.queue, null, "约 3 秒后消失");
+    ipc.emit("shown", shown({ session: 38 }));
+    assert.deepEqual(panel.stack.map((item) => item.id), [103, 101], "按原顺序放回，过滤已不存在的");
+    assert.match(panel.notice, /上次还剩 2 张没粘贴，已放回已选/);
+  });
+
+  for (const stopped of ["done", "cancelled", "escape"]) {
+    await suite.test(`逐张放正常结束（${stopped}）不放回、不提示`, async (context) => {
+      const { panel } = await createPanel(context, PanelState, ipc);
+      panel.stack = [];
+      ipc.emit("queue", { session: 37, remaining: 0, total: 2, automatic: false, busy: false, error: null, stopped, remaining_ids: [101] });
+      assert.equal(panel.queue, null);
+      ipc.emit("hidden", { session: 37 });
+      ipc.emit("shown", shown({ session: 38 }));
+      assert.equal(panel.stack.length, 0);
+      assert.equal(panel.notice, "");
+    });
+  }
+
+  await suite.test("已选跨呼出保留时，呼出给轻提示", async (context) => {
+    const { panel } = await createPanel(context, PanelState, ipc);
+    panel.stack = items().slice(0, 2);
+    ipc.emit("hidden", { session: 37 });
+    ipc.emit("shown", shown({ session: 38 }));
+    assert.match(panel.notice, /还有 2 张已选/);
+  });
+
+  await suite.test("收起后清掉手牌画面，下一次 panel:shown 前不留旧牌", async (context) => {
+    const { panel } = await createPanel(context, PanelState, ipc);
+    panel.mode = "quick";
+    panel.spreadOpen(3);
+    assert.ok(panel.fanItems.length > 0);
+    ipc.emit("hidden", { session: 37 });
+    assert.equal(panel.visible, false);
+    assert.equal(panel.history.items.length, 0);
+    assert.equal(panel.fanItems.length, 0);
+    assert.equal(panel.handSource.length, 0);
+    assert.equal(panel.pose, "fan");
+    assert.equal(panel.query, "");
+    ipc.emit("shown", shown({ session: 38, history: { items: items().slice(0, 3), total: 3, recording: true, last_recorded_ms: null, store_status: null } }));
+    assert.deepEqual(panel.fanItems.map((item) => item.id), [101, 102, 103]);
+  });
+
+  await suite.test("已选第 33 张在前端拦住并给出明确提示", async (context) => {
+    const many = Array.from({ length: 40 }, (_, index) => ({ ...items()[0], id: 101 + index }));
+    const history = { items: many, total: many.length, recording: true, last_recorded_ms: null, store_status: null };
+    const { panel } = await createPanel(context, PanelState, ipc, { history });
+    panel.mode = "quick";
+    panel.spreadOpen(0);
+    for (let index = 0; index < 32; index++) panel.takeCurrent();
+    assert.equal(panel.stack.length, 32);
+    panel.selected = 32; panel.takeCurrent();
+    assert.equal(panel.stack.length, 32);
+    assert.match(panel.notice, /最多选 32 张/);
+    assert.deepEqual(ipc.calls, []);
+  });
+
+  await suite.test("搜索 Esc 先清空搜索词，空搜索词时再按才收起", async (context) => {
+    const { panel } = await createPanel(context, PanelState, ipc);
+    panel.query = "待清空";
+    keydown(panel, { key: "Escape" });
+    assert.equal(panel.query, "");
+    assert.equal(panel.mode, "search");
+    assert.deepEqual(ipc.calls, []);
+    keydown(panel, { key: "Escape" });
+    assert.deepEqual(ipc.calls, [{ command: "hidePanel", session: 37 }]);
+  });
+});
+
+test("九种牌面判定与网址拆分（纯函数）", async (suite) => {
+  const { cards, cleanup } = await compilePanel();
+  suite.after(cleanup);
+  const text = (preview) => ({ kind: "文本", preview, file_names: [] });
+  const cases = [
+    ["short", text("周四下午三点过设计稿")],
+    ["short", text("收到，谢谢！")],
+    ["long", text("本周进展\n手牌改成每手七张，牌摆得更平。")],
+    ["long", text("好的，那我先把初稿发你，有空帮忙看看，晚点再对一下细节。")],
+    ["link", text("https://github.com/eiaao/nianlai/pull/31")],
+    ["link", text("www.zhihu.com/question/20297180")],
+    ["code", text("const hand = await openHand({\n  near: caret,\n});")],
+    ["code", text("git pull --rebase")],
+    ["image", { kind: "图片", preview: "图片 1280×720", file_names: [] }],
+    ["color", text("#C8432B")],
+    ["color", text("rgb(58, 110, 165)")],
+    ["color", text("hsl(9, 65%, 48%)")],
+    ["file", { kind: "文件", preview: "", file_names: ["设计稿-v10.pdf", "图标源文件.zip"] }],
+    ["mail", text("hugh@nianlai.app")],
+    ["number", text("138 0000 1234")],
+    ["number", text("6222 0210 0112 3456 789")],
+    ["number", text("91310000MA1234567X")],
+    ["number", text("2026-1108-0031")],
+    ["short", text("")],
+    ["long", { kind: "富文本", preview: "第一行\n第二行", file_names: [] }],
+  ];
+  for (const [kind, item] of cases) {
+    await suite.test(`${kind}：${item.preview || item.file_names.join("、") || "（空）"}`, () => {
+      assert.equal(cards.cardKind(item), kind);
+    });
+  }
+  await suite.test("不是颜色、网址、邮箱、号码的近似文本", () => {
+    for (const value of ["#C8432", "rgb(1,2)", "github", "a@b", "12345", "第 3 版", "hello world"]) {
+      assert.ok(["short", "long"].includes(cards.cardKind(text(value))), value);
+    }
+  });
+  await suite.test("相似网址：末两段墨色、前缀淡色，彼此可区分", () => {
+    const parts = [
+      "https://github.com/eiaao/nianlai/pull/31",
+      "https://github.com/eiaao/nianlai/pull/32",
+      "https://github.com/eiaao/nianlai/issues/31",
+      "https://github.com/eiaao/nianlai/pull/31/files",
+      "https://github.com/tauri-apps/tauri/issues/31",
+    ].map((url) => cards.linkParts(url));
+    assert.deepEqual(parts.map((part) => part.host), Array(5).fill("github.com"));
+    assert.deepEqual(parts.map((part) => part.tail), ["pull/31", "pull/32", "issues/31", "31/files", "issues/31"]);
+    assert.deepEqual(parts.map((part) => part.prefix), ["/eiaao/nianlai/", "/eiaao/nianlai/", "/eiaao/nianlai/", "/eiaao/nianlai/pull/", "/tauri-apps/tauri/"]);
+    assert.equal(new Set(parts.map((part) => part.prefix + part.tail)).size, 5);
+    assert.deepEqual(cards.linkParts("https://www.figma.com/"), { href: "https://www.figma.com/", host: "figma.com", prefix: "", tail: "" });
+    assert.equal(cards.linkParts("https://a.com/x?q=1 y"), null);
+  });
+  await suite.test("避让外形的数值与推导", () => {
+    assert.equal(cards.HAND_TOP, 285);
+    assert.deepEqual(cards.fanOutline(), { left: 112 - 84, top: 285 - 30 - 212 - 16, width: 828 + 104 + 9 + 16 - 28, height: 285 + 244 - 27 });
+    assert.deepEqual(cards.fanOutline(), { left: 28, top: 27, width: 929, height: 502 });
+    assert.deepEqual(cards.spreadOutline(), { left: 96, top: 0, width: 648, height: 540 });
+    assert.deepEqual(cards.outlineFor("spread"), cards.spreadOutline());
+    // 扇面外形必须盖住拈起最大高度的第 1 张、牌堆和常用露头。
+    const lifted = cards.fanBox(0, 0, cards.LIFT_MAX_H);
+    const fan = cards.fanOutline();
+    assert.ok(fan.top <= lifted.y && fan.left <= lifted.x);
+    assert.ok(fan.left + fan.width >= cards.DECK_X + cards.DECK_W);
+    assert.ok(fan.top <= cards.backBox(3).y);
+  });
+  await suite.test("颜色值换算：rgb 输入附 HEX，HSL 正确", () => {
+    const color = cards.colorValue("rgb(200, 67, 43)");
+    assert.equal(color.hex, "#C8432B");
+    assert.deepEqual(color.hsl, [9, 65, 48]);
+    assert.deepEqual(cards.colorValue("#fff").rgb, [255, 255, 255]);
+  });
+  await suite.test("拈起高度随内容：短内容不加高，最大 212", () => {
+    assert.equal(cards.liftHeight(text("短")), 176);
+    const tall = cards.liftHeight(text("x\n".repeat(20)));
+    assert.ok(tall > 176 && tall <= 212, "长文加高，但不超过 212");
+    assert.equal(cards.liftHeight({ kind: "图片", preview: "图片 1280×720", file_names: [] }), 212);
+    const box = cards.fanBox(6, 6, 200);
+    assert.equal(box.x + box.w, cards.ORIGIN_X + cards.HAND_W, "第 7 张右对齐，不越出手牌右边界");
+    assert.equal(cards.fanBox(0, 0, 200).x, cards.ORIGIN_X, "第 1 张左对齐");
+    assert.equal(box.w, 248);
+  });
+  await suite.test("摊开版面：选中项总在可视区，顶边不切半截，看得见的行连续", () => {
+    const many = Array.from({ length: 40 }, (_, index) => ({ ...text(`第 ${index} 条`), id: index, copied_ms: 0 }));
+    let scroll = 0;
+    for (const selected of [0, 5, 12, 30, 39, 20, 3]) {
+      const layout = cards.spreadLayout(many, selected, scroll, () => "更早");
+      scroll = layout.scroll;
+      assert.ok(layout.visible.includes(selected), `选中 ${selected} 可见`);
+      for (let index = 1; index < layout.visible.length; index++) assert.equal(layout.visible[index], layout.visible[index - 1] + 1);
+      const blocks = [...layout.heads.map((head) => ({ y: head.y, h: cards.HEAD_H })), ...layout.rows];
+      assert.ok(blocks.every((block) => !(block.y < scroll - 0.5 && block.y + block.h > scroll + 0.5)), `顶边不切半截（选中 ${selected}）`);
+    }
+  });
+  await suite.test("时间分组", () => {
+    const now = new Date(2026, 10, 12, 14, 32).getTime();
+    assert.equal(cards.timeGroup(now - 5 * 60_000, now), "刚才");
+    assert.equal(cards.timeGroup(new Date(2026, 10, 12, 9, 0).getTime(), now), "今天上午");
+    assert.equal(cards.timeGroup(new Date(2026, 10, 12, 12, 30).getTime(), now), "今天下午");
+    assert.equal(cards.timeGroup(new Date(2026, 10, 11, 20, 0).getTime(), now), "昨天");
+    assert.equal(cards.timeGroup(new Date(2026, 10, 10, 20, 0).getTime(), now), "这周早些时候");
+    assert.equal(cards.timeGroup(new Date(2026, 10, 1).getTime(), now), "更早");
+    assert.equal(cards.relativeTime(new Date(2026, 10, 11, 14, 51).getTime(), now), "昨天 14:51");
   });
 });
