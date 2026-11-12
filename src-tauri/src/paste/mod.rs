@@ -10,4 +10,5 @@ pub mod native_edit;
 pub mod native_publication_trace;
 pub mod outcome;
 pub mod permit;
+pub(crate) mod queue;
 pub mod request;

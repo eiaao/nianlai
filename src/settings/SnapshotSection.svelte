@@ -50,39 +50,39 @@
   }
 </script>
 
-<div><p class="page-intro">每天自动给历史库拍一份快照，版本更新后也会额外拍一份，保留最近 {snapshots?.keep ?? 7} 份。快照包含文字、图片和文件路径，不包含文件本身。出问题时可以把历史恢复到其中任何一份。</p></div>
+<div><p class="page-intro">每天自动给历史库存一份存档，版本更新后也会额外存一份，保留最近 {snapshots?.keep ?? 7} 份。存档包含文字、图片和文件路径，不包含文件本身。出问题时可以把历史恢复到其中任何一份。</p></div>
 
-<div class="group"><span class="group-title">快照</span><div class="card">
+<div class="group"><span class="group-title">存档</span><div class="card">
   {#if !snapshots}
     <p class="note">正在读取…</p>
   {:else}
-    <ul class="list" aria-label="快照列表">
+    <ul class="list" aria-label="存档列表">
       {#each snapshots.items as item (item.name)}
         <li>
           <div class="row">
             <span class="when">{time(item.created_ms)}</span>
             <span class="tags"><span class="tag">{item.reason ? REASONS[item.reason] : "自动"}</span>
-            {#if item.version !== null && item.version < snapshots.current_version}<span class="tag" title="这份快照的库结构是 v{item.version}，当前是 v{snapshots.current_version}">旧版本，恢复后自动升级</span>{/if}</span>
+            {#if item.version !== null && item.version < snapshots.current_version}<span class="tag" title="这份存档的库结构是 v{item.version}，当前是 v{snapshots.current_version}">旧版本，恢复后自动升级</span>{/if}</span>
             <span class="bytes">{size(item.bytes)}</span>
             <button type="button" disabled={!!busy || disabled} onclick={() => { confirming = confirming === item.name ? null : item.name; actionError = ""; }}>恢复</button>
           </div>
           {#if confirming === item.name}
             <div class="confirm" role="alert">
-              <p>把历史恢复到 {time(item.created_ms)}？之后新增的记录会消失。当前历史会先另存成一份“恢复前”快照，{snapshots.relaunch ? "然后拈来自动重启。" : "然后拈来退出，需要手动重新打开。"}</p>
+              <p>把历史恢复到 {time(item.created_ms)}？之后新增的记录会消失。当前历史会先另存成一份“恢复前”存档，{snapshots.relaunch ? "然后拈来自动重启。" : "然后拈来退出，需要手动重新打开。"}</p>
               <div>
-                <button type="button" class="danger" disabled={!!busy} onclick={() => restore(item)}>{busy === "restore" ? "正在校验快照…" : "确认恢复"}</button>
+                <button type="button" class="danger" disabled={!!busy} onclick={() => restore(item)}>{busy === "restore" ? "正在校验存档…" : "确认恢复"}</button>
                 <button type="button" disabled={!!busy} onclick={() => { confirming = null; }}>取消</button>
               </div>
             </div>
           {/if}
         </li>
       {:else}
-        <li class="empty">还没有快照。拈来启动后会自动拍第一份。</li>
+        <li class="empty">还没有存档。拈来启动后会自动存第一份。</li>
       {/each}
     </ul>
     <div class="foot">
       <small>共 {snapshots.items.length} 份，占用 {size(total)}</small>
-      <button type="button" disabled={!!busy || disabled} onclick={create}>{busy === "create" ? "正在拍快照…" : "立即拍一份"}</button>
+      <button type="button" disabled={!!busy || disabled} onclick={create}>{busy === "create" ? "正在存档…" : "立即存一份"}</button>
     </div>
   {/if}
   {#if actionError}<p class="note error">{actionError}</p>{/if}
@@ -90,8 +90,8 @@
 
 <div class="group"><span class="group-title">空间</span><div class="card">
   <label class="setting">
-    <span class="setting-copy"><strong>快照占用上限</strong><small>超过上限时从最旧的删起，至少保留最新的一份。</small></span>
-    <select value={String(maxMb)} {disabled} onchange={(event) => onsave({ snapshots: { max_mb: Number(event.currentTarget.value) } }, "快照上限已保存，下次拍快照时生效")}>
+    <span class="setting-copy"><strong>存档占用上限</strong><small>超过上限时从最旧的删起，至少保留最新的一份。</small></span>
+    <select value={String(maxMb)} {disabled} onchange={(event) => onsave({ snapshots: { max_mb: Number(event.currentTarget.value) } }, "存档上限已保存，下次存档时生效")}>
       {#each LIMITS as mb}<option value={String(mb)}>{limitLabel(mb)}{mb === 1024 ? "（默认）" : ""}</option>{/each}
       {#if !LIMITS.includes(maxMb)}<option value={String(maxMb)}>{limitLabel(maxMb)}</option>{/if}
     </select>

@@ -11,6 +11,7 @@ pub mod image;
 pub mod ime;
 pub mod memory;
 pub mod paste;
+pub mod queue_hook;
 pub mod time;
 pub mod uia;
 pub mod webview;

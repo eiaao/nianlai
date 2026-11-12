@@ -13,11 +13,11 @@
 ## 特点
 
 - **不打断手头的事**：面板不激活窗口，目标程序的光标和选区保持原样；选中后直接粘贴回去。
-- **键盘优先**：数字键 1–9 直接取用，Enter 粘贴，Ctrl+Enter 粘贴为纯文本，Shift+Enter 只复制。
+- **键盘优先**：最近 7 张像一手牌，数字键 1–7 直接粘贴，Enter 粘贴，Ctrl+Enter 粘贴为纯文本，Shift+Enter 只复制。
 - **打字就搜**：全文搜索，支持中文；1 万条历史里搜索也在十几毫秒内完成。
 - **粘贴可靠**：发键前检查目标和剪贴板状态，尽量确认确实粘贴进去了；没把握时明确告诉你“已复制，请手动粘贴”，不会悄悄失败。
-- **收藏**：常用内容收藏后固定在顶部，不随历史过期，也不占用数字编号。
-- **三种布局**：分栏预览、极简列表、卡片流，可随时切换；深浅主题跟随系统。
+- **常用**：常用内容加入常用后单独一手、顺序固定，不随历史过期。
+- **手牌与摊开**：平时是一手扇面，要找更早的就把牌摊开成一列，连续滚动、按时间分组；深浅主题跟随系统。
 - **保留格式**：文字、富文本、图片、文件都按原格式记录，并显示来源程序的图标。
 - **本地优先**：数据只存在本机，不联网，不上传。
 
@@ -35,19 +35,24 @@
 
 | 按键 | 作用 |
 |---|---|
-| 直接打字 | 搜索 |
-| ↑ ↓ / PageUp PageDown / Home End | 选择（卡片流布局用 ← →） |
-| 1–9 | 直接粘贴对应条目（搜索时用 Ctrl+1–9） |
-| Enter | 粘贴 |
+| 1–7 | 粘贴对应的一张（摊开时是看得见的前 7 条，键帽上标着数字） |
+| Enter | 粘贴当前这张；有已选时按顺序一起粘贴 |
+| ← → | 上一张 / 下一张（任何状态都一样，搜索中也是） |
+| ↑ | 扇面里：切到常用；再按回到最近 |
+| ↓ / PageDown | 最近扇面里：摊开成一列；摊开里 ↓ 下一条、PageDown 翻一屏 |
+| Home / End | 摊开里：收回扇面 / 最后一条 |
+| 直接打字 | 搜索最近和常用（自动摊开）；搜索时数字是输入，用 Ctrl+1–7 粘贴 |
 | Ctrl+Enter | 粘贴为纯文本 |
-| Shift+Enter | 只复制，不粘贴 |
-| Space | 预览完整内容 |
-| Ctrl+D | 收藏 / 取消收藏 |
-| Delete | 把当前条目移到回收站（收藏的要按住不放，进度走满才删）；搜索时用 Ctrl+Delete |
+| Shift+Enter | 只复制当前一张，不粘贴（有已选时不执行，会提示） |
+| Tab | 看全（超长内容、原图）；看全里 Z 切换原图 |
+| 空格 | 多选；Backspace 放回最后选的一张 |
+| Ctrl+Shift+Enter | 已选的逐张放：之后每按一次 Ctrl+V 粘贴下一张，Esc 结束 |
+| Ctrl+D | 加入 / 移出常用 |
+| Delete | 把当前这张放进回收站（常用的要按住不放，进度走满才删）；搜索时用 Ctrl+Delete |
 | Ctrl+Z | 撤销最近的删除，关掉面板再打开也可以；可以连续撤销 |
-| Esc | 收起面板 |
+| Esc | 逐层退出：看全 → 搜索 → 已选 → 摊开 → 收起面板 |
 
-按住 Ctrl 或 Shift 稍等片刻，面板底部会提示对应的组合键。鼠标单击条目也可以直接取用。
+按住 Ctrl 或 Shift 稍等片刻，按键提示会换成对应的组合键。鼠标悬停在牌上会拈起它，单击直接粘贴；把牌拖到手牌以外松手也会粘贴（目前粘贴到呼出时的光标处）。滚轮向下摊开，摊开里滚轮逐条。
 
 退出：托盘图标右键“退出”，或按 Ctrl+Alt+Shift+Q。
 
@@ -68,8 +73,8 @@
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | v0.1 · M0 | 工程底座：单实例、托盘、自启、崩溃恢复、数据迁移、便携版 | ✅ |
-| v0.1 · M1 | 日常可用：来源程序、收藏、三种布局、主题、快捷键设置 | ✅ |
-| v0.1 · M2 | 数据安全：排除应用、跳过密码、暂停记录、快照与备份、存储管理、防误删 | 进行中 |
+| v0.1 · M1 | 日常可用：来源程序、常用、三种布局（v10 起改为手牌）、主题、快捷键设置 | ✅ |
+| v0.1 · M2 | 数据安全：排除应用、跳过密码、暂停记录、存档与备份、存储管理、防误删 | 进行中 |
 | v0.1 · M3 | 发布准备：应用内更新、首次引导、安装包 | 计划中 |
 | v0.5 | 拼音搜索、接管 Win+V、分组、从 Ditto / EcoPaste 导入、macOS Beta | 计划中 |
 | v1.0 | 连续粘贴、文本转换、手机扫码互传等 | 计划中 |
@@ -117,7 +122,7 @@ CI（`.github/workflows/ci.yml`）在 PR、推送到 `main` 和手动触发时�
 
 ## English
 
-Nianlai (拈来) is an open-source clipboard history manager for Windows. Press <kbd>Ctrl</kbd>+<kbd>`</kbd> to open the panel **without stealing focus**, type to search (including Chinese), and press Enter or 1–9 to paste straight into the app you were using. Everything stays on your machine — no network access. It is an early alpha: Windows x64 only, portable zip from [Releases](https://github.com/eiaao/nianlai/releases). macOS is planned for v0.5.
+Nianlai (拈来) is an open-source clipboard history manager for Windows. Press <kbd>Ctrl</kbd>+<kbd>`</kbd> to open the panel **without stealing focus**, type to search (including Chinese), and press Enter or 1–7 to paste straight into the app you were using. Everything stays on your machine — no network access. It is an early alpha: Windows x64 only, portable zip from [Releases](https://github.com/eiaao/nianlai/releases). macOS is planned for v0.5.
 
 ## 许可证
 

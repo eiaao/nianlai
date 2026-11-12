@@ -14,6 +14,14 @@ pub struct Publication {
 }
 
 impl Publication {
+    pub fn owner(self) -> usize {
+        self.owner
+    }
+
+    pub fn sequence(self) -> u32 {
+        self.sequence
+    }
+
     // 写线程必须先成功 Close，再调用；sequence -> 精确 owner -> sequence。
     pub fn sample(
         writer: usize,

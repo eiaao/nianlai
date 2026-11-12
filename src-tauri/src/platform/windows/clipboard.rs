@@ -5,7 +5,7 @@ use crate::{
         content::{Content, Data, FILES, Fingerprint, HTML, RTF, TEXT},
     },
     log::Logger,
-    paste::{capture_access::CaptureAccess, native_access},
+    paste::{capture_access::CaptureAccess, native_access, queue},
     platform::Result,
 };
 use serde_json::{Value, json};
@@ -188,6 +188,27 @@ struct Pending {
 }
 thread_local! { static PENDING: RefCell<Option<Pending>> = const { RefCell::new(None) }; }
 
+// 剪贴板变化观察者（逐张放队列用它发现用户自己复制了新内容）。回调在剪贴板线程上执行，
+// 参数是同一个稳定采样里的持有者与序号；None 表示不再观察。
+pub type Watcher = Box<dyn Fn(queue::Stamp) + Send>;
+thread_local! { static WATCHER: RefCell<Option<Watcher>> = const { RefCell::new(None) }; }
+
+fn stamp() -> queue::Stamp {
+    queue::Stamp {
+        owner: unsafe { GetClipboardOwner() }.unwrap_or_default().0 as usize,
+        sequence: unsafe { GetClipboardSequenceNumber() },
+    }
+}
+
+fn queue_error(reason: queue::Stop) -> &'static str {
+    match reason {
+        queue::Stop::ClipboardChanged => "native_clipboard_changed",
+        queue::Stop::Cancelled => "request_cancelled",
+        queue::Stop::Timeout | queue::Stop::ItemTimeout => "native_clipboard_busy",
+        _ => "clipboard_write_failed",
+    }
+}
+
 fn memory(name: &str, data: &Data) -> Result<Memory> {
     match data {
         Data::Bytes(bytes) => Memory::padded(
@@ -209,7 +230,11 @@ fn render(format: Option<u32>, record_reader: bool) {
         let mut reader_process = None;
         if record_reader
             && format.is_some_and(|id| pending.formats.contains_key(&id))
-            && !pending.observation.lock().unwrap().observed()
+            && !pending
+                .observation
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .observed()
         {
             let at = Instant::now();
             let mut process = 0;
@@ -218,7 +243,11 @@ fn render(format: Option<u32>, record_reader: bool) {
                     GetWindowThreadProcessId(reader, Some(&mut process));
                 }
             }
-            pending.observation.lock().unwrap().first = Some(Read {
+            pending
+                .observation
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .first = Some(Read {
                 at,
                 process_name: String::new(),
                 known: process != 0,
@@ -244,13 +273,23 @@ fn render(format: Option<u32>, record_reader: bool) {
             {
                 pending.formats.remove(&id);
             } else {
-                pending.observation.lock().unwrap().render_failed = true;
+                pending
+                    .observation
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .render_failed = true;
             }
         }
         // 先交付正文再解析进程名，避免进程查询拖住目标的 GetClipboardData。
         if let Some(process) = reader_process {
             let name = window::process_name(process);
-            if let Some(first) = pending.observation.lock().unwrap().first.as_mut() {
+            if let Some(first) = pending
+                .observation
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .first
+                .as_mut()
+            {
                 first.process_name = name;
             }
         }
@@ -302,7 +341,21 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wp: WPARAM, lp: LP
         WM_DESTROYCLIPBOARD => {
             PENDING.with(|state| {
                 if let Some(pending) = state.borrow_mut().take() {
-                    pending.observation.lock().unwrap().destroyed = true;
+                    pending
+                        .observation
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .destroyed = true;
+                }
+            });
+            LRESULT(0)
+        }
+        WM_CLIPBOARDUPDATE => {
+            // 只读元数据并转发；不在剪贴板线程里做任何粘贴或窗口操作。
+            let stamp = stamp();
+            WATCHER.with(|watcher| {
+                if let Some(callback) = watcher.borrow().as_ref() {
+                    callback(stamp);
                 }
             });
             LRESULT(0)
@@ -318,14 +371,28 @@ pub struct Record {
     pub fingerprint: Fingerprint,
 }
 
-fn write(
+struct WriteRequest<'a> {
     owner: HWND,
     record: Record,
-    content: &Content,
-    history: &History,
+    content: &'a Content,
+    history: &'a History,
     target: u32,
     delayed: bool,
     observation: Arc<Mutex<Observation>>,
+    lease: Option<queue::Lease<'a>>,
+}
+
+fn write(
+    WriteRequest {
+        owner,
+        record,
+        content,
+        history,
+        target,
+        delayed,
+        observation,
+        mut lease,
+    }: WriteRequest<'_>,
 ) -> Result<()> {
     observation.lock().unwrap().immediate = !delayed;
     let mut pending = BTreeMap::new();
@@ -380,8 +447,21 @@ fn write(
         return Err("record_missing".into());
     }
     let started = Instant::now();
+    let mut before_sequence = None;
     loop {
+        if let Some(lease) = lease.as_mut() {
+            lease.check(stamp()).map_err(queue_error)?;
+        }
         if unsafe { OpenClipboard(Some(owner)) }.is_ok() {
+            if let Some(lease) = lease.as_mut() {
+                let stamp = stamp();
+                if stamp.sequence == 0 {
+                    return Err("clipboard_sequence_unavailable".into());
+                }
+                // 租约锁仍持有，且此处就在 EmptyClipboard 紧前复核 owner + sequence。
+                lease.begin(stamp).map_err(queue_error)?;
+                before_sequence = Some(stamp.sequence);
+            }
             break;
         }
         if started.elapsed() >= Duration::from_millis(200) {
@@ -479,6 +559,30 @@ fn write(
             Err(reason) => observed.publication_error = Some(reason),
         }
     }
+    if let Some(lease) = lease.as_mut() {
+        match publication {
+            Ok(publication) => {
+                let stamp = queue::Stamp {
+                    owner: publication.owner(),
+                    sequence: publication.sequence(),
+                };
+                if before_sequence == Some(stamp.sequence) {
+                    // sequence 没变时再用租约确认 owner；变化时精确 owner 已由 publish 证明。
+                    lease.check(stamp).map_err(queue_error)?;
+                }
+                lease.published(stamp);
+            }
+            Err(error) => {
+                // 队列没有可确认的发布事实：通知 watcher 并让发送资格立即失效，不能静默退回。
+                lease.begin(stamp()).map_err(queue_error)?;
+                return Err(if error == native_access::CLOSE_FAILED {
+                    "clipboard_close_failed".into()
+                } else {
+                    "clipboard_sequence_changed".into()
+                });
+            }
+        }
+    }
     history.reuse(record.id);
     Ok(())
 }
@@ -490,7 +594,12 @@ enum Command {
         target: u32,
         delayed: bool,
         observation: Arc<Mutex<Observation>>,
+        guard: Option<Arc<queue::Guard>>,
         reply: mpsc::SyncSender<Result<()>>,
+    },
+    Watch {
+        watcher: Option<Watcher>,
+        reply: mpsc::SyncSender<()>,
     },
     Stop,
 }
@@ -551,6 +660,10 @@ impl Service {
                     }
                 };
                 logger.event("clipboard_thread_started", json!({"message_only":true}));
+                // 监听剪贴板变化（WM_CLIPBOARDUPDATE）；观察者由 Service::set_clipboard_watcher 设置。
+                unsafe {
+                    let _ = AddClipboardFormatListener(owner);
+                }
                 if ready.send(Ok(owner.0 as usize)).is_err() {
                     unsafe {
                         let _ = DestroyWindow(owner);
@@ -572,17 +685,24 @@ impl Service {
                                     target,
                                     delayed,
                                     observation,
+                                    guard,
                                     reply,
                                 } => {
-                                    let _ = reply.send(write(
+                                    let lease = guard.as_ref().map(|guard| guard.lease());
+                                    let _ = reply.send(write(WriteRequest {
                                         owner,
                                         record,
-                                        &content,
-                                        &history,
+                                        content: &content,
+                                        history: &history,
                                         target,
                                         delayed,
                                         observation,
-                                    ));
+                                        lease,
+                                    }));
+                                }
+                                Command::Watch { watcher, reply } => {
+                                    WATCHER.with(|slot| *slot.borrow_mut() = watcher);
+                                    let _ = reply.send(());
                                 }
                                 Command::Stop => {
                                     logger.event(
@@ -601,6 +721,7 @@ impl Service {
                     }
                 }
                 unsafe {
+                    let _ = RemoveClipboardFormatListener(owner);
                     let _ = DestroyWindow(owner);
                 }
                 PENDING.with(|state| state.borrow_mut().take());
@@ -639,6 +760,18 @@ impl Service {
         self.0.owner
     }
 
+    /// 设置/清除剪贴板变化观察者（WM_CLIPBOARDUPDATE）。回调在剪贴板线程上执行，收到的是
+    /// 这次变化的持有者与序号；序号 0 或无持有者由队列按外部变化保守停止。
+    pub fn set_clipboard_watcher(&self, watcher: Option<Watcher>) -> Result<()> {
+        let (reply, receiver) = mpsc::sync_channel(1);
+        self.command(Command::Watch { watcher, reply })?;
+        receiver.recv().map_err(|_| "clipboard_watch_failed".into())
+    }
+
+    pub fn stamp(&self) -> queue::Stamp {
+        stamp()
+    }
+
     pub fn capture_access(&self) -> Arc<CaptureAccess> {
         self.0.capture_access.clone()
     }
@@ -650,6 +783,28 @@ impl Service {
         target: u32,
         delayed: bool,
     ) -> Result<Arc<Mutex<Observation>>> {
+        self.write_inner(record, content, target, delayed, None)
+    }
+
+    pub fn write_guarded(
+        &self,
+        record: Record,
+        content: Arc<Content>,
+        target: u32,
+        delayed: bool,
+        guard: Arc<queue::Guard>,
+    ) -> Result<Arc<Mutex<Observation>>> {
+        self.write_inner(record, content, target, delayed, Some(guard))
+    }
+
+    fn write_inner(
+        &self,
+        record: Record,
+        content: Arc<Content>,
+        target: u32,
+        delayed: bool,
+        guard: Option<Arc<queue::Guard>>,
+    ) -> Result<Arc<Mutex<Observation>>> {
         let observation = Arc::new(Mutex::new(Observation::default()));
         let (reply, receiver) = mpsc::sync_channel(1);
         self.command(Command::Write {
@@ -658,6 +813,7 @@ impl Service {
             target,
             delayed,
             observation: observation.clone(),
+            guard,
             reply,
         })?;
         receiver.recv().map_err(|_| "clipboard_write_failed")??;

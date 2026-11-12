@@ -1,63 +1,55 @@
 <script lang="ts">
   import type { PanelState } from "../state.svelte";
   import Preview from "./Preview.svelte";
-  import { typeLabel } from "./content";
+  import { cardKind, KIND_NAME } from "../cards";
 
-  let { panel, compact = false }: { panel: PanelState; compact?: boolean } = $props();
-  // 类型标签里的字数来自列表摘要（最多 300 字）；取到全文后换成全文字数。
-  const fullLabel = (label: string) => panel.fullChars === null ? label : label.replace(/[\d,]+ 字/, `${panel.fullChars.toLocaleString("zh-CN")} 字`);
+  let { panel }: { panel: PanelState } = $props();
+  const kind = $derived(panel.currentItem ? cardKind(panel.currentItem) : null);
+  const label = $derived.by(() => {
+    const item = panel.currentItem;
+    if (!item || !kind) return "无结果";
+    const chars = panel.fullChars ?? [...(item.preview ?? "")].length;
+    if (kind === "file") return `文件 · ${item.file_names.length} 个`;
+    if (kind === "image") return "图片";
+    return `${item.title || KIND_NAME[kind]} · ${chars.toLocaleString("zh-CN")} 字`;
+  });
 </script>
 
 {#if panel.previewOpen}
-  <div class="preview-overlay" class:detail-overlay={compact} role="dialog" tabindex="-1" aria-label="完整预览">
+  <div class="preview-overlay" data-hit role="dialog" tabindex="-1" aria-label="看全">
     <header>
-      <span class="position">FULL / {String(panel.selected + 1).padStart(2, "0")}</span>
-      <span class="kind">{panel.currentItem ? fullLabel(typeLabel(panel.currentItem)) : "无结果"}</span>
-      {#if panel.currentItem?.kind === "图片" && !compact}
+      <span class="kind">{label}</span>
+      {#if kind === "image"}
         <span class="zoom" role="group" aria-label="缩放">
           <button type="button" tabindex="-1" class:on={panel.previewZoom === "fit"} onpointerdown={(event) => event.preventDefault()} onclick={() => { panel.previewZoom = "fit"; }}>适应</button>
-          <button type="button" tabindex="-1" class:on={panel.previewZoom === "original"} onpointerdown={(event) => event.preventDefault()} onclick={() => { panel.previewZoom = "original"; }}>原尺寸</button>
+          <button type="button" tabindex="-1" class:on={panel.previewZoom === "original"} onpointerdown={(event) => event.preventDefault()} onclick={() => { panel.previewZoom = "original"; }}>原图</button>
         </span>
       {/if}
-      <button type="button" tabindex="-1" aria-label="关闭完整预览" title="关闭（Space / Esc）" onpointerdown={(event) => event.preventDefault()} onclick={() => { panel.previewOpen = false; }}>
-        <svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="m5 5 10 10M15 5 5 15" stroke="currentColor" stroke-width="1.4"/></svg>
-      </button>
+      <button class="close" type="button" tabindex="-1" aria-label="合上看全" title="合上（Tab / Esc）" onpointerdown={(event) => event.preventDefault()} onclick={() => { panel.previewOpen = false; }}>×</button>
     </header>
-    <div class="overlay-scroll"><Preview {panel} item={panel.currentItem} expanded={!compact} compact /></div>
-    {#if !compact}<footer><span>{#if panel.currentItem?.kind === "图片"}<kbd>Z</kbd> 适应 / 原尺寸 · 原尺寸时 <kbd>↑↓←→</kbd> 或拖动平移{:else if panel.currentItem?.kind === "文件"}<kbd>↑↓</kbd> 滚动 · 文件只记了路径{:else}<kbd>↑↓</kbd> <kbd>PgUp/PgDn</kbd> 滚动 · 选中文字后 <kbd>Ctrl+C</kbd> 只复制选中部分{/if}</span><span><kbd>↵</kbd> 粘贴整条　<kbd>Space</kbd> / <kbd>Esc</kbd> 返回</span></footer>{/if}
+    <div class="overlay-scroll"><Preview {panel} item={panel.currentItem} expanded /></div>
+    <footer>
+      <span><kbd>←</kbd><kbd>→</kbd> 换一张</span><span><kbd>↑</kbd><kbd>↓</kbd> 滚动</span>
+      {#if kind === "image"}<span><kbd>Z</kbd> {panel.previewZoom === "fit" ? "查看原图" : "适应窗口"}</span>{/if}
+      {#if kind && kind !== "image"}<span>选中文字后 <kbd>Ctrl+C</kbd> 复制</span>{/if}
+      <span><kbd>↵</kbd> 粘贴</span><span><kbd>Tab</kbd> 合上</span>
+    </footer>
   </div>
 {/if}
 
 <style>
-  .preview-overlay { position: absolute; z-index: 40; inset: 10px; display: flex; flex-direction: column; min-width: 0; min-height: 0; border: 1px solid var(--accent); border-radius: var(--radius-md); background: var(--preview); color: var(--text); animation: appear var(--fade-duration) linear; }
-  header { height: 40px; flex: none; display: flex; align-items: center; gap: 10px; padding: 0 8px 0 14px; border-bottom: 1px solid var(--line-soft); }
-  .position { color: var(--accent); font: 10px var(--font-mono); white-space: nowrap; }
-  .kind { min-width: 0; overflow: hidden; color: var(--muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
-  .zoom { display: inline-flex; margin-left: auto; overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius-sm); }
-  .zoom button { width: auto; height: 22px; margin: 0; padding: 0 9px; border: 0; border-radius: 0; color: var(--muted); font-size: 10px; }
-  .zoom button.on { background: var(--selected); color: var(--text); font-weight: 600; }
-  .zoom + button { margin-left: 4px; }
-  button { width: 30px; height: 30px; display: grid; place-items: center; margin-left: auto; border: 1px solid transparent; border-radius: var(--radius-sm); background: transparent; color: var(--muted); }
-  button:hover { border-color: var(--line); color: var(--text); }
-  button svg { width: 17px; height: 17px; }
-  .overlay-scroll { flex: 1; min-height: 0; overflow: auto; padding: 22px 26px; scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
-  footer { min-height: 30px; flex: none; display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); padding: 5px 12px; border-top: 1px solid var(--line-soft); color: var(--faint); font-size: 9px; }
-  footer span:last-child { white-space: nowrap; }
-  kbd { color: var(--text); font: 9px var(--font-mono); }
-  .preview-overlay.detail-overlay { z-index: 220; left: 18px; right: 18px; top: auto; bottom: 45px; height: var(--size-detail-c); border-radius: var(--radius-xs); background: var(--panel-raised); }
-  .detail-overlay header { height: 31px; padding: 0 12px; }
-  .detail-overlay .position, .detail-overlay .kind { color: var(--faint); font: 9px var(--font-mono); }
-  .detail-overlay .overlay-scroll { padding: 10px 13px; }
-  .detail-overlay button { width: auto; height: 26px; padding: 0 0 0 8px; color: var(--accent); font-size: 10px; }
-  .detail-overlay button svg { display: none; }
-  .detail-overlay button::after { content: "收起 Space / Esc"; }
+  .preview-overlay { position: absolute; z-index: 200; left: 50%; top: 38px; width: 440px; height: 440px; display: flex; flex-direction: column; min-width: 0; min-height: 0; transform: translateX(-50%); overflow: hidden; border-radius: 12px; background: var(--hand-card); color: var(--hand-ink); box-shadow: var(--hand-lift); animation: appear 160ms ease-out; }
+  header { height: 44px; flex: none; display: flex; align-items: center; gap: 8px; padding: 0 10px 0 16px; border-bottom: 1px solid var(--hand-line); }
+  .kind { min-width: 0; overflow: hidden; color: var(--hand-ink-3); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+  .zoom { display: inline-flex; margin-left: auto; overflow: hidden; border-radius: 5px; box-shadow: inset 0 0 0 1px var(--hand-line); }
+  .zoom button { height: 24px; padding: 0 8px; border: 0; background: transparent; color: var(--hand-ink-2); font-size: 12px; }
+  .zoom button.on { background: var(--hand-card-back); color: var(--hand-ink); }
+  .close { width: 28px; height: 28px; margin-left: auto; border: 0; background: transparent; color: var(--hand-ink-3); font-size: 20px; }
+  .zoom + .close { margin-left: 0; }
+  .overlay-scroll { flex: 1; min-height: 0; overflow: auto; padding: 16px 20px; scrollbar-width: thin; scrollbar-color: var(--hand-line) transparent; }
+  footer { min-height: 36px; flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; padding: 6px 16px; border-top: 1px solid var(--hand-line); color: var(--hand-ink-2); font-size: 12px; }
+  footer span { display: flex; align-items: center; gap: 4px; white-space: nowrap; }
+  kbd { color: var(--hand-ink); font: 600 12px/1.3 var(--font-ui); }
   @keyframes appear { from { opacity: 0; } to { opacity: 1; } }
-  @media (max-width: 599px) {
-    .preview-overlay { inset: 6px; }
-    .overlay-scroll { padding: var(--space-4); }
-    footer span:first-child { display: none; }
-    footer { justify-content: flex-end; }
-  }
-  /* 只在设置里选了“跟随系统”且系统开了“减少动画效果”时生效（data-reduce-motion）。 */
-  :global(html[data-reduce-motion="true"]) .preview-overlay { animation-duration: var(--duration-reduce); }
+  :global(html[data-motion="none"]) .preview-overlay, :global(html[data-reduce-motion="true"]) .preview-overlay { animation-duration: 100ms; }
 </style>

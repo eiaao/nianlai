@@ -528,6 +528,9 @@ mod tests {
                 external_switch: false,
                 permit: Some(self.permit.clone()),
                 copy_only_reason: None,
+                text_separator: false,
+                modifier_grace: crate::paste::request::MODIFIER_GRACE,
+                clipboard_guard: None,
                 cancelled: Arc::new(std::sync::atomic::AtomicBool::new(self.cancelled)),
             };
             crate::platform::paste::native_candidate(&request, &self.written, builtin)

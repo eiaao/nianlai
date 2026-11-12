@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
 pub(crate) mod focus_restore;
@@ -30,6 +30,14 @@ impl PlacementMode {
 }
 
 pub type Result<T> = std::result::Result<T, String>;
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+pub struct HitRegion {
+    pub left: f64,
+    pub top: f64,
+    pub right: f64,
+    pub bottom: f64,
+}
 
 pub struct HookOptions {
     pub monitor: std::sync::Arc<crate::paste::permit::Monitor>,

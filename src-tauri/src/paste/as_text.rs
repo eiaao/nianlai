@@ -1,7 +1,7 @@
 // 目标只收文字时的降级：文件给路径，图片存成 PNG 给路径，富文本去掉格式。
 use super::{keys::TextStyle, request::Mode};
 use crate::{
-    history::content::{Content, Data, FILES, Hash},
+    history::content::{Content, Data, FILES, HTML, Hash, RTF, TEXT},
     platform,
 };
 use serde::Serialize;
@@ -55,6 +55,146 @@ fn quote(path: &str) -> String {
     } else {
         path.to_owned()
     }
+}
+
+// 一叠一起放下（automatic 队列）的条目分隔。规则：
+// - 除最后一条外，文本类条目（纯文本，及其 HTML/RTF 形态）在末尾加一个分隔；
+// - 分隔默认是换行；只有能可靠判断目标是单行编辑框（Win32 Edit/RichEdit/WinForms 文本框且
+//   没有 ES_MULTILINE）时用空格——单行框粘贴带换行的文字会在换行处截断，换行等于没分隔；
+// - 文件、图片等没有文字格式的条目原样返回（同一 Arc），仍按逐条粘贴；
+// - 逐张放（手动 Ctrl+V）不加分隔。
+// 重算的指纹就是实际写入的内容：回声登记（before_write）用同一个 Content，不会被当成新复制。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Separator {
+    Newline,
+    Space,
+}
+
+impl Separator {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Newline => "newline",
+            Self::Space => "space",
+        }
+    }
+}
+
+/// 按目标焦点控件决定分隔。`style` 是焦点窗口的 GWL_STYLE（读不到为 None）。
+/// 判断不了（浏览器、Office、终端、自绘控件……）一律换行。
+pub fn separator_for(focus_class: &str, style: Option<u32>) -> Separator {
+    const ES_MULTILINE: u32 = 0x0004;
+    let class = focus_class.to_ascii_lowercase();
+    let edit = matches!(
+        class.as_str(),
+        "edit" | "richedit" | "richedit20a" | "richedit20w" | "richedit50w" | "richedit50a"
+    ) || class.starts_with("windowsforms10.edit.")
+        || class.starts_with("windowsforms10.richedit");
+    match style {
+        Some(style) if edit && style & ES_MULTILINE == 0 => Separator::Space,
+        _ => Separator::Newline,
+    }
+}
+
+fn until_nul(bytes: &[u8]) -> &[u8] {
+    &bytes[..bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(bytes.len())]
+}
+
+fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+/// CF_HTML：把 `insert` 放进片段末尾（EndFragment 处），并按原位宽改写头部偏移。
+/// 头部格式不认识、偏移越界或位宽放不下新数字时返回 None（调用方丢掉这个格式）。
+fn html_insert(data: &[u8], insert: &[u8]) -> Option<Vec<u8>> {
+    let data = until_nul(data);
+    let header_end = data.iter().position(|byte| *byte == b'<')?;
+    let field = |key: &[u8]| -> Option<(usize, usize, i64)> {
+        let at = find(&data[..header_end], key)? + key.len();
+        let digits = data[at..header_end]
+            .iter()
+            .take_while(|byte| byte.is_ascii_digit() || **byte == b'-')
+            .count();
+        let value = std::str::from_utf8(&data[at..at + digits])
+            .ok()?
+            .parse()
+            .ok()?;
+        Some((at, at + digits, value))
+    };
+    let (_, _, start) = field(b"StartFragment:")?;
+    let (_, _, end) = field(b"EndFragment:")?;
+    if start < header_end as i64 || end < start || end > data.len() as i64 {
+        return None;
+    }
+    let at = end as usize;
+    let mut output = data.to_vec();
+    for key in [
+        &b"StartHTML:"[..],
+        b"EndHTML:",
+        b"StartFragment:",
+        b"EndFragment:",
+        b"StartSelection:",
+        b"EndSelection:",
+    ] {
+        let Some((from, to, value)) = field(key) else {
+            continue;
+        };
+        let shifted = value > at as i64 || (value == at as i64 && key.starts_with(b"End"));
+        if value < 0 || !shifted {
+            continue;
+        }
+        let next = format!("{:0width$}", value + insert.len() as i64, width = to - from);
+        if next.len() != to - from {
+            return None;
+        }
+        output[from..to].copy_from_slice(next.as_bytes());
+    }
+    output.splice(at..at, insert.iter().copied());
+    Some(output)
+}
+
+/// RTF：分隔放在最外层右花括号之前，仍属于文档内容。
+fn rtf_insert(data: &[u8], insert: &[u8]) -> Option<Vec<u8>> {
+    let data = until_nul(data);
+    let at = data.iter().rposition(|byte| *byte == b'}')?;
+    let mut output = data.to_vec();
+    output.splice(at..at, insert.iter().copied());
+    Some(output)
+}
+
+pub fn append_separator(content: &Arc<Content>, separator: Separator, hash: Hash) -> Arc<Content> {
+    let Some(text) = content.text_value() else {
+        // 没有纯文本形态（文件、图片、只有自定义格式）：不改，按原样逐条粘贴。
+        return content.clone();
+    };
+    let (plain, html, rtf): (&str, &[u8], &[u8]) = match separator {
+        Separator::Newline => ("\r\n", b"<br>", b"\\par "),
+        Separator::Space => (" ", b" ", b"{ }"),
+    };
+    let mut formats = std::collections::BTreeMap::new();
+    for (name, format) in &content.formats {
+        let data = match (name.as_str(), content.raw(name)) {
+            (TEXT, _) => Some(Data::Bytes(
+                format!("{text}{plain}")
+                    .encode_utf16()
+                    .flat_map(u16::to_le_bytes)
+                    .collect::<Vec<_>>()
+                    .into(),
+            )),
+            // 富文本形态改不了就不写这个格式：目标退回带分隔的其它形态，而不是粘成一串。
+            (HTML, Some(bytes)) => html_insert(bytes, html).map(|bytes| Data::Bytes(bytes.into())),
+            (RTF, Some(bytes)) => rtf_insert(bytes, rtf).map(|bytes| Data::Bytes(bytes.into())),
+            _ => Some(format.data.clone()),
+        };
+        if let Some(data) = data {
+            formats.insert(name.clone(), data);
+        }
+    }
+    Content::new(formats, hash).unwrap_or_else(|_| content.clone())
 }
 
 // 返回要写进剪贴板的内容和日志。转不成时退回原内容照常粘贴，日志记下原因；日志里不写路径和文字。
@@ -261,5 +401,185 @@ mod tests {
         let (written, report) = apply(&plain, Mode::Text, None, None, sha256);
         assert!(Arc::ptr_eq(&written, &plain));
         assert_eq!(report["reason"], "already_text");
+    }
+
+    fn utf16(text: &str) -> Arc<[u8]> {
+        text.encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>()
+            .into()
+    }
+
+    // 按 CF_HTML 规则拼一份带头部的 HTML（偏移按字节、10 位补零）。
+    fn cf_html(fragment: &str) -> Vec<u8> {
+        let header_len = "Version:0.9\r\nStartHTML:0000000000\r\nEndHTML:0000000000\r\nStartFragment:0000000000\r\nEndFragment:0000000000\r\n".len();
+        let before = "<html><body><!--StartFragment-->";
+        let after = "<!--EndFragment--></body></html>";
+        let start_fragment = header_len + before.len();
+        let end_fragment = start_fragment + fragment.len();
+        let end_html = end_fragment + after.len();
+        format!(
+            "Version:0.9\r\nStartHTML:{header_len:010}\r\nEndHTML:{end_html:010}\r\nStartFragment:{start_fragment:010}\r\nEndFragment:{end_fragment:010}\r\n{before}{fragment}{after}"
+        )
+        .into_bytes()
+    }
+
+    fn offset(data: &[u8], key: &str) -> usize {
+        let text = std::str::from_utf8(data).unwrap();
+        let at = text.find(key).unwrap() + key.len();
+        text[at..at + 10].parse().unwrap()
+    }
+
+    // 一叠一起放下（问题 4）：纯文本、HTML 片段、RTF 都在内容里加同一种分隔。
+    #[test]
+    fn separator_goes_inside_every_text_format() {
+        let plain = Content::text("王小拗", sha256).unwrap();
+        let separated = append_separator(&plain, Separator::Newline, sha256);
+        assert_eq!(separated.text_value().as_deref(), Some("王小拗\r\n"));
+        assert_ne!(separated.fingerprint, plain.fingerprint);
+        assert_eq!(separated.formats.keys().collect::<Vec<_>>(), [TEXT]);
+        let spaced = append_separator(&plain, Separator::Space, sha256);
+        assert_eq!(spaced.text_value().as_deref(), Some("王小拗 "));
+
+        let html = cf_html("<b>第一行</b>");
+        let rich = Content::new(
+            BTreeMap::from([
+                (TEXT.into(), Data::Bytes(utf16("第一行"))),
+                (HTML.into(), Data::Bytes(html.clone().into())),
+                (
+                    RTF.into(),
+                    Data::Bytes("{\\rtf1 第一行}".as_bytes().to_vec().into()),
+                ),
+            ]),
+            sha256,
+        )
+        .unwrap();
+        let separated = append_separator(&rich, Separator::Newline, sha256);
+        assert_eq!(separated.text_value().as_deref(), Some("第一行\r\n"));
+        let written = separated.raw(HTML).unwrap();
+        let start = offset(written, "StartFragment:");
+        let end = offset(written, "EndFragment:");
+        assert_eq!(
+            &written[start..end],
+            "<b>第一行</b><br>".as_bytes(),
+            "换行在片段里面"
+        );
+        assert_eq!(offset(written, "EndHTML:"), written.len());
+        assert_eq!(offset(written, "StartHTML:"), offset(&html, "StartHTML:"));
+        assert_eq!(
+            separated.raw(RTF).unwrap(),
+            "{\\rtf1 第一行\\par }".as_bytes()
+        );
+        assert_eq!(separated.kind, "富文本");
+    }
+
+    #[test]
+    fn unreadable_rich_formats_are_dropped_instead_of_pasting_without_separator() {
+        let rich = Content::new(
+            BTreeMap::from([
+                (TEXT.into(), Data::Bytes(utf16("甲"))),
+                (
+                    HTML.into(),
+                    Data::Bytes(b"<b>no header</b>".to_vec().into()),
+                ),
+                (RTF.into(), Data::Bytes(b"no braces".to_vec().into())),
+            ]),
+            sha256,
+        )
+        .unwrap();
+        let separated = append_separator(&rich, Separator::Newline, sha256);
+        assert_eq!(separated.formats.keys().collect::<Vec<_>>(), [TEXT]);
+        assert_eq!(separated.text_value().as_deref(), Some("甲\r\n"));
+        // 位宽放不下新偏移：同样丢掉 HTML，不写坏头部。
+        let header = "StartFragment:34\r\nEndFragment:98\r\n";
+        assert_eq!(header.len(), 34);
+        let narrow = format!("{header}<{}", "a".repeat(63)).into_bytes();
+        assert_eq!(narrow.len(), 98);
+        assert_eq!(html_insert(&narrow, b"<br>"), None);
+        assert!(html_insert(&narrow, b"").is_some(), "同样的头部本身可解析");
+    }
+
+    #[test]
+    fn trailing_nul_in_stored_text_does_not_hide_the_separator() {
+        let mut bytes = utf16("乙").to_vec();
+        bytes.extend_from_slice(&[0, 0]);
+        let content = Content::new(
+            BTreeMap::from([(TEXT.into(), Data::Bytes(bytes.into()))]),
+            sha256,
+        )
+        .unwrap();
+        let separated = append_separator(&content, Separator::Newline, sha256);
+        assert_eq!(separated.raw(TEXT).unwrap(), &utf16("乙\r\n")[..]);
+    }
+
+    #[test]
+    fn separator_leaves_files_and_images_untouched() {
+        let content = files(&[r"C:\a.txt"]);
+        assert!(
+            Arc::ptr_eq(
+                &append_separator(&content, Separator::Newline, sha256),
+                &content
+            ),
+            "文件不加分隔"
+        );
+        let image = Content::new(
+            BTreeMap::from([(
+                crate::history::content::DIB.into(),
+                Data::Bytes(vec![0; 44].into()),
+            )]),
+            sha256,
+        )
+        .unwrap();
+        assert!(
+            Arc::ptr_eq(
+                &append_separator(&image, Separator::Newline, sha256),
+                &image
+            ),
+            "图片不加分隔"
+        );
+    }
+
+    // Ctrl+Enter（pasteMode=text）的 automatic 队列同样分隔：转换成纯文本后再追加。
+    #[test]
+    fn separator_applies_after_text_conversion() {
+        let content = files(&[r"C:\a.txt"]);
+        let (written, _) = apply(&content, Mode::Text, None, None, sha256);
+        let separated = append_separator(&written, Separator::Newline, sha256);
+        assert_eq!(separated.text_value().as_deref(), Some("C:\\a.txt\r\n"));
+        assert_ne!(separated.fingerprint, written.fingerprint);
+    }
+
+    // 只有能确认是单行 Win32 编辑框才用空格；其它一律换行。
+    #[test]
+    fn only_verified_single_line_edits_get_a_space() {
+        const ES_MULTILINE: u32 = 0x4;
+        assert_eq!(separator_for("Edit", Some(0x5001_0080)), Separator::Space);
+        assert_eq!(
+            separator_for("RICHEDIT50W", Some(0x5001_0000)),
+            Separator::Space
+        );
+        assert_eq!(
+            separator_for(
+                "WindowsForms10.EDIT.app.0.141b42a_r6_ad1",
+                Some(0x5001_0000)
+            ),
+            Separator::Space
+        );
+        assert_eq!(
+            separator_for("Edit", Some(0x5001_0000 | ES_MULTILINE)),
+            Separator::Newline
+        );
+        assert_eq!(
+            separator_for("Edit", None),
+            Separator::Newline,
+            "样式读不到"
+        );
+        for class in ["Chrome_RenderWidgetHostHWND", "_WwG", "Scintilla", ""] {
+            assert_eq!(
+                separator_for(class, Some(0x5001_0000)),
+                Separator::Newline,
+                "{class}"
+            );
+        }
     }
 }

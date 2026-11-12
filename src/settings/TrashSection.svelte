@@ -66,7 +66,7 @@
     <ul class="list" aria-label="回收站">
       {#each items as item (item.id)}
         <li>
-          <span class="text" title={label(item)}>{#if item.favorite}<span class="star" aria-label="收藏">★</span>{/if}{label(item)}</span>
+          <span class="text" title={label(item)}>{#if item.favorite}<span class="star" aria-label="常用">★</span>{/if}{label(item)}</span>
           <span class="meta">{item.kind} · {when(item.deleted_ms)} 删除 · {left(item.deleted_ms)}</span>
           <span class="actions">
             <button type="button" disabled={busy || disabled} onclick={() => run(() => ipc.restoreItem(item.id), "已恢复到历史")}>恢复</button>

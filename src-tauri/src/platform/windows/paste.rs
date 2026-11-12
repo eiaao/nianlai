@@ -322,6 +322,43 @@ fn checks(request: &Request) -> Checks {
     }
 }
 
+/// 发键前确认的总期限（原 300ms）。
+const PREFLIGHT_DEADLINE: Duration = Duration::from_millis(300);
+
+#[derive(Debug, PartialEq, Eq)]
+enum PreflightStep {
+    Done,
+    Release,
+    GiveUp,
+    Wait,
+}
+
+/// 确认循环每一轮的决定（纯函数）。只有其余条件都满足、仅剩修饰键按着时才补发抬起，
+/// 避免把按键送进用户刚切换的窗口。普通粘贴 grace=300ms：与原来“到期才补抬起”完全一致；
+/// 逐张放 grace=0：用户按住 Ctrl 连按 V 是明确操作，不再空等 300ms。
+fn preflight_step(
+    current: Checks,
+    cancelled: bool,
+    elapsed: Duration,
+    grace: Duration,
+) -> PreflightStep {
+    if current.all() || cancelled {
+        return PreflightStep::Done;
+    }
+    let only_modifiers = !current.modifiers
+        && current.foreground
+        && current.focus
+        && current.hidden
+        && current.permission;
+    if only_modifiers && elapsed >= grace.min(PREFLIGHT_DEADLINE) {
+        PreflightStep::Release
+    } else if elapsed >= PREFLIGHT_DEADLINE {
+        PreflightStep::GiveUp
+    } else {
+        PreflightStep::Wait
+    }
+}
+
 fn preflight(request: &Request, stopping: &AtomicBool) -> (bool, Value) {
     let started = Instant::now();
     let mut times = [None; 5];
@@ -336,17 +373,17 @@ fn preflight(request: &Request, stopping: &AtomicBool) -> (bool, Value) {
                 times[index] = Some(elapsed);
             }
         }
-        if current.all() || cancelled(request, stopping) {
+        let step = preflight_step(
+            current,
+            cancelled(request, stopping),
+            started.elapsed(),
+            request.modifier_grace,
+        );
+        if step == PreflightStep::Done {
             break;
         }
-        if started.elapsed() >= Duration::from_millis(300) {
-            // 只有焦点仍安全时才补抬起，避免把按键送进用户刚切换的窗口。
-            if !current.modifiers
-                && current.foreground
-                && current.focus
-                && current.hidden
-                && current.permission
-            {
+        if matches!(step, PreflightStep::Release | PreflightStep::GiveUp) {
+            if step == PreflightStep::Release {
                 let releases: Vec<_> = MODIFIERS
                     .iter()
                     .copied()
@@ -376,8 +413,7 @@ fn preflight(request: &Request, stopping: &AtomicBool) -> (bool, Value) {
             break;
         }
         thread::sleep(
-            Duration::from_millis(5)
-                .min(Duration::from_millis(300).saturating_sub(started.elapsed())),
+            Duration::from_millis(5).min(PREFLIGHT_DEADLINE.saturating_sub(started.elapsed())),
         );
     }
     let names = [
@@ -398,7 +434,7 @@ fn preflight(request: &Request, stopping: &AtomicBool) -> (bool, Value) {
             "foreground_ms":times[0],"focus_ms":times[1],"modifiers_ms":times[2],"panel_hidden_ms":times[3],
             "permission_ms":times[4],
             "timed_out":!current.all(),"failed_checks":failed,"release_attempted":release_attempted,"released_modifiers":released,
-            "deadline_reached":started.elapsed() >= Duration::from_millis(300),
+            "deadline_reached":started.elapsed() >= PREFLIGHT_DEADLINE,
         }),
     )
 }
@@ -407,6 +443,24 @@ fn record(request: &Request) -> clipboard::Record {
     clipboard::Record {
         id: request.record_id,
         fingerprint: request.content.fingerprint,
+    }
+}
+
+fn write_clipboard(
+    clipboard: &clipboard::Service,
+    request: &Request,
+    written: Arc<Content>,
+) -> Result<std::sync::Arc<std::sync::Mutex<clipboard::Observation>>, String> {
+    if let Some(guard) = request.clipboard_guard.clone() {
+        clipboard.write_guarded(
+            record(request),
+            written,
+            request.target.process,
+            false,
+            guard,
+        )
+    } else {
+        clipboard.write(record(request), written, request.target.process, false)
     }
 }
 
@@ -422,12 +476,7 @@ fn copy(
     if request.cancelled.load(Ordering::Acquire) {
         return Err("request_cancelled".into());
     }
-    clipboard.write(
-        record(request),
-        written.clone(),
-        request.target.process,
-        false,
-    )?;
+    write_clipboard(clipboard, request, written.clone())?;
     report["clipboard_written"] = json!(true);
     report["reason"] = json!(reason);
     Ok(conclude(request.mode, false, false, true))
@@ -843,12 +892,7 @@ impl native::Backend for Native<'_> {
             return Err("request_cancelled".into());
         }
         // 原生提交不需要延迟渲染；固定的实际格式只写一次。
-        let observation = self.clipboard.write(
-            record(self.request),
-            self.written.clone(),
-            self.request.target.process,
-            false,
-        )?;
+        let observation = write_clipboard(self.clipboard, self.request, self.written.clone())?;
         self.report["clipboard_written"] = json!(true);
         if let Ok(observation) = observation.lock() {
             self.publication = observation.publication;
@@ -1100,12 +1144,7 @@ impl generic::Backend for Generic<'_> {
         self.boundary()
     }
     fn publish(&mut self) -> Result<(), String> {
-        let observation = self.clipboard.write(
-            record(self.request),
-            self.written.clone(),
-            self.request.target.process,
-            false,
-        )?;
+        let observation = write_clipboard(self.clipboard, self.request, self.written.clone())?;
         self.report["clipboard_written"] = json!(true);
         {
             let observed = observation
@@ -1345,6 +1384,19 @@ pub fn execute(
         hash::sha256,
     );
     report["as_text"] = conversion;
+    // 一叠一起放下的条目分隔在转换之后追加：pasteMode=text 的 automatic 队列同样处理。
+    // 追加后 written 的指纹就是实际写入的内容，回声登记（before_write）自然用它。
+    let written = if request.text_separator {
+        let separator = as_text::separator_for(
+            &request.target.focus_class,
+            // 只认已核实可交互的标准编辑框；其它控件读不到样式，按换行处理。
+            window::native_edit_style(&request.target),
+        );
+        report["text_separator"] = json!(separator.name());
+        as_text::append_separator(&written, separator, hash::sha256)
+    } else {
+        written
+    };
     // 转换后的 Arc 固定后才选择策略；不可按历史 kind 猜测，也不重复转换。
     let candidate = native_candidate(
         &request,
@@ -1467,6 +1519,9 @@ mod tests {
             external_switch: false,
             permit: Some(permit),
             copy_only_reason: None,
+            text_separator: false,
+            modifier_grace: crate::paste::request::MODIFIER_GRACE,
+            clipboard_guard: None,
             cancelled: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -1672,6 +1727,52 @@ mod tests {
                 permission: mask & 16 != 0,
             };
             assert_eq!(conditions.all(), mask == 31);
+        }
+    }
+
+    // 普通粘贴（grace=300ms）与原逻辑逐项一致；逐张放（grace=0）只在仅剩修饰键时提前补抬起。
+    #[test]
+    fn preflight_grace_only_shortens_the_modifier_only_wait() {
+        let ms = Duration::from_millis;
+        let grace = crate::paste::request::MODIFIER_GRACE;
+        for mask in 0..32 {
+            let current = Checks {
+                foreground: mask & 1 != 0,
+                focus: mask & 2 != 0,
+                modifiers: mask & 4 != 0,
+                hidden: mask & 8 != 0,
+                permission: mask & 16 != 0,
+            };
+            let only_modifiers = mask == (31 & !4);
+            for elapsed in [ms(0), ms(5), ms(299), ms(300), ms(400)] {
+                // 原逻辑：全满足即完成；到 300ms 时仅剩修饰键补抬起，否则放弃；之前一律等待。
+                let legacy = if current.all() {
+                    PreflightStep::Done
+                } else if elapsed >= ms(300) {
+                    if only_modifiers {
+                        PreflightStep::Release
+                    } else {
+                        PreflightStep::GiveUp
+                    }
+                } else {
+                    PreflightStep::Wait
+                };
+                assert_eq!(
+                    preflight_step(current, false, elapsed, grace),
+                    legacy,
+                    "mask={mask} elapsed={elapsed:?}"
+                );
+                let queue = preflight_step(current, false, elapsed, Duration::ZERO);
+                if only_modifiers {
+                    assert_eq!(queue, PreflightStep::Release);
+                } else {
+                    assert_eq!(queue, legacy, "其它条件不满足时逐张放同样等待/放弃");
+                }
+            }
+            assert_eq!(
+                preflight_step(current, true, ms(0), Duration::ZERO),
+                PreflightStep::Done
+            );
         }
     }
 

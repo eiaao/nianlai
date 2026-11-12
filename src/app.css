@@ -3,7 +3,7 @@
   font-family: var(--font-ui);
   font-size: var(--font-size-body);
   color: var(--text);
-  background: var(--panel);
+  background: transparent;
 }
 
 * { box-sizing: border-box; }
@@ -15,6 +15,7 @@ button:disabled { cursor: default; }
 :focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
 
 @media (forced-colors: active) {
-  .history-row.selected, .command-row.selected, .flow-card.selected { outline: 2px solid Highlight; outline-offset: -2px; }
-  kbd, .section-heading, .track-divider { border-color: CanvasText; }
+  /* 高对比度下阴影会被去掉：选中的牌用系统高亮色描边，其余小件用文字色描边。 */
+  .card[aria-selected="true"] .face { outline: 2px solid Highlight; outline-offset: -2px; }
+  .card .face, .tag, .back-head, .deck-top, .mat, .hint, .position, .statusbar, kbd { outline: 1px solid CanvasText; }
 }

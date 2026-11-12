@@ -1,20 +1,16 @@
-/* 拈来 v0.1 · v7 tokens。A/B/C 材质、共享状态色、动效和设置窗口变量统一在这里维护。 */
+/* 拈来 v10：手牌、共享状态色、动效和设置窗口变量统一在这里维护。 */
 :root {
   color-scheme: light;
   --font-ui: "Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", sans-serif;
-  --font-display: "Segoe UI Variable Display", "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", sans-serif;
+  /* 宋体只用于字标和展示性文字（“常”印、牌堆的“拈”），功能文字一律用 --font-ui。 */
+  --font-display: "Source Han Serif SC", "Noto Serif SC", "Songti SC", "STSong", "SimSun", serif;
   --font-mono: "Cascadia Mono", Consolas, "Microsoft YaHei UI", monospace;
-  --font-size-body: 13px;
-  --font-size-caption: 11px;
-  --font-size-title: 20px;
+  /* 字号只用四档：12 / 13 / 15 / 20。 */
+  --font-size-small: 12px; --font-size-body: 13px; --font-size-large: 15px; --font-size-title: 20px;
 
   --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px;
   --space-5: 20px; --space-6: 24px; --space-8: 32px;
   --radius-none: 0; --radius-xs: 1px; --radius-sm: 2px; --radius-md: 3px;
-  --size-a-width: 680px; --size-b-width: 560px; --size-c-width: 760px; --size-panel-height: 520px;
-  --size-a-index: 264px; --size-a-index-narrow: 184px; --size-row-a: 64px;
-  --size-row-b: 56px; --size-card-width: 238px; --size-card-height: 266px; --size-card-step: 218px;
-  --size-preview-b: 190px; --size-detail-c: 154px;
 
   --duration-instant: 0ms; --duration-reduce: 90ms; --duration-fade: 110ms;
   --duration-feedback: 220ms; --duration-response: 300ms;
@@ -28,33 +24,34 @@
   --state-critical: #b3271e; --state-critical-bg: #fbe5e1;
   --state-neutral: #525b55; --state-neutral-bg: #e9ece8;
 
-  --a-bg: #e9eeeb; --a-raised: #f3f6f4; --a-preview: #f7f9f7;
-  --a-text: #1b2823; --a-muted: #53635c; --a-faint: #64736c;
-  --a-line: #a9b5af; --a-hairline: #d0d8d3; --a-accent: #146b52;
-  --a-accent-ink: #f4fff9; --a-selected: #d1e3da; --a-field: #fff;
-  --a-star: #925800; --a-danger: #a83226; --a-focus: #146b52;
-
-  --b-bg: #eff1ec; --b-text: #1d211e; --b-muted: #4f5751; --b-faint: #69716a;
-  --b-line: #aeb5ad; --b-hairline: #d2d7d0; --b-accent: #bd3c28;
-  --b-selected: #e2e6df; --b-star: #855200; --b-focus: #bd3c28;
-  --c-bg: #e3e6d9; --c-raised: #f0f2e8; --c-stage: #d5d9ca;
-  --c-text: #20251c; --c-muted: #4e5847; --c-faint: #626e59;
-  --c-line: #929d86; --c-hairline: #bdc5b2; --c-accent: #596f0c;
-  --c-accent-ink: #f7ffdf; --c-card: #f0f2e8; --c-card-text: #20251c;
-  --c-card-muted: #586250; --c-star: #805200; --c-danger: #a63220; --c-focus: #506600;
-
-  --lab-bg: #e7e9e4; --lab-text: #222823; --lab-muted: #5c655e;
-  --lab-line: #b3bbb3; --lab-control: #f5f7f2; --lab-focus: #146b52;
   --settings-bg: #eef1ed; --settings-nav: #e2e7e1; --settings-card: #f8faf7;
   --settings-text: #1c2620; --settings-muted: #56645b; --settings-line: #b7c1b8;
   --settings-accent: #146b52; --settings-selected: #d4e5db; --settings-field: #fff;
 
-  --focus: var(--a-focus); --panel: var(--a-bg); --panel-raised: var(--a-raised);
-  --preview: var(--a-preview); --text: var(--a-text); --muted: var(--a-muted);
-  --faint: var(--a-faint); --line: var(--a-line); --line-soft: var(--a-hairline);
-  --accent: var(--a-accent); --accent-ink: var(--a-accent-ink);
-  --selected: var(--a-selected); --field: var(--a-field); --star: var(--a-star);
-  --danger: var(--a-danger);
+  /* v10 手牌：窗口本体透明，只有牌和小件上色。 */
+  /* 墨色三级：正文 / 二级（说明、类型标记）/ 三级（来源、时间、占位）。朱砂只用于选中键帽、常用印记和已选计数。 */
+  --hand-paper: #FAF8F3; --hand-card: #FFFDF9; --hand-card-back: #ECE5D9;
+  --hand-ink: #24221E; --hand-ink-2: #5C564C; --hand-ink-3: #6F685D;
+  --hand-ink-soft: var(--hand-ink-2); --hand-muted: var(--hand-ink-3);
+  --hand-line: rgba(36,34,30,.12); --hand-line-strong: rgba(36,34,30,.24);
+  --hand-seal: #C8432B; --hand-on-seal: #FFFFFF;
+  --hand-key: #FFFFFF; --hand-key-line: rgba(36,34,30,.22);
+  /* 搜索命中：墨色淡底 + 下划线，不用朱砂。 */
+  --hand-mark: rgba(36,34,30,.10);
+  /* 阴影都控制在命中区域外扩（16px）以内，深色主题另有一套。 */
+  --hand-pop: 0 0 0 1px var(--hand-line),0 6px 14px -6px rgba(50,36,20,.30);
+  --hand-lift: 0 0 0 1px var(--hand-line),0 8px 16px -6px rgba(50,36,20,.36);
+  --hand-card-shadow: 0 0 0 1px var(--hand-line),-4px 2px 10px -5px rgba(50,36,20,.26);
+  --hand-selected-shadow: 0 0 0 1px var(--hand-line),0 4px 8px rgba(50,36,20,.08),0 10px 16px -6px rgba(50,36,20,.34);
+  --hand-row-shadow: 0 0 0 1px var(--hand-line),0 1px 2px rgba(50,36,20,.06);
+  --hand-back-shadow: 0 3px 8px rgba(50,36,20,.12);
+
+  /* 预览、页脚和全局控件使用的语义别名，不再保留旧 A/B/C 布局配色。 */
+  --focus: var(--hand-seal); --panel: var(--hand-paper); --panel-raised: var(--hand-card);
+  --preview: var(--hand-card); --text: var(--hand-ink); --muted: var(--hand-muted);
+  --faint: var(--hand-muted); --line: var(--hand-line-strong); --line-soft: var(--hand-line);
+  --accent: var(--hand-seal); --accent-ink: #fff; --selected: var(--hand-card-back);
+  --field: var(--hand-card); --star: var(--hand-seal); --danger: var(--state-critical);
 }
 
 :root[data-theme="light"] { color-scheme: light; }
@@ -64,24 +61,20 @@
   --state-caution: #f0c36c; --state-caution-bg: #3c301d;
   --state-critical: #ff9c8f; --state-critical-bg: #442522;
   --state-neutral: #b7c0b8; --state-neutral-bg: #2c332e;
-  --a-bg: #171c1d; --a-raised: #1d2424; --a-preview: #111718;
-  --a-text: #edf2ef; --a-muted: #a4afa9; --a-faint: #79857f;
-  --a-line: #36423e; --a-hairline: #29332f; --a-accent: #9de6c5;
-  --a-accent-ink: #15372a; --a-selected: #21372f; --a-field: #202a27;
-  --a-star: #f1bf72; --a-danger: #ff8c7a; --a-focus: #9de6c5;
-  --b-bg: #191c1a; --b-text: #eef0e9; --b-muted: #b6bcb2; --b-faint: #979f95;
-  --b-line: #626a60; --b-hairline: #333a33; --b-accent: #ff8065;
-  --b-selected: #282e29; --b-star: #e6b969; --b-focus: #ff8065;
-  --c-bg: #131612; --c-raised: #1c211a; --c-stage: #0e110e;
-  --c-text: #eff2e7; --c-muted: #b0b8a8; --c-faint: #818b7b;
-  --c-line: #485044; --c-hairline: #2b3229; --c-accent: #d9f66f;
-  --c-accent-ink: #202a0d; --c-card: #252b22; --c-card-text: #eff2e7;
-  --c-card-muted: #b0b8a8; --c-star: #f0bd62; --c-danger: #ff8d74; --c-focus: #d9f66f;
-  --lab-bg: #181b18; --lab-text: #edf0e9; --lab-muted: #a9b1a6;
-  --lab-line: #444d43; --lab-control: #242a23; --lab-focus: #9de6c5;
   --settings-bg: #151a17; --settings-nav: #1b211d; --settings-card: #202722;
   --settings-text: #edf2ec; --settings-muted: #acb8ae; --settings-line: #48564b;
   --settings-accent: #9de6c5; --settings-selected: #263e32; --settings-field: #252d27;
+  --hand-paper: #2B2723; --hand-card: #37322C; --hand-card-back: #3E3830;
+  --hand-ink: #F1EBE1; --hand-ink-2: #C9BFB0; --hand-ink-3: #A99F90;
+  --hand-line: rgba(241,235,225,.12); --hand-line-strong: rgba(241,235,225,.26);
+  --hand-seal: #D9563C; --hand-on-seal: #FFFFFF;
+  --hand-key: #4A433C; --hand-key-line: rgba(0,0,0,.55); --hand-mark: rgba(241,235,225,.18);
+  --hand-pop: 0 0 0 1px rgba(255,255,255,.08),0 6px 14px -6px rgba(0,0,0,.7);
+  --hand-lift: 0 0 0 1px rgba(255,255,255,.09),0 8px 16px -6px rgba(0,0,0,.75);
+  --hand-card-shadow: 0 0 0 1px rgba(255,255,255,.07),-4px 2px 12px -5px rgba(0,0,0,.6);
+  --hand-selected-shadow: 0 0 0 1px rgba(255,255,255,.09),0 4px 8px rgba(0,0,0,.3),0 10px 16px -6px rgba(0,0,0,.7);
+  --hand-row-shadow: 0 0 0 1px rgba(255,255,255,.07),0 1px 2px rgba(0,0,0,.4);
+  --hand-back-shadow: 0 3px 10px rgba(0,0,0,.38);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -91,44 +84,23 @@
     --state-caution: #f0c36c; --state-caution-bg: #3c301d;
     --state-critical: #ff9c8f; --state-critical-bg: #442522;
     --state-neutral: #b7c0b8; --state-neutral-bg: #2c332e;
-    --a-bg: #171c1d; --a-raised: #1d2424; --a-preview: #111718;
-    --a-text: #edf2ef; --a-muted: #a4afa9; --a-faint: #79857f;
-    --a-line: #36423e; --a-hairline: #29332f; --a-accent: #9de6c5;
-    --a-accent-ink: #15372a; --a-selected: #21372f; --a-field: #202a27;
-    --a-star: #f1bf72; --a-danger: #ff8c7a; --a-focus: #9de6c5;
-    --b-bg: #191c1a; --b-text: #eef0e9; --b-muted: #b6bcb2; --b-faint: #979f95;
-    --b-line: #626a60; --b-hairline: #333a33; --b-accent: #ff8065;
-    --b-selected: #282e29; --b-star: #e6b969; --b-focus: #ff8065;
-    --c-bg: #131612; --c-raised: #1c211a; --c-stage: #0e110e;
-    --c-text: #eff2e7; --c-muted: #b0b8a8; --c-faint: #818b7b;
-    --c-line: #485044; --c-hairline: #2b3229; --c-accent: #d9f66f;
-    --c-accent-ink: #202a0d; --c-card: #252b22; --c-card-text: #eff2e7;
-    --c-card-muted: #b0b8a8; --c-star: #f0bd62; --c-danger: #ff8d74; --c-focus: #d9f66f;
-    --lab-bg: #181b18; --lab-text: #edf0e9; --lab-muted: #a9b1a6;
-    --lab-line: #444d43; --lab-control: #242a23; --lab-focus: #9de6c5;
     --settings-bg: #151a17; --settings-nav: #1b211d; --settings-card: #202722;
     --settings-text: #edf2ec; --settings-muted: #acb8ae; --settings-line: #48564b;
     --settings-accent: #9de6c5; --settings-selected: #263e32; --settings-field: #252d27;
+    --hand-paper: #2B2723; --hand-card: #37322C; --hand-card-back: #3E3830;
+    --hand-ink: #F1EBE1; --hand-ink-2: #C9BFB0; --hand-ink-3: #A99F90;
+    --hand-line: rgba(241,235,225,.12); --hand-line-strong: rgba(241,235,225,.26);
+    --hand-seal: #D9563C; --hand-on-seal: #FFFFFF;
+    --hand-key: #4A433C; --hand-key-line: rgba(0,0,0,.55); --hand-mark: rgba(241,235,225,.18);
+    --hand-pop: 0 0 0 1px rgba(255,255,255,.08),0 6px 14px -6px rgba(0,0,0,.7);
+    --hand-lift: 0 0 0 1px rgba(255,255,255,.09),0 8px 16px -6px rgba(0,0,0,.75);
+    --hand-card-shadow: 0 0 0 1px rgba(255,255,255,.07),-4px 2px 12px -5px rgba(0,0,0,.6);
+    --hand-selected-shadow: 0 0 0 1px rgba(255,255,255,.09),0 4px 8px rgba(0,0,0,.3),0 10px 16px -6px rgba(0,0,0,.7);
+    --hand-row-shadow: 0 0 0 1px rgba(255,255,255,.07),0 1px 2px rgba(0,0,0,.4);
+    --hand-back-shadow: 0 3px 10px rgba(0,0,0,.38);
   }
 }
 
 html[data-motion="none"] { --fade-duration: 0ms; }
-:root[data-density="compact"] { --size-row-a: 64px; --size-row-b: 56px; }
-
-/* 三套布局共用组件时，只切换材质别名；主题、动效和密度不与布局联动。 */
-:root[data-layout="b"] {
-  --focus: var(--b-focus); --panel: var(--b-bg); --panel-raised: var(--b-bg); --preview: var(--b-bg);
-  --text: var(--b-text); --muted: var(--b-muted); --faint: var(--b-faint);
-  --line: var(--b-line); --line-soft: var(--b-hairline); --accent: var(--b-accent);
-  --accent-ink: var(--b-bg); --selected: var(--b-selected); --field: var(--b-bg);
-  --star: var(--b-star); --danger: var(--state-critical);
-}
-:root[data-layout="c"] {
-  --focus: var(--c-focus); --panel: var(--c-bg); --panel-raised: var(--c-raised); --preview: var(--c-raised);
-  --text: var(--c-text); --muted: var(--c-muted); --faint: var(--c-faint);
-  --line: var(--c-line); --line-soft: var(--c-hairline); --accent: var(--c-accent);
-  --accent-ink: var(--c-accent-ink); --selected: var(--c-hairline); --field: var(--c-raised);
-  --star: var(--c-star); --danger: var(--c-danger);
-}
-/* 只在设置里选了“跟随系统”且系统开了“减少动画效果”时生效（data-reduce-motion）。 */
-  :root[data-reduce-motion="true"] { --fade-duration: var(--duration-reduce); }
+/* 只在设置里选了“跟随系统”且系统开了“减少动画效果”时生效。 */
+:root[data-reduce-motion="true"] { --fade-duration: var(--duration-reduce); }

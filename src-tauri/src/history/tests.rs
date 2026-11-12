@@ -678,7 +678,7 @@ fn storage_errors_become_plain_chinese_messages() {
     let busy = "数据库正忙，请稍后重试";
     let full = "磁盘空间不足，请清理磁盘后重试";
     let readonly = "数据文件是只读的或没有权限，请检查数据目录的权限";
-    let corrupt = "历史库文件已损坏，可以从快照恢复";
+    let corrupt = "历史库文件已损坏，可以从存档恢复";
     let missing = "找不到数据文件，可能已被移动或删除";
     let cannot_open = "找不到或无法打开数据文件，可能已被移动、删除或被占用";
     let moved = "数据文件已被移动或删除，请重启拈来";

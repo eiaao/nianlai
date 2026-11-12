@@ -7,7 +7,8 @@ use crate::{
         keys::Table,
         outcome::{Outcome, PasteResult, Reason},
         permit::{Monitor, Permit, Selection, Session as PermitSession, reliable_control},
-        request::{Callbacks, Mode as PasteMode, Request, RestorePolicy},
+        queue::{Demand, Finished, Guard, State as QueueState, Stop},
+        request::{Callbacks, MODIFIER_GRACE, Mode as PasteMode, Request, RestorePolicy},
     },
     platform::{self, HintEnd, HookEvent, Hooks, REPLAY_WAIT, Target, ime, paste, webview, window},
     resuspend,
@@ -29,6 +30,7 @@ enum Mode {
     Hidden,
     Quick,
     Search,
+    Queue,
     Auto,
 }
 
@@ -244,6 +246,62 @@ fn hint_needs_key_drain(dwelling: bool, ended_by: Option<&str>) -> bool {
     dwelling && ended_by != Some("quit")
 }
 
+// 两条调用都必须执行：即使 WebView 停用或挂起报错，也不能把透明原生窗口留在屏幕上。
+fn hide_webview_then_native(
+    hide_webview: impl FnOnce() -> platform::Result<()>,
+    hide_native: impl FnOnce() -> platform::Result<()>,
+) -> platform::Result<()> {
+    let webview = hide_webview();
+    let native = hide_native();
+    webview.and(native)
+}
+
+struct PasteQueue {
+    state: QueueState,
+    mode: PasteMode,
+    generation: u64,
+    guard: Arc<Guard>,
+    hooks: Option<platform::queue_hook::QueueHooks>,
+    clipboard: platform::clipboard::Service,
+}
+
+// 只有非空且与上次不同的避让外形才值得重新判断位置（纯函数）：返回要采用的新外形。
+// 没有 avoid（拖牌时上报整窗区域、旧调用）一律 None：绝不因此挪窗口。
+fn avoid_update(
+    last: Option<window::NativeRegion>,
+    incoming: Option<window::NativeRegion>,
+) -> Option<window::NativeRegion> {
+    incoming.filter(|next| last != Some(*next))
+}
+
+// 队列异常停止后小指示带着错误停留多久。
+const QUEUE_ERROR_DWELL: Duration = Duration::from_secs(3);
+
+// 有错误说明的停止（超时、外部复制、管理员目标、结果未确认、写入失败、单张超时、
+// 跳过后已无可粘贴……）停留；放完、取消、Esc、× 没有说明，立即收起。
+fn queue_stop_dwells(error: Option<&'static str>) -> bool {
+    error.is_some()
+}
+
+// 内容变化后挪窗口让开光标行：约 120ms、8 步缓出，全部在主线程 SetWindowPos（不激活、不改层次）。
+const GLIDE_DURATION: Duration = Duration::from_millis(120);
+const GLIDE_STEP: Duration = Duration::from_millis(15);
+
+struct Glide {
+    serial: u64,
+    from: (i32, i32),
+    to: (i32, i32),
+    started: Instant,
+}
+
+// 缓出插值（纯函数）：t∈[0,1]，终点精确落在 to。
+fn glide_position(from: (i32, i32), to: (i32, i32), t: f64) -> (i32, i32) {
+    let t = t.clamp(0.0, 1.0);
+    let eased = 1.0 - (1.0 - t).powi(3);
+    let lerp = |a: i32, b: i32| a + ((b - a) as f64 * eased).round() as i32;
+    (lerp(from.0, to.0), lerp(from.1, to.1))
+}
+
 pub(crate) struct Panel {
     window: WebviewWindow,
     mode: Mode,
@@ -263,6 +321,16 @@ pub(crate) struct Panel {
     memory: Arc<webview::MemoryState>,
     pasting: bool,
     paste_cancel: Option<Arc<AtomicBool>>,
+    queue: Option<PasteQueue>,
+    // 呼出时的摆放（光标行、工作区、内容包围盒避让结果）；前端上报新内容区域时据此判断要不要挪。
+    layout: Option<window::Layout>,
+    // 正在进行的平滑挪动。
+    glide: Option<Glide>,
+    // 前端最近一次上报（或呼出时默认）的避让外形，客户区物理像素；只有变了才考虑挪窗口。
+    avoid: Option<window::NativeRegion>,
+    // 队列异常停止后小指示停留显示错误：Some(序号)。
+    queue_dwell: Option<u64>,
+    dwell_serial: u64,
     // 管理员提示：粘贴预判为"目标可能是管理员"后面板不收起，这里记着停留状态；None 表示没在停留。
     hint: Option<Hint>,
     auto_enabled: bool,
@@ -359,6 +427,50 @@ pub enum Action {
         session: u64,
         result: Outcome,
     },
+    StartQueue {
+        session: u64,
+        ids: Vec<usize>,
+        automatic: bool,
+        mode: PasteMode,
+        selection: Option<Selection>,
+    },
+    QueuePaste {
+        session: u64,
+        generation: u64,
+    },
+    QueueTick {
+        session: u64,
+        generation: u64,
+    },
+    QueueClipboard {
+        session: u64,
+        generation: u64,
+    },
+    QueueCancel {
+        session: u64,
+    },
+    // 异常停止后的错误停留到点。
+    QueueDwellEnd {
+        session: u64,
+        serial: u64,
+    },
+    QueueFinished {
+        session: u64,
+        generation: u64,
+        id: usize,
+        result: Outcome,
+    },
+    // 前端上报内容区域（CSS 像素）。session 可省（旧调用），给出时必须是当前会话。
+    SetHitRegions {
+        session: Option<u64>,
+        regions: Vec<platform::HitRegion>,
+        armed: bool,
+        avoid: Option<window::Avoid>,
+    },
+    Glide {
+        session: u64,
+        serial: u64,
+    },
     // 管理员提示停留到点：计时线程发回，面板自动收起。
     HintElapsed {
         session: u64,
@@ -438,6 +550,15 @@ struct PasteCommand {
     started: Instant,
 }
 
+// Action::StartQueue 的内容，交给 Panel::start_queue。
+struct StartQueueCommand {
+    session: u64,
+    ids: Vec<usize>,
+    automatic: bool,
+    mode: PasteMode,
+    selection: Option<Selection>,
+}
+
 // 粘贴工作线程需要的全部东西，由 begin_paste 在主线程上备好后整体移交给 run_paste。
 struct PasteJob {
     app: AppHandle,
@@ -458,6 +579,57 @@ struct PasteJob {
     history: History,
     keys: Arc<Table>,
     stopping: Arc<AtomicBool>,
+}
+
+// 读库加文件现查（M2-3）：普通粘贴和逐张放共用。全部文件不在时 content 为 Ok(None)
+// 且 files_missing；部分不在只留还在的，files_skipped 记跳过几个。
+struct Loaded {
+    content: Result<Option<Arc<crate::history::content::Content>>, String>,
+    files_skipped: usize,
+    files_missing: bool,
+}
+
+fn load_for_paste(history: &History, id: usize) -> Loaded {
+    let mut loaded = Loaded {
+        content: history.load(id).map_err(|e| e.to_string()),
+        files_skipped: 0,
+        files_missing: false,
+    };
+    if let Ok(Some(content)) = &loaded.content {
+        match history.usable_files(content) {
+            crate::history::files::Usable::All => {}
+            crate::history::files::Usable::Partial(filtered, skipped) => {
+                loaded.files_skipped = skipped;
+                loaded.content = Ok(Some(filtered));
+            }
+            crate::history::files::Usable::Nothing => {
+                loaded.files_missing = true;
+                loaded.content = Ok(None);
+            }
+        }
+    }
+    loaded
+}
+
+// 没读到可粘的内容时的结论：读库出错带错误码，否则是记录或文件不在了。
+fn not_loaded(error: Option<String>, files_missing: bool) -> Outcome {
+    match error {
+        Some(code) => {
+            let mut result = Outcome::not_written(Reason::StoreReadFailed);
+            result.evidence.insert("error_code".into(), json!(code));
+            result
+        }
+        None if files_missing => Outcome::not_written(Reason::FilesMissing),
+        None => Outcome::not_written(Reason::RecordMissing),
+    }
+}
+
+fn note_files_skipped(result: &mut Outcome, files_skipped: usize) {
+    if files_skipped > 0 && result.clipboard_written {
+        result
+            .evidence
+            .insert("files_skipped".into(), json!(files_skipped));
+    }
 }
 
 // 粘贴工作线程（线程名 paste-request）：读库、执行粘贴、补上证据，最后把结果发回主线程。
@@ -525,24 +697,11 @@ fn run_paste(job: PasteJob) {
     };
     let drained = restricted || drain();
     let read_started = Instant::now();
-    let loaded = history.load(id).map_err(|e| e.to_string());
-    // 文件条目粘贴前现查一遍（M2-3）：全部不在就不粘贴，部分不在只粘贴还在的。
-    let mut files_skipped = 0;
-    let mut files_missing = false;
-    let loaded = match loaded {
-        Ok(Some(content)) => match history.usable_files(&content) {
-            crate::history::files::Usable::All => Ok(Some(content)),
-            crate::history::files::Usable::Partial(filtered, skipped) => {
-                files_skipped = skipped;
-                Ok(Some(filtered))
-            }
-            crate::history::files::Usable::Nothing => {
-                files_missing = true;
-                Ok(None)
-            }
-        },
-        other => other,
-    };
+    let Loaded {
+        content: loaded,
+        files_skipped,
+        files_missing,
+    } = load_for_paste(&history, id);
     let exports = history.exports();
     let store_read_ms = read_started.elapsed().as_secs_f64() * 1000.0;
     let mut restored = None;
@@ -574,6 +733,9 @@ fn run_paste(job: PasteJob) {
                     external_switch: external_switch || !drained,
                     permit: permit.clone(),
                     copy_only_reason,
+                    text_separator: false,
+                    modifier_grace: MODIFIER_GRACE,
+                    clipboard_guard: None,
                     cancelled: cancelled.clone(),
                 },
                 &keys,
@@ -589,16 +751,7 @@ fn run_paste(job: PasteJob) {
             missing => {
                 // 读库失败也要结束旧请求；主线程会再次检查会话，不能收起新的面板。
                 let focus = restore(RestorePolicy::LegacyBeforeSubmit);
-                let mut result = match missing {
-                    Ok(None) if files_missing => Outcome::not_written(Reason::FilesMissing),
-                    Ok(None) => Outcome::not_written(Reason::RecordMissing),
-                    Err(code) => {
-                        let mut result = Outcome::not_written(Reason::StoreReadFailed);
-                        result.evidence.insert("error_code".into(), json!(code));
-                        result
-                    }
-                    Ok(Some(_)) => unreachable!(),
-                };
+                let mut result = not_loaded(missing.err(), files_missing);
                 if let Some(focus) = focus {
                     result.evidence.insert("restore".into(), json!(focus));
                 }
@@ -606,11 +759,7 @@ fn run_paste(job: PasteJob) {
             }
         }
     };
-    if files_skipped > 0 && result.clipboard_written {
-        result
-            .evidence
-            .insert("files_skipped".into(), json!(files_skipped));
-    }
+    note_files_skipped(&mut result, files_skipped);
     if !restricted {
         result.evidence.insert(
             "input_cleanup".into(),
@@ -674,6 +823,120 @@ fn run_paste(job: PasteJob) {
     let _ = dispatch(&app, Action::PasteFinished { session, result });
 }
 
+struct QueueJob {
+    app: AppHandle,
+    logger: Logger,
+    session: u64,
+    generation: u64,
+    id: usize,
+    mode: PasteMode,
+    text_separator: bool,
+    guard: Arc<Guard>,
+    clipboard: platform::clipboard::Service,
+    history: History,
+    keys: Arc<Table>,
+    stopping: Arc<AtomicBool>,
+}
+
+// 这次 Ctrl+V 落在哪里不能放：没有前台窗口，或前台就是拈来自己（搜索面板还回目标失败时
+// 可能如此）。这种情况不写剪贴板，留在原张，提示用户点回目标再按。
+fn queue_target_rejected(target: &Target, own_process: u32) -> bool {
+    target.window == 0 || target.process == 0 || target.process == own_process
+}
+
+// 每一次后续 Ctrl+V 都是用户刚做出的新选择：在 worker 里重新捕获当前目标，并为这一次
+// 粘贴建立独立的 quick 许可。实际写剪贴板、格式降级、完整性检查（compare_integrity，
+// 管理员目标只复制并停止）和 SendInput 仍走 paste::execute。
+// 不等按键松开：Ctrl+V 的 V 已被钩子吞掉，Ctrl 是用户有意按住的；发键前确认对修饰键
+// 不留宽限（modifier_grace=0），其余条件仍按原 300ms 确认。
+fn run_queue_item(job: QueueJob) {
+    let QueueJob {
+        app,
+        logger,
+        session,
+        generation,
+        id,
+        mode,
+        text_separator,
+        guard,
+        clipboard,
+        history,
+        keys,
+        stopping,
+    } = job;
+    let cancel = guard.cancelled.clone();
+    let started = Instant::now();
+    let target = window::capture();
+    let cancelled = || cancel.load(Ordering::Acquire) || stopping.load(Ordering::Acquire);
+    let mut files_skipped = 0;
+    let mut result = if cancelled() {
+        Outcome::not_written(Reason::RequestCancelled)
+    } else if queue_target_rejected(&target, std::process::id()) {
+        Outcome::not_written(Reason::InvalidTarget)
+    } else {
+        let loaded = load_for_paste(&history, id);
+        files_skipped = loaded.files_skipped;
+        match loaded.content {
+            Ok(Some(content)) => {
+                let exports = history.exports();
+                let monitor = Arc::new(Monitor::new(0, target.window));
+                monitor.started();
+                let permits = PermitSession::new(session, target.clone(), monitor);
+                let permit = permits.quick(id, mode);
+                let restore = |_| Some(window::confirm(&target));
+                let sent = || {};
+                let synchronize = || true;
+                paste::execute(
+                    Request {
+                        session,
+                        target: target.clone(),
+                        // 队列的小指示不是提交目标；0 恒满足执行器的“面板已隐藏”检查。
+                        panel: 0,
+                        record_id: id,
+                        content,
+                        mode,
+                        started,
+                        external_switch: false,
+                        permit: Some(permit),
+                        copy_only_reason: None,
+                        text_separator,
+                        modifier_grace: Duration::ZERO,
+                        clipboard_guard: Some(guard.clone()),
+                        cancelled: cancel.clone(),
+                    },
+                    &keys,
+                    &clipboard,
+                    &stopping,
+                    Callbacks {
+                        on_sent: &sent,
+                        restore: &restore,
+                        synchronize: &synchronize,
+                    },
+                    exports.as_deref(),
+                )
+            }
+            missing => not_loaded(missing.err(), loaded.files_missing),
+        }
+    };
+    note_files_skipped(&mut result, files_skipped);
+    result.request_cancelled = cancel.load(Ordering::Acquire);
+    result.evidence.insert("session".into(), json!(session));
+    logger.event(
+        "queue_item_worker",
+        json!({"session":session,"generation":generation,"record_id":id,
+            "clipboard_written":result.clipboard_written,"process_name":target.process_name}),
+    );
+    let _ = dispatch(
+        &app,
+        Action::QueueFinished {
+            session,
+            generation,
+            id,
+            result,
+        },
+    );
+}
+
 impl Panel {
     pub(crate) fn new(
         window: WebviewWindow,
@@ -699,6 +962,12 @@ impl Panel {
             memory: Arc::new(webview::MemoryState::default()),
             pasting: false,
             paste_cancel: None,
+            queue: None,
+            layout: None,
+            glide: None,
+            avoid: None,
+            queue_dwell: None,
+            dwell_serial: 0,
             hint: None,
             auto_enabled: plan.is_some(),
             auto_plan: plan,
@@ -725,6 +994,10 @@ impl Panel {
             self.log(logger, "replay_cleanup_failed", json!({"error":error}));
         }
         self.hooks.take();
+        if let Some(queue) = self.queue.take() {
+            queue.guard.stop(Stop::Cancelled);
+            let _ = queue.clipboard.set_clipboard_watcher(None);
+        }
     }
     fn log(&self, logger: &Logger, event: &str, fields: Value) {
         logger.event(event, stamp(fields, self.session, &self.target));
@@ -741,6 +1014,657 @@ impl Panel {
             controller.history.release_idle();
         }
     }
+    fn emit_queue(&self) {
+        if let Some(queue) = self.queue.as_ref() {
+            self.emit(
+                "queue:changed",
+                json!({
+                    "remaining":queue.state.ids.len(),"total":queue.state.total,"automatic":queue.state.automatic,
+                    "busy":queue.state.busy(),"error":queue.state.error,"skipped":queue.state.skipped,
+                }),
+            );
+        }
+    }
+
+    // 所有真正收窗路径共用：先停止 WebView 合成，再隐藏原生窗口；挂起请求仍由原函数发出。
+    fn conceal(
+        &self,
+        logger: &Logger,
+        ready: Option<mpsc::Sender<platform::Result<Instant>>>,
+    ) -> platform::Result<()> {
+        hide_webview_then_native(
+            || {
+                webview::set_visible_with_completion(
+                    &self.window,
+                    false,
+                    logger.clone(),
+                    self.session,
+                    self.memory.clone(),
+                    ready,
+                )
+            },
+            || window::hide(&self.window),
+        )
+    }
+
+    fn start_queue(
+        &mut self,
+        app: &AppHandle,
+        logger: &Logger,
+        command: StartQueueCommand,
+    ) -> platform::Result<()> {
+        let StartQueueCommand {
+            session,
+            ids,
+            automatic,
+            mode,
+            selection,
+        } = command;
+        if let Err(message) = crate::paste::queue::validate_ids(&ids) {
+            // 不走 Err：dispatch 的通用错误会收起面板并只显示“操作未完成”。
+            self.log(
+                logger,
+                "queue_rejected",
+                json!({"reason":"invalid_ids","count":ids.len()}),
+            );
+            self.emit("panel:error", json!({"message":message}));
+            return Ok(());
+        }
+        if mode == PasteMode::Copy {
+            self.log(logger, "queue_rejected", json!({"reason":"copy_mode"}));
+            self.emit(
+                "panel:error",
+                json!({"message":"逐张粘贴只支持粘贴模式，请重新选择。"}),
+            );
+            return Ok(());
+        }
+        if self.interaction == Interaction::Activated {
+            // 主路径这种目标（可能以管理员运行）只复制；低权限的键盘钩子也收不到发往它的
+            // Ctrl+V，逐张放必然失效，所以直接拒绝。
+            self.log(
+                logger,
+                "queue_rejected",
+                json!({"reason":"target_may_be_elevated"}),
+            );
+            self.emit(
+                "panel:error",
+                json!({"message":"目标窗口可能以管理员身份运行，逐张粘贴不可用；请逐条粘贴。"}),
+            );
+            return Ok(());
+        }
+        if self.mode == Mode::Search {
+            let Some(selection) = selection else {
+                self.emit(
+                    "panel:error",
+                    json!({"message":"请在搜索面板重新选择条目。"}),
+                );
+                return Ok(());
+            };
+            let foreground = window::foreground();
+            let permits = self.permits.as_mut().ok_or("前台监控尚未建立")?;
+            if let Err(reason) = permits.select(session, ids[0], mode, selection, foreground) {
+                self.log(logger, "queue_rejected", json!({"reason":reason}));
+                self.emit(
+                    "panel:error",
+                    json!({"message":"选择期间窗口状态已变化，请重新选择条目。"}),
+                );
+                return Ok(());
+            }
+        } else if selection.is_some() {
+            self.emit(
+                "panel:error",
+                json!({"message":"面板模式已变化，请重新选择条目。"}),
+            );
+            return Ok(());
+        }
+
+        // 新钩子先以 disabled 状态安装，watcher 也先就绪；此前失败完全不破坏旧面板。
+        let clipboard = app.state::<Controller>().clipboard.clone();
+        let guard = match Guard::new(clipboard.owner(), clipboard.stamp()) {
+            Ok(guard) => Arc::new(guard),
+            Err(_) => {
+                self.emit(
+                    "panel:error",
+                    json!({"message":"剪贴板状态无法确认，逐张粘贴未启动；请重新复制后再试。"}),
+                );
+                return Ok(());
+            }
+        };
+        let generation = session;
+        let callback_app = app.clone();
+        let hooks = match platform::queue_hook::QueueHooks::install(
+            guard.cancelled.clone(),
+            {
+                let guard = guard.clone();
+                // 主线程按 IDLE_TIMEOUT 停止；钩子线程多给 5 秒作为主线程卡住时的兜底。
+                move || guard.idle() >= crate::paste::queue::IDLE_TIMEOUT + Duration::from_secs(5)
+            },
+            move |event| {
+                let action = match event {
+                    platform::queue_hook::QueueEvent::Paste => Action::QueuePaste {
+                        session,
+                        generation,
+                    },
+                    platform::queue_hook::QueueEvent::Cancel => Action::QueueCancel { session },
+                    platform::queue_hook::QueueEvent::Timeout => Action::QueueTick {
+                        session,
+                        generation,
+                    },
+                };
+                let _ = dispatch(&callback_app, action);
+            },
+        ) {
+            Ok(hooks) => hooks,
+            Err(error) => {
+                self.log(logger, "queue_hook_install_failed", json!({"error":error}));
+                self.emit(
+                    "panel:error",
+                    json!({"message":Stop::InstallFailed.message()}),
+                );
+                return Ok(());
+            }
+        };
+        let watcher_app = app.clone();
+        let watcher_guard = guard.clone();
+        if let Err(error) = clipboard.set_clipboard_watcher(Some(Box::new(move |stamp| {
+            if stamp.owner == 0 || stamp.sequence == 0 || stamp.owner != watcher_guard.writer() {
+                // 回调与写入同在剪贴板线程；这里只做无锁撤销，不反向等待写租约。
+                watcher_guard.stop(Stop::ClipboardChanged);
+            }
+            let _ = dispatch(
+                &watcher_app,
+                Action::QueueClipboard {
+                    session,
+                    generation,
+                },
+            );
+        }))) {
+            self.log(
+                logger,
+                "queue_watcher_install_failed",
+                json!({"error":error}),
+            );
+            self.emit(
+                "panel:error",
+                json!({"message":"剪贴板监听安装失败，逐张粘贴未启动；请重试。"}),
+            );
+            return Ok(());
+        }
+
+        if let Err(error) = self.replay_search(logger, false, "queue", false) {
+            self.log(logger, "replay_cleanup_failed", json!({"error":error}));
+        }
+        self.hooks.take();
+        platform::hook::set_preview_keys(false);
+        let foreground = window::foreground();
+        let panel = window::handle(&self.window)?;
+        let mut returned = true;
+        if self.foreground_taken || foreground == panel {
+            let focus = window::restore(&self.target);
+            self.foreground_taken = false;
+            returned = focus.foreground.success && window::foreground() != panel;
+            self.log(
+                logger,
+                "queue_focus_restored",
+                json!({"foreground_ok":focus.foreground.success,"focus_restored":focus.focus_restored,
+                    "returned":returned}),
+            );
+        }
+        let total = ids.len();
+        self.mode = Mode::Queue;
+        self.awaiting_search = false;
+        self.hint = None;
+        self.permits = None;
+        self.monitor = None;
+        self.layout = None;
+        self.glide = None;
+        self.avoid = None;
+        self.queue = Some(PasteQueue {
+            state: QueueState::new(ids, automatic),
+            mode,
+            generation,
+            guard: guard.clone(),
+            hooks: Some(hooks),
+            clipboard,
+        });
+        if let Err(error) = window::show_queue(&self.window, &self.target) {
+            self.log(logger, "queue_window_failed", json!({"error":error}));
+            return self.fail_queue(app, logger, Stop::InstallFailed);
+        }
+        let tick_app = app.clone();
+        let tick_guard = guard.clone();
+        if let Err(error) = std::thread::Builder::new()
+            .name("queue-tick".into())
+            .spawn(move || {
+                while !tick_guard.cancelled.load(Ordering::Acquire) {
+                    std::thread::sleep(Duration::from_millis(50));
+                    if tick_guard.cancelled.load(Ordering::Acquire)
+                        || dispatch(
+                            &tick_app,
+                            Action::QueueTick {
+                                session,
+                                generation,
+                            },
+                        )
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            })
+        {
+            self.log(
+                logger,
+                "queue_tick_failed",
+                json!({"error":error.to_string()}),
+            );
+            return self.fail_queue(app, logger, Stop::WorkerFailed);
+        }
+        if let Some(queue) = self.queue.as_mut() {
+            queue.state.installed(true, queue.guard.elapsed());
+            queue.guard.touch();
+            if !returned {
+                // 没能把焦点还给目标：先别自动放，请用户点回目标；之后的 Ctrl+V 照常生效。
+                queue
+                    .state
+                    .notice("请先点回要粘贴的位置，再按 Ctrl+V；Esc 取消");
+            }
+            if let Some(hooks) = queue.hooks.as_ref() {
+                hooks.activate();
+            }
+        }
+        // 手牌隐藏但 WebView 继续醒着，队列进度和取消入口仍实时更新。
+        self.emit("panel:hidden", json!({"queue":true}));
+        self.emit_queue();
+        self.log(logger, "queue_started", json!({"total":total,"automatic":automatic,"mode":match mode { PasteMode::Paste => "paste", PasteMode::Copy => "copy", PasteMode::Text => "text" }}));
+        if automatic && returned {
+            self.begin_queue_item(app, logger)?;
+        }
+        Ok(())
+    }
+
+    fn begin_queue_item(&mut self, app: &AppHandle, logger: &Logger) -> platform::Result<()> {
+        let Some(queue) = self.queue.as_ref() else {
+            return Ok(());
+        };
+        if let Some(reason) = queue.guard.stop_reason() {
+            self.stop_queue(logger, reason)?;
+            return Ok(());
+        }
+        let now = queue.guard.elapsed();
+        if let Some(reason) = queue.state.expired(now) {
+            self.stop_queue(logger, reason)?;
+            return Ok(());
+        }
+        let Some(queue) = self.queue.as_mut() else {
+            return Ok(());
+        };
+        let demand = queue.state.request(now);
+        if demand != Demand::Inactive {
+            queue.guard.touch();
+        }
+        let id = match demand {
+            Demand::Start(id) => id,
+            Demand::Buffered | Demand::Full => {
+                self.emit_queue();
+                return Ok(());
+            }
+            Demand::Inactive => return Ok(()),
+        };
+        let generation = queue.generation;
+        let guard = queue.guard.clone();
+        let mode = queue.mode;
+        let text_separator = queue.state.automatic && queue.state.ids.len() > 1;
+        let clipboard = queue.clipboard.clone();
+        self.emit_queue();
+        let controller = app.state::<Controller>();
+        let job = QueueJob {
+            app: app.clone(),
+            logger: logger.clone(),
+            session: self.session,
+            generation,
+            id,
+            mode,
+            text_separator,
+            guard,
+            clipboard,
+            history: controller.history.clone(),
+            keys: controller.keys.clone(),
+            stopping: controller.stopping.clone(),
+        };
+        if let Err(error) = std::thread::Builder::new()
+            .name("queue-paste".into())
+            .spawn(move || run_queue_item(job))
+        {
+            self.log(
+                logger,
+                "queue_worker_failed",
+                json!({"error":error.to_string()}),
+            );
+            return self.fail_queue(app, logger, Stop::WorkerFailed);
+        }
+        Ok(())
+    }
+
+    fn tick_queue(
+        &mut self,
+        app: &AppHandle,
+        logger: &Logger,
+        generation: u64,
+    ) -> platform::Result<()> {
+        let Some(queue) = self.queue.as_ref() else {
+            return Ok(());
+        };
+        if queue.generation != generation {
+            return Ok(());
+        }
+        if let Some(reason) = queue.guard.stop_reason() {
+            return self.stop_queue(logger, reason).map(|_| ());
+        }
+        let now = queue.guard.elapsed();
+        if let Some(reason) = queue.state.expired(now) {
+            return self.stop_queue(logger, reason).map(|_| ());
+        }
+        if !queue.state.busy() {
+            let guard = queue.guard.clone();
+            let clipboard = queue.clipboard.clone();
+            if let Some(reason) = guard.inspect(|| clipboard.stamp()) {
+                return self.stop_queue(logger, reason).map(|_| ());
+            }
+        }
+        if self
+            .queue
+            .as_ref()
+            .is_some_and(|queue| queue.state.due(now))
+        {
+            self.begin_queue_item(app, logger)?;
+        }
+        Ok(())
+    }
+
+    fn inspect_queue_clipboard(
+        &mut self,
+        logger: &Logger,
+        generation: u64,
+    ) -> platform::Result<()> {
+        let Some(queue) = self.queue.as_ref() else {
+            return Ok(());
+        };
+        if queue.generation != generation {
+            return Ok(());
+        }
+        let mut reason = queue.guard.stop_reason();
+        if reason.is_none() && !queue.state.busy() {
+            let guard = queue.guard.clone();
+            let clipboard = queue.clipboard.clone();
+            reason = guard.inspect(|| clipboard.stamp());
+        }
+        if let Some(reason) = reason {
+            self.stop_queue(logger, reason)?;
+        }
+        Ok(())
+    }
+
+    fn finish_queue_item(
+        &mut self,
+        app: &AppHandle,
+        logger: &Logger,
+        session: u64,
+        generation: u64,
+        id: usize,
+        result: Outcome,
+    ) -> platform::Result<()> {
+        let stale = session != self.session
+            || self.queue.as_ref().is_none_or(|queue| {
+                queue.generation != generation
+                    || !queue.state.busy()
+                    || queue.state.ids.front() != Some(&id)
+            });
+        // 过期的回执（队列已停、换了会话）同样记 paste 日志：剪贴板可能已经写过。
+        let mut report = result.to_value();
+        report["queue"] = json!({"generation":generation,"record_id":id,"stale":stale});
+        logger.event("paste", report);
+        if stale {
+            return Ok(());
+        }
+        if let Some(reason) = self
+            .queue
+            .as_ref()
+            .and_then(|queue| queue.guard.stop_reason())
+        {
+            self.stop_queue(logger, reason)?;
+            return Ok(());
+        }
+        // 自写事件可能晚于 worker 回执；推进前复核最终 owner + sequence，外部新内容永不丢。
+        let inspected = self.queue.as_ref().map(|queue| {
+            let guard = queue.guard.clone();
+            let clipboard = queue.clipboard.clone();
+            guard.inspect(|| clipboard.stamp())
+        });
+        if let Some(Some(reason)) = inspected {
+            self.stop_queue(logger, reason)?;
+            return Ok(());
+        }
+        let Some(queue) = self.queue.as_mut() else {
+            return Ok(());
+        };
+        let now = queue.guard.elapsed();
+        queue.guard.touch();
+        match queue.state.finish(id, &result, now) {
+            Finished::Stopped(reason) => {
+                self.stop_queue(logger, reason)?;
+            }
+            Finished::Ready => self.emit_queue(),
+            Finished::Next => {
+                self.emit_queue();
+                self.begin_queue_item(app, logger)?;
+            }
+            Finished::Stale => {}
+        }
+        Ok(())
+    }
+
+    fn stop_queue(&mut self, logger: &Logger, reason: Stop) -> platform::Result<bool> {
+        self.stop_queue_with(logger, reason, true)
+    }
+
+    // 停止队列：卸掉 Ctrl+V 接管和剪贴板观察，广播最终状态。异常停止（有错误说明）时小指示
+    // 带着错误停留 QUEUE_ERROR_DWELL 再收起；放完、取消、Esc、× 立即收起。
+    fn stop_queue_with(
+        &mut self,
+        logger: &Logger,
+        reason: Stop,
+        may_dwell: bool,
+    ) -> platform::Result<bool> {
+        let Some(mut queue) = self.queue.take() else {
+            return Ok(false);
+        };
+        queue.guard.stop(reason);
+        queue.state.stop(reason);
+        let remaining_ids: Vec<usize> = queue.state.ids.iter().copied().collect();
+        let total = queue.state.total;
+        let skipped = queue.state.skipped;
+        let error = queue.state.error;
+        if let Err(error) = queue.clipboard.set_clipboard_watcher(None) {
+            self.log(
+                logger,
+                "queue_watcher_cleanup_failed",
+                json!({"error":error}),
+            );
+        }
+        // 这里卸钩：停留期间 Ctrl+V、Esc 都不再被接管。
+        drop(queue);
+        let dwell = may_dwell && queue_stop_dwells(error);
+        self.emit(
+            "queue:changed",
+            json!({"remaining":0,"remaining_ids":remaining_ids,"total":total,"automatic":false,
+                "busy":false,"error":error,"skipped":skipped,"stopped":reason.name(),
+                "dwell_ms":if dwell { QUEUE_ERROR_DWELL.as_millis() as u64 } else { 0 }}),
+        );
+        self.log(
+            logger,
+            "queue_stopped",
+            json!({"reason":reason.name(),"message":error,"remaining":remaining_ids.len(),
+                "skipped":skipped,"dwell":dwell}),
+        );
+        if dwell {
+            self.dwell_serial += 1;
+            let serial = self.dwell_serial;
+            self.queue_dwell = Some(serial);
+            let app = self.window.app_handle().clone();
+            let session = self.session;
+            if std::thread::Builder::new()
+                .name("queue-dwell".into())
+                .spawn(move || {
+                    std::thread::sleep(QUEUE_ERROR_DWELL);
+                    let _ = dispatch(&app, Action::QueueDwellEnd { session, serial });
+                })
+                .is_ok()
+            {
+                return Ok(true);
+            }
+        }
+        self.end_queue_window(logger)?;
+        Ok(true)
+    }
+
+    fn end_queue_window(&mut self, logger: &Logger) -> platform::Result<()> {
+        self.queue_dwell = None;
+        self.mode = Mode::Hidden;
+        self.awaiting_search = false;
+        self.emit_hidden();
+        self.conceal(logger, None)
+    }
+
+    // 队列已切换后若窗口或线程启动失败，不能留下半激活指示；恢复只读错误面板供用户关闭。
+    fn fail_queue(
+        &mut self,
+        app: &AppHandle,
+        logger: &Logger,
+        reason: Stop,
+    ) -> platform::Result<()> {
+        self.stop_queue_with(logger, reason, false)?;
+        self.show_submission_feedback(app, logger)?;
+        self.emit(
+            "panel:error",
+            json!({"message":reason.message(),"close_only":true}),
+        );
+        Ok(())
+    }
+
+    // regions 只决定点击区域（窗口裁剪）；avoid 是当前姿态的避让外形，只用于定位。
+    // 只有收到非空且与上次不同的 avoid 才考虑挪窗口；没有 avoid（例如拖牌时上报整窗区域）
+    // 绝不挪。出错只记日志：不能因为一次上报失败就收起面板。
+    #[allow(clippy::too_many_arguments)]
+    fn set_hit_regions(
+        &mut self,
+        app: &AppHandle,
+        logger: &Logger,
+        session: Option<u64>,
+        regions: &[platform::HitRegion],
+        armed: bool,
+        avoid: Option<window::Avoid>,
+    ) {
+        if session.is_some_and(|session| session != self.session) {
+            return;
+        }
+        if self.mode == Mode::Queue || (self.mode == Mode::Hidden && armed) {
+            // 小指示整块可点（× 在里面），不受手牌布局的旧区域影响；隐藏期的迟到上报不生效。
+            window::clear_hit_regions(&self.window);
+            return;
+        }
+        if let Err(error) = window::set_hit_regions(&self.window, regions, armed) {
+            self.log(logger, "hit_regions_failed", json!({"error":error}));
+        }
+        let incoming = match avoid
+            .map(|avoid| window::convert_avoid(avoid, window::window_scale(&self.window)))
+            .transpose()
+        {
+            Ok(incoming) => incoming,
+            Err(error) => {
+                self.log(logger, "avoid_invalid", json!({"error":error}));
+                return;
+            }
+        };
+        let Some(content) = avoid_update(self.avoid, incoming) else {
+            return;
+        };
+        self.avoid = Some(content);
+        if self.pasting || self.hint.is_some() || !matches!(self.mode, Mode::Quick | Mode::Search) {
+            return;
+        }
+        let Some(layout) = self.layout else {
+            return;
+        };
+        let Some(next) = layout.adjust(content) else {
+            return;
+        };
+        let from = self.glide.as_ref().map_or((layout.x, layout.y), |glide| {
+            glide_position(
+                glide.from,
+                glide.to,
+                glide.started.elapsed().as_secs_f64() / GLIDE_DURATION.as_secs_f64(),
+            )
+        });
+        let serial = self.glide.as_ref().map_or(1, |glide| glide.serial + 1);
+        self.layout = Some(next);
+        self.glide = Some(Glide {
+            serial,
+            from,
+            to: (next.x, next.y),
+            started: Instant::now(),
+        });
+        self.log(
+            logger,
+            "panel_reposition",
+            json!({"from":[from.0,from.1],"to":[next.x,next.y],"placement":next.fit.name()}),
+        );
+        self.emit(
+            "panel:placement",
+            json!({"caret":next.caret(),"placement":next.fit.name()}),
+        );
+        let ticker = app.clone();
+        let session = self.session;
+        if std::thread::Builder::new()
+            .name("panel-glide".into())
+            .spawn(move || {
+                let started = Instant::now();
+                while started.elapsed() < GLIDE_DURATION + GLIDE_STEP {
+                    std::thread::sleep(GLIDE_STEP);
+                    if dispatch(&ticker, Action::Glide { session, serial }).is_err() {
+                        break;
+                    }
+                }
+            })
+            .is_err()
+        {
+            // 线程起不来就一步到位。
+            self.glide = None;
+            if let Err(error) = window::move_to(&self.window, next.x, next.y) {
+                self.log(logger, "panel_reposition_failed", json!({"error":error}));
+            }
+        }
+    }
+
+    fn step_glide(&mut self, logger: &Logger, serial: u64) {
+        let Some(glide) = self.glide.as_ref().filter(|glide| glide.serial == serial) else {
+            return;
+        };
+        if !matches!(self.mode, Mode::Quick | Mode::Search) {
+            self.glide = None;
+            return;
+        }
+        let t = glide.started.elapsed().as_secs_f64() / GLIDE_DURATION.as_secs_f64();
+        let (x, y) = glide_position(glide.from, glide.to, t);
+        if t >= 1.0 {
+            self.glide = None;
+        }
+        if let Err(error) = window::move_to(&self.window, x, y) {
+            self.glide = None;
+            self.log(logger, "panel_reposition_failed", json!({"error":error}));
+        }
+    }
+
     fn current(&self, session: u64) -> bool {
         session == self.session && self.mode != Mode::Hidden
     }
@@ -754,6 +1678,9 @@ impl Panel {
                 json!({"hotkeyToShowMs":shown.duration_since(started).as_secs_f64()*1000.0,"history":history,
                     "interaction":self.interaction,
                     "terminal_feedback":self.interaction == Interaction::CloseOnly,
+                    // 光标行在窗口客户区里的位置（CSS 像素，可能在窗口外）；前端可选用来避让。
+                    "caret":self.layout.as_ref().and_then(window::Layout::caret),
+                    "placement":self.layout.as_ref().map(|layout| layout.fit.name()),
                     "foregroundRevision":self.monitor.as_ref().map_or(0, |monitor| monitor.revision())}),
             );
             controller.history.check_visible_files();
@@ -832,13 +1759,19 @@ impl Panel {
             self.memory.clone(),
         )?;
         let webview_visible_ms = webview_started.elapsed().as_secs_f64() * 1000.0;
-        if automatic.is_some() {
+        let cursor_known = if automatic.is_some() {
             self.mode = Mode::Auto;
             window::show_auto(&self.window)?;
+            self.layout = None;
+            None
         } else {
             self.mode = Mode::Quick;
-            window::show(&self.window, &self.target, placement_mode(app))?;
-        }
+            let shown = window::show(&self.window, &self.target, placement_mode(app))?;
+            self.avoid = Some(window::default_avoid(&shown.layout));
+            self.layout = Some(shown.layout);
+            self.glide = None;
+            Some(shown.cursor_known)
+        };
         let shown = Instant::now();
         self.shown = Some(shown);
         self.auto_visible = automatic.map(|(cycle, hidden_since)| AutoVisible {
@@ -852,6 +1785,7 @@ impl Panel {
             "cycle":self.auto_visible.map(|auto|auto.cycle),
             "hidden_ms":self.auto_visible.map(|auto|auto.hidden_ms),
             "trigger_to_show_ms":automatic.map(|_|trigger_to_show_ms),
+            "cursor_known":cursor_known,
             "foreground_ok":if automatic.is_none() { Some(window::foreground()==self.target.window) } else { None },
         }));
         if automatic.is_none() {
@@ -938,7 +1872,10 @@ impl Panel {
             self.session,
             self.memory.clone(),
         )?;
-        window::show(&self.window, &self.target, placement_mode(app))?;
+        let layout = window::show(&self.window, &self.target, placement_mode(app))?.layout;
+        self.avoid = Some(window::default_avoid(&layout));
+        self.layout = Some(layout);
+        self.glide = None;
         self.shown_event(app);
         self.log(
             logger,
@@ -982,21 +1919,14 @@ impl Panel {
         ready: Option<mpsc::Sender<platform::Result<Instant>>>,
     ) -> platform::Result<()> {
         let cycle = self.auto_visible.map(|auto| auto.cycle);
-        window::hide(&self.window)?;
+        // panel:hidden 先于 SetIsVisible(false)/TrySuspend 发出，前端在挂起前清屏。
+        self.emit_hidden();
+        self.conceal(logger, ready)?;
         let visible_ms = self
             .shown
             .map(|shown| shown.elapsed().as_secs_f64() * 1000.0);
         self.mode = Mode::Hidden;
         self.auto_visible = None;
-        self.emit_hidden();
-        webview::set_visible_with_completion(
-            &self.window,
-            false,
-            logger.clone(),
-            self.session,
-            self.memory.clone(),
-            ready,
-        )?;
         self.log(
             logger,
             "hidden",
@@ -1006,6 +1936,13 @@ impl Panel {
     }
     fn hide(&mut self, logger: &Logger) -> platform::Result<bool> {
         platform::hook::set_preview_keys(false);
+        if self.mode == Mode::Queue {
+            // 正在逐张粘贴：取消并收起；已停止、正在停留显示错误：直接收起。
+            if !self.stop_queue_with(logger, Stop::Cancelled, false)? {
+                self.end_queue_window(logger)?;
+            }
+            return Ok(false);
+        }
         if self.mode == Mode::Auto {
             self.hide_auto(logger, None)?;
             return Ok(false);
@@ -1061,7 +1998,8 @@ impl Panel {
         self.mode = Mode::Hidden;
         self.hooks.take();
         self.awaiting_search = false;
-        window::hide(&self.window)?;
+        self.emit_hidden();
+        self.conceal(logger, None)?;
         let focus = if (self.foreground_taken || foreground == panel) && may_restore {
             window::restore(&self.target)
         } else {
@@ -1073,14 +2011,6 @@ impl Panel {
             json!({"foreground_path":focus.foreground.path,"foreground_ok":focus.foreground.success,
             "focus_restored":focus.focus_restored,"focus_unknown":focus.focus_unknown,"external_switch":!may_restore}),
         );
-        self.emit_hidden();
-        webview::set_visible(
-            &self.window,
-            false,
-            logger.clone(),
-            self.session,
-            self.memory.clone(),
-        )?;
         self.log(logger, "hidden", json!({}));
         Ok(may_restore && focus.foreground.success && focus.focus_restored)
     }
@@ -1281,6 +2211,7 @@ impl Panel {
             Mode::Hidden => "hidden",
             Mode::Quick => "quick",
             Mode::Search => "search",
+            Mode::Queue => "queue",
             Mode::Auto => "auto",
         }
     }
@@ -1404,15 +2335,7 @@ impl Panel {
             if first {
                 let plan = self.auto_plan.take().ok_or("自动循环计划不存在")?;
                 let (ready, hidden) = mpsc::channel();
-                window::hide(&self.window)?;
-                webview::set_visible_with_completion(
-                    &self.window,
-                    false,
-                    logger.clone(),
-                    self.session,
-                    self.memory.clone(),
-                    Some(ready),
-                )?;
+                self.conceal(logger, Some(ready))?;
                 self.auto_stop = Some(autocycle::spawn(app.clone(), logger.clone(), plan, hidden)?);
             }
             return Ok(());
@@ -1519,15 +2442,8 @@ impl Panel {
             if !passive {
                 self.mode = Mode::Hidden;
                 self.awaiting_search = false;
-                window::hide(&self.window)?;
                 self.emit_hidden();
-                webview::set_visible(
-                    &self.window,
-                    false,
-                    logger.clone(),
-                    session,
-                    self.memory.clone(),
-                )?;
+                self.conceal(logger, None)?;
                 self.log(logger, "hidden", json!({"source":"paste"}));
             }
         }
@@ -1782,6 +2698,12 @@ impl Panel {
         {
             self.log(logger, "quit_cleanup_failed", json!({"error":error}));
         }
+        // 粘贴松键清理中的 hide() 会只撤销请求、暂不收窗；退出不等清理，但仍按同一顺序收尾。
+        if self.mode != Mode::Hidden
+            && let Err(error) = self.conceal(logger, None)
+        {
+            self.log(logger, "quit_cleanup_failed", json!({"error":error}));
+        }
         self.hooks.take();
         self.log(logger, "quit_requested", json!({"relaunch":relaunch}));
         logger.flush();
@@ -1796,6 +2718,7 @@ impl Panel {
         if self.auto_enabled {
             let command = match &action {
                 Action::Paste { .. } => Some("paste_item"),
+                Action::StartQueue { .. } => Some("start_queue"),
                 Action::Search { .. } => Some("start_search"),
                 Action::SearchReady { .. } => Some("search_ready"),
                 Action::Hide { .. } => Some("hide_panel"),
@@ -1966,6 +2889,97 @@ impl Panel {
                     started,
                 };
                 self.begin_paste(app, logger, command)?
+            }
+            Action::StartQueue {
+                session,
+                ids,
+                automatic,
+                mode,
+                selection,
+            } if self.current(session)
+                && !self.pasting
+                && self.hint.is_none()
+                && self.queue.is_none()
+                && matches!(self.mode, Mode::Quick | Mode::Search)
+                && matches!(
+                    self.interaction,
+                    Interaction::Quick | Interaction::Activated
+                ) =>
+            {
+                let command = StartQueueCommand {
+                    session,
+                    ids,
+                    automatic,
+                    mode,
+                    selection,
+                };
+                self.start_queue(app, logger, command)?
+            }
+            Action::QueuePaste {
+                session,
+                generation,
+            } if session == self.session
+                && self.mode == Mode::Queue
+                && self
+                    .queue
+                    .as_ref()
+                    .is_some_and(|queue| queue.generation == generation) =>
+            {
+                self.begin_queue_item(app, logger)?
+            }
+            Action::QueueTick {
+                session,
+                generation,
+            } if session == self.session
+                && self.mode == Mode::Queue
+                && self
+                    .queue
+                    .as_ref()
+                    .is_some_and(|queue| queue.generation == generation) =>
+            {
+                self.tick_queue(app, logger, generation)?
+            }
+            Action::QueueClipboard {
+                session,
+                generation,
+            } if session == self.session
+                && self.mode == Mode::Queue
+                && self
+                    .queue
+                    .as_ref()
+                    .is_some_and(|queue| queue.generation == generation) =>
+            {
+                self.inspect_queue_clipboard(logger, generation)?
+            }
+            Action::QueueCancel { session }
+                if session == self.session && self.mode == Mode::Queue =>
+            {
+                if !self.stop_queue(logger, Stop::Escape)? {
+                    // 停留期间点 ×：直接收起。
+                    self.end_queue_window(logger)?;
+                }
+            }
+            Action::QueueDwellEnd { session, serial }
+                if session == self.session
+                    && self.mode == Mode::Queue
+                    && self.queue_dwell == Some(serial) =>
+            {
+                self.end_queue_window(logger)?;
+            }
+            Action::QueueFinished {
+                session,
+                generation,
+                id,
+                result,
+            } => self.finish_queue_item(app, logger, session, generation, id, result)?,
+            Action::SetHitRegions {
+                session,
+                regions,
+                armed,
+                avoid,
+            } => self.set_hit_regions(app, logger, session, &regions, armed, avoid),
+            Action::Glide { session, serial } if session == self.session => {
+                self.step_glide(logger, serial);
             }
             Action::PasteSent { session } if session == self.session => {
                 self.pasting = false;
@@ -2537,6 +3551,109 @@ mod tests {
             !hint_needs_key_drain(true, Some("quit")),
             "明确退出不能等松键"
         );
+    }
+
+    #[test]
+    fn only_a_new_non_empty_avoid_shape_is_considered() {
+        let shape = |top| window::NativeRegion {
+            left: 0,
+            top,
+            right: 960,
+            bottom: 530,
+        };
+        assert_eq!(avoid_update(Some(shape(35)), None), None, "没有 avoid 不挪");
+        assert_eq!(avoid_update(None, None), None);
+        assert_eq!(
+            avoid_update(Some(shape(35)), Some(shape(35))),
+            None,
+            "与上次相同不挪"
+        );
+        assert_eq!(
+            avoid_update(Some(shape(35)), Some(shape(60))),
+            Some(shape(60))
+        );
+        assert_eq!(avoid_update(None, Some(shape(60))), Some(shape(60)));
+    }
+
+    #[test]
+    fn only_explained_queue_stops_dwell() {
+        use crate::paste::queue::Stop;
+        for reason in [
+            Stop::Timeout,
+            Stop::ItemTimeout,
+            Stop::ClipboardChanged,
+            Stop::WriteFailed,
+            Stop::SubmissionUncertain,
+            Stop::Elevated,
+        ] {
+            assert!(queue_stop_dwells(reason.message()), "{reason:?}");
+        }
+        for reason in [Stop::Done, Stop::Cancelled, Stop::Escape] {
+            assert!(!queue_stop_dwells(reason.message()), "{reason:?}");
+        }
+        assert!(queue_stop_dwells(Some("这条记录已不在历史里，已跳过这条")));
+    }
+
+    #[test]
+    fn glide_eases_out_and_lands_exactly_on_target() {
+        assert_eq!(glide_position((0, 0), (100, -40), 0.0), (0, 0));
+        assert_eq!(glide_position((0, 0), (100, -40), 1.0), (100, -40));
+        assert_eq!(glide_position((0, 0), (100, -40), 7.0), (100, -40));
+        let half = glide_position((0, 0), (100, 0), 0.5);
+        assert!(half.0 > 50, "缓出：前半程走得多 {half:?}");
+    }
+
+    // 问题 8：前台是拈来自己（还回目标失败）或没有前台时，这张不写剪贴板、可重试。
+    #[test]
+    fn queue_refuses_own_or_missing_target() {
+        let own = 4242;
+        let target = |window, process| Target {
+            window,
+            process,
+            ..Target::default()
+        };
+        assert!(queue_target_rejected(&target(0, 77), own));
+        assert!(queue_target_rejected(&target(10, 0), own));
+        assert!(queue_target_rejected(&target(10, own), own));
+        assert!(!queue_target_rejected(&target(10, 77), own));
+    }
+
+    #[test]
+    fn conceal_stops_webview_before_hiding_the_native_window() {
+        use std::cell::RefCell;
+
+        let calls = RefCell::new(Vec::new());
+        hide_webview_then_native(
+            || {
+                calls.borrow_mut().push("webview");
+                Ok(())
+            },
+            || {
+                calls.borrow_mut().push("native");
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(calls.into_inner(), ["webview", "native"]);
+    }
+
+    #[test]
+    fn conceal_still_hides_native_window_when_webview_stop_fails() {
+        use std::cell::RefCell;
+
+        let calls = RefCell::new(Vec::new());
+        let result = hide_webview_then_native(
+            || {
+                calls.borrow_mut().push("webview");
+                Err("webview failed".into())
+            },
+            || {
+                calls.borrow_mut().push("native");
+                Ok(())
+            },
+        );
+        assert_eq!(result, Err("webview failed".into()));
+        assert_eq!(calls.into_inner(), ["webview", "native"]);
     }
 
     #[test]

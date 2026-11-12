@@ -106,8 +106,8 @@ pub fn manual(directory: &Path, logger: &Logger) -> Result<(), String> {
     .map_err(|error| {
         logger.event("snapshot_failed", json!({"error_code":error.to_string()}));
         match error {
-            nianlai_store::Error::Busy => "正在生成另一份快照，请稍后再试".to_owned(),
-            _ => "快照没有生成成功，现有快照不受影响".to_owned(),
+            nianlai_store::Error::Busy => "正在生成另一份存档，请稍后再试".to_owned(),
+            _ => "存档没有生成成功，现有存档不受影响".to_owned(),
         }
     })?;
     logger.event(
@@ -118,7 +118,7 @@ pub fn manual(directory: &Path, logger: &Logger) -> Result<(), String> {
 }
 
 pub fn list(directory: &Path) -> Result<Vec<SnapshotInfo>, String> {
-    nianlai_store::list_snapshots(directory).map_err(|_| "快照列表读取失败".to_owned())
+    nianlai_store::list_snapshots(directory).map_err(|_| "存档列表读取失败".to_owned())
 }
 
 pub fn last_restore() -> Option<Restored> {
@@ -128,13 +128,13 @@ pub fn last_restore() -> Option<Restored> {
 /// 先完整校验快照，通过后才登记；校验失败不改动任何东西。
 pub fn schedule_restore(directory: &Path, name: &str, logger: &Logger) -> Result<(), String> {
     let file = nianlai_store::snapshot_file(directory, name)
-        .ok_or_else(|| "找不到这份快照，可能已被轮换删除".to_owned())?;
+        .ok_or_else(|| "找不到这份存档，可能已被轮换删除".to_owned())?;
     if let Err(error) = nianlai_store::validate_snapshot(&file) {
         logger.event(
             "snapshot_restore_rejected",
             json!({"name":name,"error_code":error.to_string()}),
         );
-        return Err("这份快照校验没有通过，不能用来恢复".to_owned());
+        return Err("这份存档校验没有通过，不能用来恢复".to_owned());
     }
     fs::write(
         directory.join("snapshots").join(PENDING_FILE),

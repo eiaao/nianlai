@@ -1,12 +1,12 @@
 <script lang="ts">
-  // “整理”分区（M2-6）：收藏的顺序（E03）、标题和备注（E04），以及粘贴旧条目后是否移到最前（B10）。
-  // 收藏的整理只在这里做，面板里不放（11-08 定）。顺序改动立即保存，面板下次呼出按新顺序。
+  // “整理”分区（M2-6）：常用的顺序（E03）、标题和备注（E04），以及粘贴旧条目后是否移到最前（B10）。
+  // 常用的整理只在这里做，面板里不放（11-08 定）。顺序改动立即保存，面板下次呼出按新顺序。
   import { onMount, tick } from "svelte";
   import { flip } from "svelte/animate";
   import * as ipc from "../lib/ipc";
   import type { AppSettings, HistoryItem, SettingsUpdate } from "../lib/ipc";
   import { reducedMotion } from "../lib/preferences";
-  import { sourceName, typeLabel, visualKind } from "../lib/panel/content";
+  import { cardKind, imageSize, sourceName } from "../lib/cards";
   import { message } from "./format";
 
   let { reuseToTop, disabled, onsave }: {
@@ -40,7 +40,7 @@
   }
   onMount(() => {
     void load();
-    // 面板里收藏或取消收藏后，回到设置窗口时刷新。
+    // 面板里常用或取消常用后，回到设置窗口时刷新。
     const refresh = () => { if (!drag && editing === null) void load(); };
     window.addEventListener("focus", refresh);
     return () => window.removeEventListener("focus", refresh);
@@ -48,8 +48,9 @@
 
   /** 列表第一行：有标题时显示标题，否则显示原内容。 */
   function original(item: HistoryItem) {
-    const kind = visualKind(item);
-    if (kind === "image" || kind === "files") return typeLabel(item);
+    const kind = cardKind(item);
+    if (kind === "image") return `图片${imageSize(item) ? ` · ${imageSize(item)}` : ""}`;
+    if (kind === "file") return `文件 · ${item.file_names.length} 项`;
     return (item.preview || "（空文本）").replace(/\s+/g, " ").trim();
   }
 
@@ -172,18 +173,18 @@
 </script>
 
 <section class="page">
-  <div><h2>整理</h2><p class="page-intro">收藏的顺序就是面板里收藏区的顺序，不会因为复制或粘贴而变动。可以给收藏起个标题、写一句备注，搜索时也能搜到。</p></div>
+  <div><h2>整理</h2><p class="page-intro">常用的顺序就是面板里常用区的顺序，不会因为复制或粘贴而变动。可以给常用起个标题、写一句备注，搜索时也能搜到。</p></div>
 
   <div class="group">
-    <span class="group-title">收藏<em class="title-note">拖动排序，或选中后 Alt+↑ / Alt+↓</em></span>
+    <span class="group-title">常用<em class="title-note">拖动排序，或选中后 Alt+↑ / Alt+↓</em></span>
     <div class="card">
       {#if error}<p class="note error" role="alert">{error}</p>{/if}
       {#if items === null}
         {#if !error}<p class="note">正在读取…</p>{/if}
       {:else if !items.length}
-        <p class="note">还没有收藏。在面板里选中一条，按 Ctrl+D 或点星标收藏。</p>
+        <p class="note">还没有常用。在面板里选中一条，按 Ctrl+D 或点星标常用。</p>
       {:else}
-        <ol class="favorites" bind:this={list} aria-label="收藏" class:dragging={!!drag}>
+        <ol class="favorites" bind:this={list} aria-label="常用" class:dragging={!!drag}>
           {#each items as item, index (item.id)}
             <li data-id={item.id} class:placeholder={drag?.id === item.id} class:open={editing === item.id} class:selected={selected === item.id} class:settled={settled === item.id && !reducedMotion()}
               animate:flip={{ duration: reducedMotion() ? 0 : 200 }}>
@@ -191,7 +192,7 @@
                 <button type="button" class="handle" aria-label="拖动调整顺序" tabindex="-1" disabled={disabled || items.length < 2}
                   onpointerdown={(event) => startDrag(event, item)} onpointermove={moveDrag} onpointerup={endDrag} onpointercancel={endDrag}><svg viewBox="0 0 10 16" width="10" height="16" aria-hidden="true"><g fill="currentColor"><circle cx="2.5" cy="3" r="1.3"/><circle cx="7.5" cy="3" r="1.3"/><circle cx="2.5" cy="8" r="1.3"/><circle cx="7.5" cy="8" r="1.3"/><circle cx="2.5" cy="13" r="1.3"/><circle cx="7.5" cy="13" r="1.3"/></g></svg></button>
                 <span class="index">{String(index + 1).padStart(2, "0")}</span>
-                <button type="button" class="row-main" aria-label={`${item.title || original(item)}，第 ${index + 1} 个收藏`}
+                <button type="button" class="row-main" aria-label={`${item.title || original(item)}，第 ${index + 1} 个常用`}
                   onfocus={() => { selected = item.id; }} onclick={() => { selected = item.id; }} onkeydown={(event) => onRowKey(event, item)}>
                   <strong class:untitled={!item.title}>{item.title || original(item)}</strong>
                   <small>
@@ -229,7 +230,7 @@
   <div class="group">
     <span class="group-title">历史</span>
     <div class="card">
-      <label class="setting"><span class="setting-copy"><strong>粘贴旧条目后移到最前</strong><small>从历史里粘贴一条之前的内容后，把它移到列表最前面。收藏的顺序不受影响。</small></span>
+      <label class="setting"><span class="setting-copy"><strong>粘贴旧条目后移到最前</strong><small>从历史里粘贴一条之前的内容后，把它移到列表最前面。常用的顺序不受影响。</small></span>
         <input class="switch" type="checkbox" role="switch" checked={reuseToTop} {disabled}
           onchange={(event) => onsave({ history: { reuse_to_top: event.currentTarget.checked } }, event.currentTarget.checked ? "粘贴旧条目后会移到最前" : "粘贴旧条目后保持原位置")} /></label>
     </div>

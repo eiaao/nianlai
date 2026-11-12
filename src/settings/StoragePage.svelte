@@ -36,7 +36,7 @@
   let notices = $state<Record<string, string>>({});
   let errors = $state<Record<string, string>>({});
 
-  const TITLES: Record<StorageView, string> = { main: "", trash: "回收站", snapshots: "全部快照", images: "截图类图片", export: "导出备份", import: "导入备份" };
+  const TITLES: Record<StorageView, string> = { main: "", trash: "回收站", snapshots: "全部存档", images: "截图类图片", export: "导出备份", import: "导入备份" };
   // 占比色只用现有的强调色和状态色。
   const SEGMENTS = [
     { key: "文本", label: "文本", tone: "text" },
@@ -119,7 +119,7 @@
       {#if snapshots.restored.error}
         <p class="banner error">{snapshots.restored.kind === "import" ? "上次用备份覆盖没有成功" : "上次恢复没有成功"}，历史保持原样。</p>
       {:else}
-        <p class="banner">{snapshots.restored.kind === "import" ? "已用备份覆盖了历史。" : "已恢复到所选快照。"}恢复前的历史另存成了“恢复前”快照{restoredItem ? `（${time(restoredItem.created_ms)}）` : ""}，需要时可以在“全部快照”里恢复回去。</p>
+        <p class="banner">{snapshots.restored.kind === "import" ? "已用备份覆盖了历史。" : "已恢复到所选存档。"}恢复前的历史另存成了“恢复前”存档{restoredItem ? `（${time(restoredItem.created_ms)}）` : ""}，需要时可以在“全部存档”里恢复回去。</p>
       {/if}
     {/if}
     {#if loadError}<p class="banner error">{loadError}</p>{/if}
@@ -128,20 +128,20 @@
       {#if !overview}
         <p class="note">正在统计…</p>
       {:else}
-        <div class="usage-top"><strong>{size(total)}</strong><span>历史库 {size(overview.database_bytes)} · 快照 {size(overview.snapshots.bytes)}{overview.exports.bytes + overview.leftovers.bytes ? ` · 临时文件 ${size(overview.exports.bytes + overview.leftovers.bytes)}` : ""}</span></div>
+        <div class="usage-top"><strong>{size(total)}</strong><span>历史库 {size(overview.database_bytes)} · 存档 {size(overview.snapshots.bytes)}{overview.exports.bytes + overview.leftovers.bytes ? ` · 临时文件 ${size(overview.exports.bytes + overview.leftovers.bytes)}` : ""}</span></div>
         <div class="meter" aria-hidden="true">{#each parts as part}{#if part.bytes}<i class={part.tone} style={`width:${(part.bytes / partsTotal) * 100}%`}></i>{/if}{/each}</div>
         <div class="legend">
           {#each kinds as kind}
             <div><i class={kind.tone}></i><b>{kind.label}</b><small>{count(kind.count)} 条 · {size(kind.bytes)}</small></div>
           {/each}
           <div><i class="trash"></i><b>回收站</b><small>{count(overview.trashed.count)} 条 · {size(overview.trashed.bytes)}</small></div>
-          <div><i class="snap"></i><b>快照</b><small>{snapshots?.items.length ?? 0} 份 · {size(overview.snapshots.bytes)}</small></div>
+          <div><i class="snap"></i><b>存档</b><small>{snapshots?.items.length ?? 0} 份 · {size(overview.snapshots.bytes)}</small></div>
           <div><i class="temp"></i><b>临时文件</b><small>{count(overview.exports.count + overview.leftovers.count)} 个 · {size(overview.exports.bytes + overview.leftovers.bytes)}</small></div>
         </div>
       {/if}
     </div></div>
 
-    <div class="group"><span class="group-title split">垃圾清理<em>清理的条目先进回收站，7 天内可以恢复；收藏的不会被清理</em></span><div class="card">
+    <div class="group"><span class="group-title split">垃圾清理<em>清理的条目先进回收站，7 天内可以恢复；常用的不会被清理</em></span><div class="card">
       <div class="setting">
         <span class="setting-copy"><strong>失效的文件条目</strong><small>原文件已移走或删除的条目。{overview?.files.checked_ms ? `上次检查：${shortTime(overview.files.checked_ms)}` : "还没检查过"}{overview?.files.partial ? `；另有 ${overview.files.partial} 条部分失效，其余文件还能用，不清理` : ""}</small>
           {#if notices.missing}<small class="ok">{notices.missing}</small>{/if}{#if errors.missing}<small class="error">{errors.missing}</small>{/if}</span>
@@ -173,7 +173,7 @@
 
       {#if overview?.leftovers.count}
         <div class="setting">
-          <span class="setting-copy"><strong>恢复时留下的旧库副本</strong><small>从快照恢复时，原来的历史库另存了一份；确认恢复后的历史没问题就可以删除</small>
+          <span class="setting-copy"><strong>恢复时留下的旧库副本</strong><small>从存档恢复时，原来的历史库另存了一份；确认恢复后的历史没问题就可以删除</small>
             {#if errors.leftovers}<small class="error">{errors.leftovers}</small>{/if}</span>
           <span class="num">{count(overview.leftovers.count)} 个<small>{size(overview.leftovers.bytes)}</small></span>
           <button type="button" disabled={!!busy || disabled} onclick={() => act("leftovers", async () => { const removed = await ipc.cleanLeftovers(); return `已删除 ${removed.count} 个`; })}>删除</button>
@@ -195,10 +195,10 @@
       </div>
     </div></div>
 
-    <div class="group"><span class="group-title split">自动快照<em>保留 {snapshots?.keep ?? 7} 份 · 上限 {limitLabel(maxMb)}</em></span><div class="card">
+    <div class="group"><span class="group-title split">自动存档<em>保留 {snapshots?.keep ?? 7} 份 · 上限 {limitLabel(maxMb)}</em></span><div class="card">
       <div class="setting">
-        <span class="setting-copy"><strong>{latestSnapshot ? `最近一份：${shortTime(latestSnapshot.created_ms)}` : "还没有快照"}</strong><small>{snapshots?.items.length ?? 0} 份，共 {size(overview?.snapshots.bytes ?? 0)}。出问题时可以把历史恢复到其中任何一份</small></span>
-        <button type="button" onclick={() => { view = "snapshots"; }}>全部快照</button>
+        <span class="setting-copy"><strong>{latestSnapshot ? `最近一份：${shortTime(latestSnapshot.created_ms)}` : "还没有存档"}</strong><small>{snapshots?.items.length ?? 0} 份，共 {size(overview?.snapshots.bytes ?? 0)}。出问题时可以把历史恢复到其中任何一份</small></span>
+        <button type="button" onclick={() => { view = "snapshots"; }}>全部存档</button>
       </div>
     </div></div>
 
@@ -222,7 +222,7 @@
   .note { margin: 0; color: var(--settings-muted); font-size: 11px; }
   .usage { display: grid; gap: 12px; padding: 16px; }
   .usage-top { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
-  .usage-top strong { font: 600 22px var(--font-display); }
+  .usage-top strong { font: 600 20px var(--font-ui); }
   .usage-top span { color: var(--settings-muted); font-size: 11px; text-align: right; }
   .meter { height: 10px; display: flex; overflow: hidden; border-radius: var(--radius-sm); background: var(--settings-selected); }
   .meter i { display: block; height: 100%; min-width: 2px; }

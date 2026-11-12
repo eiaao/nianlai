@@ -143,12 +143,12 @@
     <div class="choices" role="radiogroup" aria-label="导入方式">
       <button type="button" class="choice" role="radio" aria-checked={mode === "merge"} disabled={phase === "working"} onclick={() => { mode = "merge"; armed = false; }}>
         <span class="radio" aria-hidden="true"></span>
-        <span class="copy"><strong>合并</strong><small>把备份里有、现在没有的内容加进来；同样的内容只留一份。收藏追加在现有收藏后面。</small></span>
-        <span class="figure">{#if nothingNew}没有新内容{:else}新增 {count(inspection.merge?.new_items ?? 0)} 条{#if inspection.merge?.new_favorites} · 收藏 +{count(inspection.merge.new_favorites)}{/if}{/if}</span>
+        <span class="copy"><strong>合并</strong><small>把备份里有、现在没有的内容加进来；同样的内容只留一份。常用追加在现有常用后面。</small></span>
+        <span class="figure">{#if nothingNew}没有新内容{:else}新增 {count(inspection.merge?.new_items ?? 0)} 条{#if inspection.merge?.new_favorites} · 常用 +{count(inspection.merge.new_favorites)}{/if}{/if}</span>
       </button>
       <button type="button" class="choice" role="radio" aria-checked={mode === "overwrite"} disabled={phase === "working"} onclick={() => { mode = "overwrite"; }}>
         <span class="radio" aria-hidden="true"></span>
-        <span class="copy"><strong>覆盖</strong><small>用备份替换现在的全部历史。替换前先把当前历史另存成一份“恢复前”快照，然后拈来重启。</small></span>
+        <span class="copy"><strong>覆盖</strong><small>用备份替换现在的全部历史。替换前先把当前历史另存成一份“恢复前”存档，然后拈来重启。</small></span>
         <span class="figure">替换为 {count(inspection.overwrite?.items ?? 0)} 条</span>
       </button>
     </div>
@@ -163,12 +163,12 @@
   {:else if phase === "merged" && result}
     <div class="card done" role="status">
       <div class="setting">
-        <span class="setting-copy"><strong>合并完成：新增 <span class="big"><RollingNumber value={shown} /></span> 条历史{result.added_favorites ? ` · 收藏 +${result.added_favorites}` : ""}</strong><small>{result.added_items ? "新内容按原来的复制时间排进历史里" : "备份里的内容这里都有了，没有新增"}</small></span>
+        <span class="setting-copy"><strong>合并完成：新增 <span class="big"><RollingNumber value={shown} /></span> 条历史{result.added_favorites ? ` · 常用 +${result.added_favorites}` : ""}</strong><small>{result.added_items ? "新内容按原来的复制时间排进历史里" : "备份里的内容这里都有了，没有新增"}</small></span>
         <button type="button" onclick={reset}>再导入一个</button>
       </div>
     </div>
   {:else if phase === "restarting"}
-    <div class="card"><p class="note">已登记覆盖。{result?.auto_restart ? "拈来正在重启" : "拈来即将退出，请手动重新打开"}，之后历史就是备份里的内容；原来的历史另存成了“恢复前”快照，在“全部快照”里。</p></div>
+    <div class="card"><p class="note">已登记覆盖。{result?.auto_restart ? "拈来正在重启" : "拈来即将退出，请手动重新打开"}，之后历史就是备份里的内容；原来的历史另存成了“恢复前”存档，在“全部存档”里。</p></div>
   {/if}
 {/if}
 
