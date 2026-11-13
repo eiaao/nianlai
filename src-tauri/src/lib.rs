@@ -37,7 +37,7 @@ async fn set_settings(
     // 注册/注销由插件派回主线程；不能在主线程持锁等待它们完成。
     tauri::async_runtime::spawn_blocking(move || save_settings(&app, settings))
         .await
-        .map_err(|_| "设置保存任务未完成，请重试".to_owned())?
+        .map_err(|_| "设置没保存上，再试一次".to_owned())?
 }
 
 // 保存设置的编排：写盘 → 换呼出键 → 广播 → 即时生效 → 记日志。
@@ -119,7 +119,7 @@ struct SnapshotState {
 fn store_directory(history: &History) -> Result<std::path::PathBuf, String> {
     history
         .store_directory()
-        .ok_or_else(|| "历史库未打开，暂时不能使用存档".to_owned())
+        .ok_or_else(|| "存东西的文件没打开，暂时不能使用存档".to_owned())
 }
 
 #[tauri::command]
@@ -140,7 +140,7 @@ async fn create_snapshot(history: State<'_, History>, app: AppHandle) -> Result<
         history::snapshots::manual(&directory, &app.state::<Controller>().logger)
     })
     .await
-    .map_err(|_| "存档任务未完成，请重试".to_owned())?
+    .map_err(|_| "存档没生成，再试一次".to_owned())?
 }
 
 #[tauri::command]
@@ -160,7 +160,7 @@ async fn restore_snapshot(
         )
     })
     .await
-    .map_err(|_| "恢复任务未完成，请重试".to_owned())??;
+    .map_err(|_| "恢复没完成，再试一次".to_owned())??;
     app.state::<Controller>()
         .logger
         .event("quit_source", json!({"source":"snapshot_restore"}));
@@ -203,7 +203,7 @@ async fn choose_backup(
         platform::dialog::choose_backup(owner, save, &name)
     })
     .await
-    .map_err(|_| "文件对话框没有完成，请重试".to_owned())?
+    .map_err(|_| "文件对话框没完成，再试一次".to_owned())?
 }
 #[tauri::command]
 async fn export_backup(
@@ -216,7 +216,7 @@ async fn export_backup(
 async fn reveal_in_explorer(path: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || history::backup::reveal(&path))
         .await
-        .map_err(|_| "操作没有完成，请重试".to_owned())?
+        .map_err(|_| "没做成，再试一次".to_owned())?
 }
 #[tauri::command]
 async fn inspect_backup(
@@ -332,7 +332,7 @@ async fn blocking<T: Send + 'static>(
     let history = history.inner().clone();
     tauri::async_runtime::spawn_blocking(move || job(history))
         .await
-        .map_err(|_| "操作没有完成，请重试".to_owned())?
+        .map_err(|_| "没做成，再试一次".to_owned())?
 }
 /// 文件条目的每个路径现在还在不在（预览用）；不是文件条目返回 None。
 #[tauri::command]
@@ -420,7 +420,7 @@ async fn copy_selection(app: AppHandle, id: usize, text: String) -> Result<(), S
         app.state::<Controller>().copy_selection(id, &text)
     })
     .await
-    .map_err(|_| "复制没有完成，请重试".to_owned())?
+    .map_err(|_| "没复制成，再试一次".to_owned())?
 }
 /// 完整预览开着时让钩子把 Z、Ctrl+C 交给面板。
 #[tauri::command]

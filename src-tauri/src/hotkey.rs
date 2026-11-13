@@ -92,7 +92,7 @@ impl State {
         let shortcut = match parse(&requested) {
             Ok(shortcut) => shortcut,
             Err(error) => {
-                self.status.error = Some(format!("呼出键无效：{error}。仍可从托盘打开面板。"));
+                self.status.error = Some(format!("呼出键无效：{error}。先点托盘图标也能打开"));
                 return;
             }
         };
@@ -103,8 +103,7 @@ impl State {
         }
         if let Some(previous) = self.active {
             if let Err(error) = backend.unregister(previous) {
-                self.status.error =
-                    Some("旧呼出键注销失败，未注册新键；原呼出键仍保留，可重试保存。".into());
+                self.status.error = Some("没换成，原来的呼出键还能用。再试一次".into());
                 self.status.detail = Some(error);
                 return;
             }
@@ -121,7 +120,7 @@ impl State {
             }
             Err(error) => {
                 self.status.error =
-                    Some("呼出键被占用或无效，请换一个；仍可从托盘打开面板。".into());
+                    Some("这个组合被别的程序占了，换一个。先点托盘图标也能打开".into());
                 self.status.detail = Some(error);
             }
         }
@@ -152,7 +151,7 @@ impl State {
                 Err(error) => {
                     self.status.active = None;
                     self.status.error =
-                        Some("呼出键恢复注册失败，请重新保存；仍可从托盘打开面板。".into());
+                        Some("呼出键失灵了，请重新设一次。先点托盘图标也能打开".into());
                     self.status.detail = Some(error.clone());
                     return Err(error);
                 }
@@ -458,13 +457,9 @@ mod tests {
         *backend.register_error.borrow_mut() = Some("模拟系统返回：已占用");
         state.apply("Ctrl+`", &backend);
         assert_eq!(state.active, None);
-        assert!(
-            state
-                .status
-                .error
-                .as_deref()
-                .unwrap()
-                .contains("被占用或无效")
+        assert_eq!(
+            state.status.error.as_deref(),
+            Some("这个组合被别的程序占了，换一个。先点托盘图标也能打开")
         );
         assert_eq!(backend.calls.borrow().len(), 1);
         *backend.register_error.borrow_mut() = None;
@@ -502,7 +497,31 @@ mod tests {
             *backend.calls.borrow(),
             [format!("unregister:{}", key("Ctrl+`"))]
         );
-        assert!(state.status.error.as_deref().unwrap().contains("注销失败"));
+        assert_eq!(
+            state.status.error.as_deref(),
+            Some("没换成，原来的呼出键还能用。再试一次")
+        );
+    }
+
+    #[test]
+    fn invalid_and_restore_errors_use_plain_actionable_copy() {
+        let mut state = State::default();
+        let backend = Fake::default();
+        state.apply("", &backend);
+        assert_eq!(
+            state.status.error.as_deref(),
+            Some("呼出键无效：主键不能为空，请选择一个主键。先点托盘图标也能打开")
+        );
+
+        let mut state = State::default();
+        state.apply("Ctrl+`", &backend);
+        state.pause(true, &backend).unwrap();
+        *backend.register_error.borrow_mut() = Some("模拟恢复失败");
+        assert_eq!(state.pause(false, &backend).unwrap_err(), "模拟恢复失败");
+        assert_eq!(
+            state.status.error.as_deref(),
+            Some("呼出键失灵了，请重新设一次。先点托盘图标也能打开")
+        );
     }
 
     #[test]

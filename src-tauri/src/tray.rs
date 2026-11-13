@@ -60,6 +60,17 @@ const TRAY_MENU_LAYOUT: [TrayMenuEntry; 12] = [
     TrayMenuEntry::Action(QUIT),
 ];
 
+// 静态文字由生产构造与测试共同读取；动态状态和暂停文字仍由 tray_view 刷新。
+fn static_menu_label(id: &str) -> Option<&'static str> {
+    match id {
+        OPEN_PANEL => Some("打开拈来"),
+        IGNORE_NEXT => Some("下一次复制不记"),
+        AUTOSTART => Some("开机时启动"),
+        ABOUT => Some("关于拈来"),
+        _ => None,
+    }
+}
+
 // 托盘三态资源（v12 方案 A，由 tools/build_icons.py 生成）：16/24 手绘，32 由 16 最近邻放大。
 const RECORDING_16: &[u8] = include_bytes!("../icons/tray/recording-16.png");
 const RECORDING_24: &[u8] = include_bytes!("../icons/tray/recording-24.png");
@@ -301,15 +312,27 @@ pub fn setup(app: &AppHandle, logger: &Logger) -> Result<(), Box<dyn std::error:
     logger.event("单实例：主实例", json!({}));
     // 第一行只说状态，不可点；暂停/故障时它和图标一起变。
     let status = MenuItem::with_id(app, STATUS, "正在打开 · 稍等", false, None::<&str>)?;
-    let open = MenuItem::with_id(app, OPEN_PANEL, "打开拈来", true, None::<&str>)?;
+    let open = MenuItem::with_id(
+        app,
+        OPEN_PANEL,
+        static_menu_label(OPEN_PANEL).expect("静态菜单文字与布局不一致"),
+        true,
+        None::<&str>,
+    )?;
     let settings = MenuItem::with_id(app, SETTINGS, "设置…", true, None::<&str>)?;
-    let about = MenuItem::with_id(app, ABOUT, "关于拈来", true, None::<&str>)?;
+    let about = MenuItem::with_id(
+        app,
+        ABOUT,
+        static_menu_label(ABOUT).expect("静态菜单文字与布局不一致"),
+        true,
+        None::<&str>,
+    )?;
     let query = app.autolaunch().is_enabled();
     let state = autostart_menu_state(app, &query);
     let autostart = CheckMenuItem::with_id(
         app,
         AUTOSTART,
-        "开机时启动",
+        static_menu_label(AUTOSTART).expect("静态菜单文字与布局不一致"),
         state.enabled,
         state.checked,
         None::<&str>,
@@ -320,7 +343,7 @@ pub fn setup(app: &AppHandle, logger: &Logger) -> Result<(), Box<dyn std::error:
     let ignore = CheckMenuItem::with_id(
         app,
         IGNORE_NEXT,
-        "下一次复制不记",
+        static_menu_label(IGNORE_NEXT).expect("静态菜单文字与布局不一致"),
         true,
         gate().ignoring_next(),
         None::<&str>,
@@ -804,6 +827,26 @@ mod tests {
                 .filter(|entry| matches!(entry, TrayMenuEntry::Separator))
                 .count(),
             4
+        );
+    }
+
+    #[test]
+    fn production_static_menu_labels_match_v11_copy() {
+        let labels: Vec<_> = TRAY_MENU_LAYOUT
+            .iter()
+            .filter_map(|entry| match entry {
+                TrayMenuEntry::Action(id) => static_menu_label(id).map(|label| (*id, label)),
+                TrayMenuEntry::Separator => None,
+            })
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                (OPEN_PANEL, "打开拈来"),
+                (IGNORE_NEXT, "下一次复制不记"),
+                (AUTOSTART, "开机时启动"),
+                (ABOUT, "关于拈来"),
+            ]
         );
     }
 

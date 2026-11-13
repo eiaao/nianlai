@@ -21,11 +21,11 @@ pub const MAX_ITEMS: usize = 32;
 /// 入队前的检查：给用户看的中文提示，命令和面板共用。
 pub fn validate_ids(ids: &[usize]) -> Result<(), &'static str> {
     if ids.is_empty() {
-        Err("没有要粘贴的条目，请先选择。")
+        Err("先选要粘贴的内容")
     } else if ids.len() > MAX_ITEMS {
-        Err("一次最多粘贴 32 条，请减少后再试。")
+        Err("一次最多粘贴 32 张，减少后再试")
     } else if ids.iter().collect::<std::collections::HashSet<_>>().len() != ids.len() {
-        Err("所选条目有重复，请重新选择。")
+        Err("选的内容有重复，请重新选择")
     } else {
         Ok(())
     }
@@ -84,18 +84,20 @@ impl Stop {
     pub fn message(self) -> Option<&'static str> {
         match self {
             Self::Done | Self::Cancelled | Self::Escape => None,
-            Self::InstallFailed => Some("逐张粘贴键盘监听安装失败，请重新呼出后重试。"),
-            Self::Timeout => Some("两分钟没有粘贴，逐张粘贴已停止；请重新选择剩余条目。"),
-            Self::ItemTimeout => Some("这条等待超过十秒，已停止；请先检查目标再重试。"),
-            Self::ClipboardChanged => Some("检测到新的剪贴板内容，逐张粘贴已停止，新内容已保留。"),
-            Self::WriteFailed => Some("剪贴板写入未完成，逐张粘贴已停止；请检查后重试。"),
+            Self::InstallFailed => Some("逐张放接收不到按键，收起再呼出一次"),
+            Self::Timeout => Some("两分钟没粘贴，逐张放已停止。重新选择剩下的"),
+            Self::ItemTimeout => {
+                Some("这张等了十秒还没贴完，逐张放已停止。先看看那个程序，再试一次")
+            }
+            Self::ClipboardChanged => Some("剪贴板刚被改过，逐张放已停止，新内容已保留"),
+            Self::WriteFailed => Some("没放进剪贴板，逐张放已停止。再试一次"),
             Self::SubmissionUncertain => {
-                Some("这条的粘贴结果未确认，逐张粘贴已停止；请先检查目标。")
+                Some("不确定这张贴上没有，逐张放已停止。先看看那个程序，别贴两遍")
             }
             Self::Elevated => {
-                Some("目标可能以管理员运行，已复制当前一条，逐张粘贴已停止；请手动 Ctrl+V。")
+                Some("那个程序权限更高，只复制了当前这张，逐张放已停止。按 Ctrl+V 贴上")
             }
-            Self::WorkerFailed => Some("逐张粘贴工作线程启动失败，已停止；请重新呼出后重试。"),
+            Self::WorkerFailed => Some("逐张放没启动好，已停止。收起再呼出一次"),
         }
     }
 }
@@ -221,7 +223,7 @@ impl State {
             }
             Phase::Busy(_) => {
                 self.last_activity = now;
-                self.error = Some("剩余条目都已记下，请等粘贴完");
+                self.error = Some("剩下的都已记下，等粘贴完");
                 Demand::Full
             }
             _ => Demand::Inactive,
@@ -277,9 +279,9 @@ impl State {
             self.ids.pop_front();
             self.skipped += 1;
             self.error = Some(if result.reason == Some(Reason::FilesMissing) {
-                "原文件不在了，已跳过这条"
+                "原文件不在了，跳过了"
             } else {
-                "这条记录已不在历史里，已跳过这条"
+                "这张已经删了，跳过了"
             });
             if self.ids.is_empty() {
                 let message = self.error;
@@ -297,7 +299,7 @@ impl State {
             self.pending = 0;
             self.error = Some(match result.reason {
                 Some(Reason::InvalidTarget) => "请先点回要粘贴的位置，再按 Ctrl+V；Esc 取消",
-                _ => "这条没有粘贴，按 Ctrl+V 重试；Esc 取消",
+                _ => "这张没贴上，按 Ctrl+V 再试；Esc 取消",
             });
             Finished::Ready
         }
@@ -617,7 +619,7 @@ mod tests {
         );
         assert_eq!(state.ids, [2, 3]);
         assert_eq!(state.skipped, 1);
-        assert_eq!(state.error, Some("这条记录已不在历史里，已跳过这条"));
+        assert_eq!(state.error, Some("这张已经删了，跳过了"));
         assert_eq!(state.request(Duration::ZERO), Demand::Start(2));
         assert_eq!(state.finish(2, &sent(), Duration::ZERO), Finished::Ready);
         assert_eq!(state.request(Duration::ZERO), Demand::Start(3));
@@ -653,18 +655,40 @@ mod tests {
 
     #[test]
     fn ids_are_validated_with_specific_messages() {
-        assert_eq!(validate_ids(&[]), Err("没有要粘贴的条目，请先选择。"));
+        assert_eq!(validate_ids(&[]), Err("先选要粘贴的内容"));
         let full: Vec<_> = (0..MAX_ITEMS).collect();
         assert_eq!(validate_ids(&full), Ok(()));
         let over: Vec<_> = (0..=MAX_ITEMS).collect();
-        assert_eq!(
-            validate_ids(&over),
-            Err("一次最多粘贴 32 条，请减少后再试。")
-        );
-        assert_eq!(
-            validate_ids(&[3, 4, 3]),
-            Err("所选条目有重复，请重新选择。")
-        );
+        assert_eq!(validate_ids(&over), Err("一次最多粘贴 32 张，减少后再试"));
+        assert_eq!(validate_ids(&[3, 4, 3]), Err("选的内容有重复，请重新选择"));
+    }
+
+    #[test]
+    fn stop_messages_explain_the_result_and_next_step() {
+        for (stop, expected) in [
+            (Stop::InstallFailed, "逐张放接收不到按键，收起再呼出一次"),
+            (Stop::Timeout, "两分钟没粘贴，逐张放已停止。重新选择剩下的"),
+            (
+                Stop::ItemTimeout,
+                "这张等了十秒还没贴完，逐张放已停止。先看看那个程序，再试一次",
+            ),
+            (
+                Stop::ClipboardChanged,
+                "剪贴板刚被改过，逐张放已停止，新内容已保留",
+            ),
+            (Stop::WriteFailed, "没放进剪贴板，逐张放已停止。再试一次"),
+            (
+                Stop::SubmissionUncertain,
+                "不确定这张贴上没有，逐张放已停止。先看看那个程序，别贴两遍",
+            ),
+            (
+                Stop::Elevated,
+                "那个程序权限更高，只复制了当前这张，逐张放已停止。按 Ctrl+V 贴上",
+            ),
+            (Stop::WorkerFailed, "逐张放没启动好，已停止。收起再呼出一次"),
+        ] {
+            assert_eq!(stop.message(), Some(expected));
+        }
     }
 
     #[test]
@@ -833,6 +857,6 @@ mod tests {
             ),
             Finished::Stopped(Stop::Done)
         );
-        assert_eq!(state.error, Some("这条记录已不在历史里，已跳过这条"));
+        assert_eq!(state.error, Some("这张已经删了，跳过了"));
     }
 }

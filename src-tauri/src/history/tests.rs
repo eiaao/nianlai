@@ -67,7 +67,7 @@ fn memory_mode_is_a_memory_store_and_reports_loading_until_opened() {
     assert!(history.db().is_memory());
     assert!(history.store().is_none());
     assert!(history.store_directory().is_none());
-    assert_eq!(history.snapshot().store_status, Some("正在加载历史"));
+    assert_eq!(history.snapshot().store_status, Some("正在打开"));
     // 编号和磁盘库错开，界面里残留的旧请求取不到新内容。
     let first = save(&history, content(&[(TEXT, b"a")]), 1, Instant::now());
     assert!(id(&first) > 1 << 52);
@@ -592,7 +592,10 @@ fn unopenable_store_falls_back_to_memory_with_the_same_status_and_refusals() {
     history.initialize();
     assert!(history.store().is_none());
     assert!(history.db().is_memory());
-    assert_eq!(history.snapshot().store_status, Some("历史库异常，未落盘"));
+    assert_eq!(
+        history.snapshot().store_status,
+        Some("存东西的文件出了问题")
+    );
     // 复制、列表、搜索、收藏照常。
     let at = Instant::now();
     let saved = id(&save(
@@ -607,11 +610,11 @@ fn unopenable_store_falls_back_to_memory_with_the_same_status_and_refusals() {
     // 会碰磁盘的功能照旧拒绝，文案不变。
     assert_eq!(
         history.storage_overview().err().as_deref(),
-        Some("历史库没有打开，存储管理暂时不可用")
+        Some("存东西的文件没打开，存储管理暂时用不了")
     );
     assert_eq!(
         history.backup_summary().err().as_deref(),
-        Some("历史库没有打开，备份与导入暂时不可用")
+        Some("存东西的文件没打开，备份与导入暂时用不了")
     );
     assert!(history.store_directory().is_none());
     // 数据目录里没有被写进任何东西。
@@ -642,7 +645,7 @@ fn failed_integrity_check_switches_to_a_fresh_memory_store_and_leaves_the_file()
     let database_before = fs::read(&database).unwrap();
     let wal_before = fs::read(&wal).expect("库开着时 -wal 存在");
     assert!(!wal_before.is_empty());
-    history.fall_back_to_memory("历史库异常，未落盘");
+    history.fall_back_to_memory("存东西的文件出了问题");
     assert_eq!(
         fs::read(&database).unwrap(),
         database_before,
@@ -655,7 +658,10 @@ fn failed_integrity_check_switches_to_a_fresh_memory_store_and_leaves_the_file()
     );
     assert!(history.store().is_none());
     assert!(history.store_directory().is_none());
-    assert_eq!(history.snapshot().store_status, Some("历史库异常，未落盘"));
+    assert_eq!(
+        history.snapshot().store_status,
+        Some("存东西的文件出了问题")
+    );
     assert!(history.snapshot().items.is_empty());
     let fresh = id(&save(
         &history,
@@ -671,17 +677,24 @@ fn failed_integrity_check_switches_to_a_fresh_memory_store_and_leaves_the_file()
 }
 
 #[test]
+fn reorder_mismatch_has_exact_plain_chinese_message() {
+    assert_eq!(
+        label_error(nianlai_store::Error::Invalid("reorder_mismatch")),
+        "常用牌刚变过，重新打开这页再排"
+    );
+}
+
+#[test]
 fn storage_errors_become_plain_chinese_messages() {
     use super::user_message;
     use nianlai_store::Error;
     use std::io::ErrorKind;
-    let busy = "数据库正忙，请稍后重试";
-    let full = "磁盘空间不足，请清理磁盘后重试";
-    let readonly = "数据文件是只读的或没有权限，请检查数据目录的权限";
-    let corrupt = "历史库文件已损坏，可以从存档恢复";
-    let missing = "找不到数据文件，可能已被移动或删除";
-    let cannot_open = "找不到或无法打开数据文件，可能已被移动、删除或被占用";
-    let moved = "数据文件已被移动或删除，请重启拈来";
+    let busy = "正忙，稍后再试";
+    let full = "磁盘满了，腾点地方再试";
+    let readonly = "存东西的文件夹不让写，看看是不是设成了只读";
+    let corrupt = "存东西的文件坏了，可以回到某天的存档";
+    let cannot_open = "打不开存东西的文件：可能被挪走、删了，或被别的程序占着";
+    let moved = "存东西的文件被挪走或删了，请重新打开拈来";
     for (error, expected) in [
         (Error::Busy, busy),
         (Error::Sqlite(5), busy),
@@ -692,27 +705,29 @@ fn storage_errors_become_plain_chinese_messages() {
         (Error::Sqlite(8), readonly),
         (Error::Sqlite(1032), moved),
         (Error::Sqlite(3), readonly),
+        (Error::Sqlite(23), readonly),
         (Error::Io(ErrorKind::PermissionDenied), readonly),
+        (Error::Io(ErrorKind::ReadOnlyFilesystem), readonly),
         (Error::Sqlite(11), corrupt),
         (Error::Sqlite(26), corrupt),
         (Error::Sqlite(14), cannot_open),
         (Error::Sqlite(270), cannot_open),
-        (Error::Io(ErrorKind::NotFound), missing),
+        (Error::Io(ErrorKind::NotFound), cannot_open),
         (
             Error::NewerSchema {
                 found: 9,
                 supported: 3,
             },
-            "历史库来自更新版本的拈来，请先升级拈来",
+            "这些东西是新版拈来存的，请先更新拈来",
         ),
-        (Error::Sqlite(1), "操作失败，请稍后重试（Sqlite 1）"),
-        (Error::Sqlite(-1), "操作失败，请稍后重试（Sqlite -1）"),
+        (Error::Sqlite(1), "没做成，稍后再试（代码 1）"),
+        (Error::Sqlite(-1), "没做成，稍后再试（代码 -1）"),
         (
             Error::Io(ErrorKind::TimedOut),
-            "操作失败，请稍后重试（Io TimedOut）",
+            "没做成，稍后再试（代码 Io TimedOut）",
         ),
-        (Error::Invalid("x"), "操作失败，请稍后重试（Invalid x）"),
-        (Error::Closed, "操作失败，请稍后重试（Closed）"),
+        (Error::Invalid("x"), "没做成，稍后再试（代码 Invalid x）"),
+        (Error::Closed, "没做成，稍后再试（代码 Closed）"),
     ] {
         assert_eq!(user_message(&error), expected, "{error:?}");
     }

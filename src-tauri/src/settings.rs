@@ -523,13 +523,13 @@ impl Store {
         }
         if let Some(value) = update.get("hotkey") {
             // 加载旧文件仍逐字段降级；主动保存非法组合则拒绝整个更新，不能静默改回默认键。
-            parse_hotkey(value.as_str().ok_or("呼出快捷键必须是字符串")?)?;
+            parse_hotkey(value.as_str().ok_or("呼出键必须是字符串")?)?;
         }
         let mut current = self.settings.lock().unwrap();
         let mut value = serde_json::to_value(&*current).unwrap();
         merge(&mut value, update);
         let (settings, issues) = validate(value);
-        atomic_write(&self.path, &settings).map_err(|_| "设置文件写入失败，原设置已保留")?;
+        atomic_write(&self.path, &settings).map_err(|_| "没保存上，还是原来的设置")?;
         *current = settings.clone();
         Ok((settings, issues))
     }
@@ -1009,7 +1009,10 @@ pub(crate) mod tests {
         fs::remove_file(&path).unwrap();
         fs::create_dir(&path).unwrap();
         fs::write(path.join("sentinel"), b"old").unwrap();
-        assert!(store.set(json!({"theme":"dark"})).is_err());
+        assert_eq!(
+            store.set(json!({"theme":"dark"})).err().unwrap(),
+            "没保存上，还是原来的设置"
+        );
         assert_eq!(store.get(), Settings::default());
         assert_eq!(fs::read(path.join("sentinel")).unwrap(), b"old");
         assert_eq!(fs::read_dir(&directory.0).unwrap().count(), 1);

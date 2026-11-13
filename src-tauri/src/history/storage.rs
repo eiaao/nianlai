@@ -16,7 +16,7 @@ use std::{
 const EXPORT_GRACE: Duration = Duration::from_secs(10 * 60);
 /// 手动挑选截图的缩略图长边像素。
 const THUMBNAIL_SIZE: u32 = 240;
-const MEMORY_MODE: &str = "历史库没有打开，存储管理暂时不可用";
+const MEMORY_MODE: &str = "存东西的文件没打开，存储管理暂时用不了";
 
 #[derive(Clone, Copy, Default, Serialize)]
 pub struct Files {

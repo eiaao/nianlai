@@ -129,7 +129,7 @@
       <span class="kind">{#if item.title}{@render marked(item.title)}{:else}{KIND_NAME[kind]}{/if}</span>
       <div class="bd">
         {#if kind === "short"}
-          <div class="short" class:big={[...text.trim()].length <= 10}>{@render marked(text.trim() || "（空文本）")}</div>
+          <div class="short" class:big={[...text.trim()].length <= 10}>{@render marked(text.trim() || "（空白）")}</div>
         {:else if kind === "long"}
           <div class="long">{@render marked(text.trim())}</div>
         {:else if kind === "code"}
@@ -185,7 +185,7 @@
             {:else if kind === "file"}{@render marked(item.file_names[0] ?? "文件")}{#if item.file_names.length > 1}　<span class="dim">等 {item.file_names.length} 个文件</span>{/if}
             {:else if kind === "mail" && mail}<b>{@render marked(mail.user)}</b><span class="dim">@{@render marked(mail.domain)}</span>
             {:else if kind === "number"}<span class="mono">{@render marked(text.trim())}</span>
-            {:else}{@render marked(text.trim() || "（空文本）")}{/if}
+            {:else}{@render marked(text.trim() || "（空白）")}{/if}
           </div>
         {:else}
           <div class="r4">
@@ -198,7 +198,7 @@
             {:else if kind === "file"}{#each item.file_names.slice(0, 4) as name}<div>{@render marked(name)}</div>{/each}
             {:else if kind === "mail" && mail}<b>{@render marked(mail.user)}</b><span class="dim">@{@render marked(mail.domain)}</span>
             {:else if kind === "number"}<span class="mono">{@render marked(text.trim())}</span>
-            {:else}{@render marked(text.trim() || "（空文本）")}{/if}
+            {:else}{@render marked(text.trim() || "（空白）")}{/if}
           </div>
         {/if}
       </div>
@@ -209,7 +209,7 @@
   </div>
   <span class="kc" class:wide={keycap.startsWith("Ctrl")}>{#if keycap.startsWith("Ctrl")}<small>Ctrl</small>{keycap.slice(5)}{:else}{keycap}{/if}</span>
   {#if taken}<span class="tk">已选</span>{/if}
-  {#if item.file_state?.state === "missing"}<span class="missing">原文件不在</span>{/if}
+  {#if item.file_state?.state === "missing"}<span class="missing">不在了</span>{/if}
   {#if drag}<span class="drop">{drag.out ? "松手：粘贴到原光标处" : "松手：放回"}</span>{/if}
 </div>
 

@@ -107,11 +107,11 @@ fn memory_store(hash: Hash) -> Store {
 // 把存储层的错误码翻成给用户看的话。
 fn label_error(error: nianlai_store::Error) -> String {
     match error {
-        nianlai_store::Error::Invalid("reorder_duplicate") => "常用顺序里有重复的条目".into(),
+        nianlai_store::Error::Invalid("reorder_duplicate") => "常用顺序里有重复".into(),
         nianlai_store::Error::Invalid("reorder_mismatch") => {
-            "常用顺序与当前常用不一致，请刷新后重试".into()
+            "常用牌刚变过，重新打开这页再排".into()
         }
-        nianlai_store::Error::Invalid("not_favorite") => "只有常用的条目才能设置标题和备注".into(),
+        nianlai_store::Error::Invalid("not_favorite") => "只有常用的才能设置标题和备注".into(),
         other => user_message(&other),
     }
 }
@@ -123,30 +123,32 @@ pub(crate) fn user_message(error: &nianlai_store::Error) -> String {
     use nianlai_store::Error;
     use std::io::ErrorKind;
     match error {
-        Error::Busy => "数据库正忙，请稍后重试".into(),
-        Error::Sqlite(code) if matches!(code & 0xff, 5 | 6) => "数据库正忙，请稍后重试".into(),
-        Error::Sqlite(code) if code & 0xff == 13 => "磁盘空间不足，请清理磁盘后重试".into(),
-        Error::Io(ErrorKind::StorageFull) => "磁盘空间不足，请清理磁盘后重试".into(),
+        Error::Busy => "正忙，稍后再试".into(),
+        Error::Sqlite(code) if matches!(code & 0xff, 5 | 6) => "正忙，稍后再试".into(),
+        Error::Sqlite(code) if code & 0xff == 13 => "磁盘满了，腾点地方再试".into(),
+        Error::Io(ErrorKind::StorageFull) => "磁盘满了，腾点地方再试".into(),
         // 1032 = SQLITE_READONLY_DBMOVED：打开着的库文件被移走或删除了，要放在“只读”之前。
-        Error::Sqlite(1032) => "数据文件已被移动或删除，请重启拈来".into(),
+        Error::Sqlite(1032) => "存东西的文件被挪走或删了，请重新打开拈来".into(),
         Error::Sqlite(code) if matches!(code & 0xff, 3 | 8 | 23) => {
-            "数据文件是只读的或没有权限，请检查数据目录的权限".into()
+            "存东西的文件夹不让写，看看是不是设成了只读".into()
         }
         Error::Io(ErrorKind::PermissionDenied | ErrorKind::ReadOnlyFilesystem) => {
-            "数据文件是只读的或没有权限，请检查数据目录的权限".into()
+            "存东西的文件夹不让写，看看是不是设成了只读".into()
         }
         Error::Sqlite(code) if matches!(code & 0xff, 11 | 26) => {
-            "历史库文件已损坏，可以从存档恢复".into()
+            "存东西的文件坏了，可以回到某天的存档".into()
         }
         Error::Sqlite(code) if code & 0xff == 14 => {
-            "找不到或无法打开数据文件，可能已被移动、删除或被占用".into()
+            "打不开存东西的文件：可能被挪走、删了，或被别的程序占着".into()
         }
-        Error::Io(ErrorKind::NotFound) => "找不到数据文件，可能已被移动或删除".into(),
-        Error::NewerSchema { .. } => "历史库来自更新版本的拈来，请先升级拈来".into(),
-        Error::Sqlite(code) => format!("操作失败，请稍后重试（Sqlite {code}）"),
-        Error::Io(kind) => format!("操作失败，请稍后重试（Io {kind:?}）"),
-        Error::Invalid(reason) => format!("操作失败，请稍后重试（Invalid {reason}）"),
-        Error::Closed => "操作失败，请稍后重试（Closed）".into(),
+        Error::Io(ErrorKind::NotFound) => {
+            "打不开存东西的文件：可能被挪走、删了，或被别的程序占着".into()
+        }
+        Error::NewerSchema { .. } => "这些东西是新版拈来存的，请先更新拈来".into(),
+        Error::Sqlite(code) => format!("没做成，稍后再试（代码 {code}）"),
+        Error::Io(kind) => format!("没做成，稍后再试（代码 Io {kind:?}）"),
+        Error::Invalid(reason) => format!("没做成，稍后再试（代码 Invalid {reason}）"),
+        Error::Closed => "没做成，稍后再试（代码 Closed）".into(),
     }
 }
 
@@ -202,7 +204,7 @@ impl History {
             directory: OnceLock::new(),
             store: RwLock::new(memory_store(hash)),
             retired: Mutex::new(Vec::new()),
-            status: Mutex::new(Some("正在加载历史")),
+            status: Mutex::new(Some("正在打开")),
             store_health: AtomicU8::new(0),
             recording: AtomicBool::new(false),
             capture: AtomicU8::new(0),
@@ -354,7 +356,7 @@ impl History {
             let result=store.reader().and_then(|r|r.quick_check());
             logger.event("store_check",json!({"success":result.is_ok(),"elapsed_ms":started.elapsed().as_secs_f64()*1000.0,"error_code":result.as_ref().err().map(ToString::to_string)}));
             if result.is_err() {
-                history.fall_back_to_memory("历史库异常，未落盘");
+                history.fall_back_to_memory("存东西的文件出了问题");
                 changed();return;
             }
             // 启动时先检查一次，之后每小时检查是否到了每日快照的时间（程序常常连开好几天）。
@@ -440,9 +442,9 @@ impl History {
             Err(error) => {
                 *self.status.lock().unwrap() = Some(
                     if matches!(error, nianlai_store::Error::NewerSchema { .. }) {
-                        "这个数据目录由更新版本的拈来创建，请升级后再打开"
+                        "这些东西是新版拈来存的，请先更新拈来"
                     } else {
-                        "历史库异常，未落盘"
+                        "存东西的文件出了问题"
                     },
                 );
                 self.logger.event(
@@ -510,7 +512,7 @@ impl History {
             preview: item.preview,
             file_names: item.file_names,
             source: if item.source.is_empty() {
-                "来源未知".into()
+                "来源不明".into()
             } else {
                 item.source
             },
@@ -1031,7 +1033,7 @@ mod startup_tests {
         assert!(history.store().is_none());
         assert_eq!(
             history.snapshot().store_status,
-            Some("这个数据目录由更新版本的拈来创建，请升级后再打开")
+            Some("这些东西是新版拈来存的，请先更新拈来")
         );
         assert_eq!(history.exports(), Some(directories.data.join("exports")));
         assert_eq!(fs::read(database_file).unwrap(), database);
@@ -1066,15 +1068,21 @@ mod startup_tests {
         let history = History::new(nianlai_store::hash::sha256, logger);
         history.initialize();
         assert_eq!(history.health().store, crate::health::StoreHealth::Failed);
-        assert_eq!(history.snapshot().store_status, Some("历史库异常，未落盘"));
+        assert_eq!(
+            history.snapshot().store_status,
+            Some("存东西的文件出了问题")
+        );
 
         fs::remove_file(&directories.data).unwrap();
         history.initialize();
         assert_eq!(history.health().store, crate::health::StoreHealth::Ready);
         assert_eq!(history.snapshot().store_status, None);
-        history.fall_back_to_memory("历史库异常，未落盘");
+        history.fall_back_to_memory("存东西的文件出了问题");
         assert_eq!(history.health().store, crate::health::StoreHealth::Failed);
-        assert_eq!(history.snapshot().store_status, Some("历史库异常，未落盘"));
+        assert_eq!(
+            history.snapshot().store_status,
+            Some("存东西的文件出了问题")
+        );
     }
 
     #[test]

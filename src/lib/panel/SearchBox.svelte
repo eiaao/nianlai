@@ -11,7 +11,7 @@
     bind:value={panel.query}
     type="search"
     aria-label="搜索最近和常用"
-    placeholder="打字搜索最近和常用"
+    placeholder="搜文字和文件名"
     readonly={panel.locked}
     tabindex={panel.locked ? -1 : 0}
     spellcheck="false"
@@ -22,7 +22,7 @@
     oncompositionstart={panel.startComposition}
     oncompositionend={panel.endComposition}
   />
-  {#if panel.imeActive}<span class="label">拼写中</span>{/if}
+  {#if panel.imeActive}<span class="label">拼完再搜</span>{/if}
 </div>
 
 <style>

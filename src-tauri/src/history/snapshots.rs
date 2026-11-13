@@ -134,13 +134,13 @@ pub fn schedule_restore(directory: &Path, name: &str, logger: &Logger) -> Result
             "snapshot_restore_rejected",
             json!({"name":name,"error_code":error.to_string()}),
         );
-        return Err("这份存档校验没有通过，不能用来恢复".to_owned());
+        return Err("这份存档有问题，不能用来恢复".to_owned());
     }
     fs::write(
         directory.join("snapshots").join(PENDING_FILE),
         Pending::Snapshot(name.to_owned()).marker(),
     )
-    .map_err(|_| "恢复没有登记成功，请重试".to_owned())?;
+    .map_err(|_| "恢复没登记上，再试一次".to_owned())?;
     logger.event("snapshot_restore_scheduled", json!({"name":name}));
     Ok(())
 }
@@ -153,15 +153,15 @@ pub fn schedule_import(directory: &Path, token: &str, logger: &Logger) -> Result
             "backup_import_rejected",
             json!({"error_code":error.to_string()}),
         );
-        return Err("这份备份校验没有通过，不能用来覆盖".to_owned());
+        return Err("这个备份有问题，什么都没动".to_owned());
     }
     let folder = directory.join("snapshots");
-    fs::create_dir_all(&folder).map_err(|_| "覆盖没有登记成功，请重试".to_owned())?;
+    fs::create_dir_all(&folder).map_err(|_| "覆盖没登记上，再试一次".to_owned())?;
     fs::write(
         folder.join(PENDING_FILE),
         Pending::Import(token.to_owned()).marker(),
     )
-    .map_err(|_| "覆盖没有登记成功，请重试".to_owned())?;
+    .map_err(|_| "覆盖没登记上，再试一次".to_owned())?;
     logger.event("backup_import_scheduled", json!({}));
     Ok(())
 }
@@ -277,8 +277,10 @@ mod tests {
             .join("snapshots")
             .join("history-20200101-000000-000-1-0-manual.db");
         fs::write(&broken, b"broken").unwrap();
-        assert!(
-            schedule_restore(&data, "history-20200101-000000-000-1-0-manual.db", &logger).is_err()
+        assert_eq!(
+            schedule_restore(&data, "history-20200101-000000-000-1-0-manual.db", &logger)
+                .unwrap_err(),
+            "这份存档有问题，不能用来恢复"
         );
         assert!(!data.join("snapshots").join(PENDING_FILE).exists());
         fs::remove_file(broken).unwrap();
@@ -351,7 +353,10 @@ mod tests {
         let inspection = nianlai_store::inspect_backup(&data, &file);
         assert!(inspection.ok);
         // 假令牌登记不上；真令牌登记后占用临时目录。
-        assert!(schedule_import(&data, "nope", &logger).is_err());
+        assert_eq!(
+            schedule_import(&data, "nope", &logger).unwrap_err(),
+            "这个备份有问题，什么都没动"
+        );
         assert!(!import_pending(&data, &inspection.token));
         schedule_import(&data, &inspection.token, &logger).unwrap();
         assert!(import_pending(&data, &inspection.token));

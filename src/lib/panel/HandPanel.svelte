@@ -139,16 +139,16 @@
 
     {#if spread}
       <div class="position top" data-hit style={`right:${WINDOW_W - ORIGIN_X - SPREAD_W + 12}px;top:${ORIGIN_Y + 12}px`}>
-        {#if !panel.handSource.length}{panel.searching ? "一条也没找到" : "还没有复制过东西"}
-        {:else if panel.searching}找到 <b>{panel.handSource.length}</b> 条 · 第 {panel.selected + 1} 条
-        {:else}第 <b>{panel.selected + 1}</b> 条，共 {panel.handSource.length} 条{/if}
+        {#if !panel.handSource.length}{panel.searching ? `没找到“${panel.query}”` : "还没复制过东西"}
+        {:else if panel.searching}找到 <b>{panel.handSource.length}</b> 张 · 第 {panel.selected + 1} 张
+        {:else}第 <b>{panel.selected + 1}</b> 张，共 {panel.handSource.length} 张{/if}
       </div>
       {#each heads as head (`${head.name}:${head.index}`)}
-        <div class="group-head" class:late={morphing} style={`translate:${ORIGIN_X + ROW_X}px ${head.y}px;width:${ROW_W}px`}><b>{head.name}</b><span>{head.count} 条</span></div>
+        <div class="group-head" class:late={morphing} style={`translate:${ORIGIN_X + ROW_X}px ${head.y}px;width:${ROW_W}px`}><b>{head.name}</b><span>{head.count} 张</span></div>
       {/each}
       {#if !panel.handSource.length}
         <div class="blank-row" data-hit style={`translate:${ORIGIN_X + ROW_X}px ${view.top}px;width:${ROW_W}px`}>
-          {panel.searching ? `没找到“${panel.query}”，换个词试试` : "还没有复制过东西"}
+          {panel.searching ? `没找到“${panel.query}”。换个短点的词试试。按 Esc 回到全部。` : "复制点什么，它就出现在这里。"}
         </div>
       {/if}
     {:else}
@@ -170,14 +170,14 @@
       {/each}
       {#if !panel.handSource.length}
         <div class="blank-card" data-hit style={`translate:${ORIGIN_X + 3 * PITCH}px ${HAND_TOP - 24}px`}>
-          <strong>复制点什么，<br>它就会出现在这里</strong><span>文字、图片、文件都可以</span>
+          <strong>复制点什么，<br>它就出现在这里。</strong><span>文字、图片、文件都可以</span>
         </div>
       {/if}
       {#if rest > 0}
         <button class="deck" type="button" tabindex="-1" data-hit style={`translate:${DECK_X}px ${DECK_Y}px;width:${DECK_W}px;height:${DECK_H}px`}
           onpointerdown={(event) => event.preventDefault()} onclick={() => panel.spreadOpen(FAN)} aria-label="摊开">
           {#each { length: Math.min(3, Math.ceil(rest / 12)) } as _, layer}<i style={`translate:${(3 - layer) * 3}px ${-(3 - layer) * 3}px`}></i>{/each}
-          <span class="deck-top"><b>拈</b><strong>还有 {rest} 张</strong><small><kbd>{panel.handList === "favorites" ? "PgDn" : "↓"}</kbd>摊开</small></span>
+          <span class="deck-top"><b>＋</b><strong>还有 {rest} 张</strong><small><kbd>{panel.handList === "favorites" ? "PgDn" : "↓"}</kbd>摊开</small></span>
         </button>
       {/if}
     {/if}
@@ -206,9 +206,9 @@
         {:else if panel.heldModifier === "shift"}
           {@render keys(["Shift", "↵"], "只复制这一张，不粘贴")}
         {:else if panel.heldModifier === "ctrl"}
-          {#if panel.searching}{@render keys(["Ctrl", "1–7"], "粘贴对应一条")}{/if}{@render keys(["Ctrl", "↵"], "按纯文本粘贴")}{@render keys(["Ctrl", "D"], panel.currentItem?.favorite ? "移出常用" : "加入常用")}{#if panel.undo}{@render keys(["Ctrl", "Z"], "撤销删除")}{/if}
+          {#if panel.searching}{@render keys(["Ctrl", "1–7"], "粘贴对应一张")}{/if}{@render keys(["Ctrl", "↵"], "按纯文本粘贴")}{@render keys(["Ctrl", "D"], panel.currentItem?.favorite ? "不再常用" : "设为常用")}{#if panel.undo}{@render keys(["Ctrl", "Z"], "撤销删除")}{/if}
         {:else if spread}
-          {@render keys(["↑", "↓"], "上一条 / 下一条")}{@render keys(["↵"], "粘贴")}{#if panel.searching}{@render keys(["Ctrl"], "+数字 粘贴")}{:else}{@render keys(["1–7"], "粘贴")}{@render keys(["空格"], "多选")}{/if}{@render keys(["Tab"], "看全")}{@render keys(["Esc"], panel.searching ? "清空搜索" : "收回")}
+          {@render keys(["↑", "↓"], "上一张 / 下一张")}{@render keys(["↵"], "粘贴")}{#if panel.searching}{@render keys(["Ctrl"], "+数字 粘贴")}{:else}{@render keys(["1–7"], "粘贴")}{@render keys(["空格"], "多选")}{/if}{@render keys(["Tab"], "看全")}{@render keys(["Esc"], panel.searching ? "清空搜索" : "收回")}
         {:else}
           {@render keys(["↵"], "粘贴")}{@render keys(["空格"], "多选")}{@render keys(["Tab"], "看全")}
         {/if}
@@ -217,7 +217,7 @@
 
     {#if !spread && !toast}
       <div class="position bottom" data-hit style={`left:${ORIGIN_X + HAND_W / 2}px;top:${HAND_TOP + 216}px`}>
-        {#if !panel.handSource.length}还没有复制过东西
+        {#if !panel.handSource.length}还没复制过东西
         {:else if panel.handList === "favorites"}<b>常用</b> {panel.fanItems.length} 张{#if rest} · 共 {panel.handSource.length} 张{/if} · 顺序固定
         {:else}<b>最近</b> {panel.fanItems.length} 张 · 共 {panel.handSource.length} 张{/if}{#if panel.arrivals} · 新来 {panel.arrivals} 张{/if}
       </div>

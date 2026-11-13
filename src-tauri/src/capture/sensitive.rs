@@ -21,7 +21,7 @@ pub const RULES: &[Rule] = &[
     },
     Rule {
         id: "github_token",
-        label: "GitHub / GitLab Token",
+        label: "GitHub / GitLab 密钥",
         example: "ghp_…、github_pat_…、glpat-…",
         matches: github_token,
     },
@@ -45,7 +45,7 @@ pub const RULES: &[Rule] = &[
     },
     Rule {
         id: "jwt",
-        label: "JWT 令牌",
+        label: "登录凭证（JWT）",
         example: "eyJ….eyJ….…",
         matches: jwt,
     },
@@ -241,5 +241,11 @@ mod tests {
         ids.sort_unstable();
         ids.dedup();
         assert_eq!(ids.len(), RULES.len());
+    }
+
+    #[test]
+    fn rule_labels_use_plain_words() {
+        assert_eq!(RULES[1].label, "GitHub / GitLab 密钥");
+        assert_eq!(RULES[5].label, "登录凭证（JWT）");
     }
 }

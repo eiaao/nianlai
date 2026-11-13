@@ -110,11 +110,34 @@ fn no_submission_finish(
         .then_some(NoSubmissionFinish::CloseOnly)
 }
 
+fn copied_only_message(
+    restored: bool,
+    foreground_success: bool,
+    focus_restored: bool,
+    reliable_control: impl FnOnce() -> bool,
+) -> &'static str {
+    if restored && foreground_success && focus_restored && reliable_control() {
+        "已复制，按 Ctrl+V 贴上"
+    } else {
+        "已复制。点一下要贴的地方，再按 Ctrl+V"
+    }
+}
+
+fn unwritten_message(reason: Option<&Reason>) -> &'static str {
+    match reason {
+        Some(Reason::RecordMissing) => "这张已经删了，没贴",
+        Some(Reason::FilesMissing) => "原文件不在了，没贴",
+        Some(Reason::StoreReadFailed) => "没读出这张，剪贴板没动",
+        Some(Reason::ClipboardCaptureBusy) => "剪贴板被别的程序占着，这次没贴。再呼出一次",
+        _ => "没放进剪贴板，再试一次",
+    }
+}
+
 fn no_submission_message(reason: Option<&Reason>) -> &'static str {
     match reason {
-        Some(Reason::GenericSubmissionUnknown) => "粘贴结果未确认，请先检查目标，避免重复粘贴",
+        Some(Reason::GenericSubmissionUnknown) => "不确定贴上没有，先看一眼，别贴两遍",
         Some(Reason::NativeClipboardChanged | Reason::GenericClipboardChanged) => {
-            "剪贴板已变化，本次未粘贴，请关闭面板后重新呼出"
+            "剪贴板刚被改过，这次没贴。再呼出一次"
         }
         Some(
             Reason::ClipboardCaptureBusy
@@ -123,9 +146,9 @@ fn no_submission_message(reason: Option<&Reason>) -> &'static str {
             | Reason::NativeClipboardCloseFailed
             | Reason::GenericClipboardBusy
             | Reason::GenericClipboardCloseFailed,
-        ) => "剪贴板忙，本次未粘贴，请关闭面板后重新呼出",
-        Some(Reason::RecordMissing) => "这条记录已不在历史里，本次未粘贴，请关闭面板后重新呼出",
-        Some(Reason::FilesMissing) => "原文件不在了，没有粘贴",
+        ) => "剪贴板被别的程序占着，这次没贴。再呼出一次",
+        Some(Reason::RecordMissing) => "这张已经删了，没贴",
+        Some(Reason::FilesMissing) => "原文件不在了，没贴",
         Some(
             Reason::RequestCancelled
             | Reason::NativeInputDesktopUnavailable
@@ -139,8 +162,8 @@ fn no_submission_message(reason: Option<&Reason>) -> &'static str {
             | Reason::GenericRestoreUnavailable
             | Reason::ConditionsChanged
             | Reason::PreflightTimeout,
-        ) => "窗口状态已变化，本次未粘贴，请关闭面板后重新呼出",
-        _ => "本次未粘贴，请关闭面板后重新呼出",
+        ) => "窗口变了，这次没贴。再呼出一次",
+        _ => "这次没贴。收起再呼出一次",
     }
 }
 
@@ -496,10 +519,7 @@ pub fn dispatch(app: &AppHandle, action: Action) -> Result<(), String> {
         let mut panel = controller.inner.lock().unwrap();
         if let Err(error) = panel.act(&handle, &controller.logger, action) {
             panel.log(&controller.logger, "panel_error", json!({"error":error}));
-            panel.emit(
-                "panel:error",
-                json!({"message":"操作未完成，请查看 G0 日志。"}),
-            );
+            panel.emit("panel:error", json!({"message":"没做成，再试一次"}));
             if panel.mode != Mode::Hidden {
                 let _ = panel.hide(&controller.logger);
             }
@@ -798,15 +818,12 @@ fn run_paste(job: PasteJob) {
             let focus = window::confirm_strict(&target);
             result.evidence.insert(
                 "hint_message".into(),
-                json!(if restored.is_some()
-                    && focus.foreground.success
-                    && focus.focus_restored
-                    && reliable_control(&target)
-                {
-                    "已复制，请按 Ctrl+V 手动粘贴"
-                } else {
-                    "已复制，请先点击目标输入位置，再按 Ctrl+V"
-                }),
+                json!(copied_only_message(
+                    restored.is_some(),
+                    focus.foreground.success,
+                    focus.focus_restored,
+                    || reliable_control(&target),
+                )),
             );
             result.passive_hint = true;
         }
@@ -1088,16 +1105,13 @@ impl Panel {
             );
             self.emit(
                 "panel:error",
-                json!({"message":"目标窗口可能以管理员身份运行，逐张粘贴不可用；请逐条粘贴。"}),
+                json!({"message":"那个程序权限更高，逐张放用不了。请一张一张粘贴"}),
             );
             return Ok(());
         }
         if self.mode == Mode::Search {
             let Some(selection) = selection else {
-                self.emit(
-                    "panel:error",
-                    json!({"message":"请在搜索面板重新选择条目。"}),
-                );
+                self.emit("panel:error", json!({"message":"请在搜索面板重新选择一张"}));
                 return Ok(());
             };
             let foreground = window::foreground();
@@ -1106,15 +1120,12 @@ impl Panel {
                 self.log(logger, "queue_rejected", json!({"reason":reason}));
                 self.emit(
                     "panel:error",
-                    json!({"message":"选择期间窗口状态已变化，请重新选择条目。"}),
+                    json!({"message":"选择期间窗口变了，请重选一张"}),
                 );
                 return Ok(());
             }
         } else if selection.is_some() {
-            self.emit(
-                "panel:error",
-                json!({"message":"面板模式已变化，请重新选择条目。"}),
-            );
+            self.emit("panel:error", json!({"message":"面板模式变了，请重选一张"}));
             return Ok(());
         }
 
@@ -1186,7 +1197,7 @@ impl Panel {
             );
             self.emit(
                 "panel:error",
-                json!({"message":"剪贴板监听安装失败，逐张粘贴未启动；请重试。"}),
+                json!({"message":"没法确认剪贴板的变化，逐张放没开始。再试一次"}),
             );
             return Ok(());
         }
@@ -2482,24 +2493,18 @@ impl Panel {
                         self.log(logger, "paste_rejected", json!({"reason":reason}));
                         self.emit(
                             "panel:error",
-                            json!({"message":"选择期间窗口状态已变化，请重新选择条目。"}),
+                            json!({"message":"选择期间窗口变了，请重选一张"}),
                         );
                         return Ok(());
                     }
                 },
                 None => {
-                    self.emit(
-                        "panel:error",
-                        json!({"message":"请在搜索面板重新选择条目。"}),
-                    );
+                    self.emit("panel:error", json!({"message":"请在搜索面板重新选择一张"}));
                     return Ok(());
                 }
             }
         } else if selection.is_some() {
-            self.emit(
-                "panel:error",
-                json!({"message":"面板模式已变化，请重新选择条目。"}),
-            );
+            self.emit("panel:error", json!({"message":"面板模式变了，请重选一张"}));
             return Ok(());
         } else {
             Some(permits.quick(id, mode))
@@ -2639,15 +2644,7 @@ impl Panel {
                 && result.reason != Some(Reason::RequestCancelled)
                 && !result.request_cancelled
             {
-                let message = match result.reason {
-                    Some(Reason::RecordMissing) => "这条记录已不在历史里",
-                    Some(Reason::FilesMissing) => "原文件不在了，没有粘贴",
-                    Some(Reason::StoreReadFailed) => "读取历史失败，未改写剪贴板。",
-                    Some(Reason::ClipboardCaptureBusy) => {
-                        "剪贴板忙，本次未提交，请关闭面板后重新呼出"
-                    }
-                    _ => "写入剪贴板失败，请重试。",
-                };
+                let message = unwritten_message(result.reason.as_ref());
                 self.emit("panel:error", json!({"message":message,"close_only":false}));
             } else if result.clipboard_written {
                 if let Some(dwell) = dwell {
@@ -3075,6 +3072,45 @@ mod tests {
     }
 
     #[test]
+    fn copied_only_message_uses_short_ctrl_v_when_position_is_reliable() {
+        assert_eq!(
+            copied_only_message(true, true, true, || true),
+            "已复制，按 Ctrl+V 贴上"
+        );
+    }
+
+    #[test]
+    fn copied_only_message_requires_click_for_every_unreliable_condition() {
+        for conditions in [
+            (false, true, true, true),
+            (true, false, true, true),
+            (true, true, false, true),
+            (true, true, true, false),
+        ] {
+            assert_eq!(
+                copied_only_message(conditions.0, conditions.1, conditions.2, || conditions.3),
+                "已复制。点一下要贴的地方，再按 Ctrl+V"
+            );
+        }
+    }
+
+    #[test]
+    fn unwritten_store_read_failure_has_exact_message() {
+        assert_eq!(
+            unwritten_message(Some(&Reason::StoreReadFailed)),
+            "没读出这张，剪贴板没动"
+        );
+    }
+
+    #[test]
+    fn unwritten_default_failure_has_exact_message() {
+        assert_eq!(
+            unwritten_message(Some(&Reason::ClipboardWriteFailed)),
+            "没放进剪贴板，再试一次"
+        );
+    }
+
+    #[test]
     fn generic_terminal_results_are_consumed_for_visible_hidden_cancelled_and_new_sessions() {
         use crate::paste::{
             generic::{Completion, Submission},
@@ -3130,7 +3166,7 @@ mod tests {
         );
         assert_eq!(
             no_submission_message(Some(&Reason::GenericSubmissionUnknown)),
-            "粘贴结果未确认，请先检查目标，避免重复粘贴"
+            "不确定贴上没有，先看一眼，别贴两遍"
         );
     }
 
@@ -3223,13 +3259,26 @@ mod tests {
         ] {
             assert_eq!(
                 no_submission_message(Some(&Reason::from(reason))),
-                "剪贴板忙，本次未粘贴，请关闭面板后重新呼出"
+                "剪贴板被别的程序占着，这次没贴。再呼出一次"
             );
         }
         assert_eq!(
             no_submission_message(Some(&Reason::NativeClipboardChanged)),
-            "剪贴板已变化，本次未粘贴，请关闭面板后重新呼出"
+            "剪贴板刚被改过，这次没贴。再呼出一次"
         );
+        assert_eq!(
+            no_submission_message(Some(&Reason::RecordMissing)),
+            "这张已经删了，没贴"
+        );
+        assert_eq!(
+            no_submission_message(Some(&Reason::FilesMissing)),
+            "原文件不在了，没贴"
+        );
+        assert_eq!(
+            no_submission_message(Some(&Reason::ConditionsChanged)),
+            "窗口变了，这次没贴。再呼出一次"
+        );
+        assert_eq!(no_submission_message(None), "这次没贴。收起再呼出一次");
     }
 
     #[test]

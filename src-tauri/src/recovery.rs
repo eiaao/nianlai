@@ -259,7 +259,7 @@ pub fn guard() -> Option<i32> {
             journal.record(exit);
             if let Decision::GiveUp { attempts } = exit.decision {
                 crate::platform::dialog::error(&format!(
-                    "拈来连续异常退出 {attempts} 次，已停止自动重启。日志在 {}",
+                    "拈来连续异常退出 {attempts} 次，已停止自动重启。详细信息在 {}",
                     journal.directory.display()
                 ));
             }

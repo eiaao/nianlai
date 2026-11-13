@@ -91,7 +91,7 @@ impl Controller {
     }
     /// 完整预览里选中的文字复制到剪贴板（M2-7）：照“纯文本粘贴”的做法登记回声，不会被当成新复制记进历史。
     pub fn copy_selection(&self, id: usize, text: &str) -> Result<(), String> {
-        let content = self.history.get(id)?.ok_or("这条记录已不在历史里")?;
+        let content = self.history.get(id)?.ok_or("这张已经不在了")?;
         let copy = crate::history::content::Content::text(text, platform::hash::sha256)?;
         self.clipboard
             .write(

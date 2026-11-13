@@ -70,7 +70,7 @@ fn reserved(key: &str, mods: Modifiers) -> Option<&'static str> {
     let shift = Modifiers::SHIFT;
     let win = Modifiers::SUPER;
     if mods == (ctrl | alt | shift) && matches!(key, "KeyQ" | "KeyL") {
-        return Some("呼出键不能占用退出键或采集调试键");
+        return Some("这个组合已经留给退出或调试，换一个");
     }
     if key == "Delete" && mods.contains(ctrl | alt) {
         return Some("Ctrl+Alt+Del 是 Windows 安全保留键，不能用作呼出键");
@@ -179,13 +179,13 @@ pub fn warning(shortcut: &Shortcut) -> Option<&'static str> {
                 | "Tab"
         )
     {
-        Some("此组合常用于编辑器、浏览器或输入法，可能覆盖其他应用的操作；仍可保存。")
+        Some("此组合常用于编辑器、浏览器或输入法，可能覆盖其他程序的操作；仍可保存。")
     } else if mods.contains(Modifiers::CONTROL | Modifiers::ALT) {
-        Some("Ctrl+Alt 组合可能与其他应用或 AltGr 输入冲突；仍可保存。")
+        Some("Ctrl+Alt 组合可能与其他程序或 AltGr 输入冲突；仍可保存。")
     } else if mods == Modifiers::ALT {
-        Some("此组合可能与其他应用的菜单或快捷键冲突；仍可保存。")
+        Some("此组合可能与其他程序的菜单或快捷键冲突；仍可保存。")
     } else if mods.contains(Modifiers::SUPER) {
-        Some("Win 组合的可用性受 Windows 版本和系统设置影响，未列出的系统组合仍可能注册失败。")
+        Some("Win 组合的可用性受 Windows 版本和系统设置影响，未列出的系统组合也可能用不了。")
     } else {
         None
     }
@@ -226,6 +226,27 @@ mod tests {
             assert!(parse(value).is_ok(), "{value}");
         }
         assert_eq!(key("Win+F8"), key("Super+F8"));
+    }
+
+    #[test]
+    fn conflict_warnings_use_program_and_exact_v11_copy() {
+        let cases = [
+            (
+                "Ctrl+V",
+                "此组合常用于编辑器、浏览器或输入法，可能覆盖其他程序的操作；仍可保存。",
+            ),
+            (
+                "Ctrl+Alt+V",
+                "Ctrl+Alt 组合可能与其他程序或 AltGr 输入冲突；仍可保存。",
+            ),
+            (
+                "Alt+V",
+                "此组合可能与其他程序的菜单或快捷键冲突；仍可保存。",
+            ),
+        ];
+        let actual = cases.map(|(value, _)| warning(&key(value)));
+        let expected = cases.map(|(_, message)| Some(message));
+        assert_eq!(actual, expected);
     }
 
     #[test]

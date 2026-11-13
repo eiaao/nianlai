@@ -977,7 +977,7 @@ impl native::Backend for Native<'_> {
         if unknown {
             self.report["reason"] = json!("native_submission_unknown");
             self.report["passive_hint"] = json!(true);
-            self.report["hint_message"] = json!("粘贴结果未确认，请先检查目标，避免重复粘贴");
+            self.report["hint_message"] = json!("不确定贴上没有，先看一眼，别贴两遍");
         }
         let cleanup = (self.restore)(RestorePolicy::NativeAfterSubmit { unknown });
         self.report["native_cleanup"] = json!({"reply_received":cleanup.is_some()});

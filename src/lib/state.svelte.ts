@@ -41,7 +41,7 @@ export type PasteFeedback = {
 };
 
 // 缺少后端确认时不猜权限或原输入控件是否恢复。
-export const COPIED_HINT = "已复制，请先点击目标输入位置，再按 Ctrl+V";
+export const COPIED_HINT = "已复制。点一下要贴的地方，再按 Ctrl+V";
 
 type DomChoice = {
   session: number; panelMode: "quick" | "search"; id: number | null; mode: PasteMode;
@@ -340,7 +340,7 @@ export class PanelState {
       this.selected = Math.max(0, index);
       await this.refreshFavorites();
     } catch {
-      if (this.visible && session === this.session) this.message = "状态读取失败，请稍后重试。";
+      if (this.visible && session === this.session) this.message = "没读到，稍后再试";
     }
   };
 
@@ -359,7 +359,7 @@ export class PanelState {
     try {
       const updated = await ipc.setFavorite(id, !item.favorite);
       if (session !== this.session) return;
-      if (!updated) { this.message = "这条记录已不在历史里。"; return; }
+      if (!updated) { this.message = "这张已经不在了"; return; }
       // 只补丁更新返回项；常用区已冻结，这条只换星标、不换位置。
       const patch = (entry: HistoryItem) => entry.id === id ? updated : entry;
       this.history = { ...this.history, items: this.history.items.map(patch) };
@@ -374,7 +374,7 @@ export class PanelState {
       const index = this.sourceIndex(selectedId);
       this.selected = Math.max(0, index);
     } catch {
-      if (session === this.session) this.message = "常用状态未保存，请重试。";
+      if (session === this.session) this.message = "没设成常用，再试一次";
     } finally {
       if (session === this.session) this.favoritePending = null;
     }
@@ -438,7 +438,7 @@ export class PanelState {
     try {
       const removed = await ipc.deleteItem(item.id);
       if (session !== this.session || !this.visible) return;
-      if (!removed) { this.message = "这条记录已经不在了。"; return; }
+      if (!removed) { this.message = "这张已经不在了"; return; }
       this.message = "";
       this.previewOpen = false;
       this.history = { ...this.history, items: this.history.items.filter((entry) => entry.id !== item.id), total: Math.max(0, this.history.total - 1) };
@@ -452,7 +452,7 @@ export class PanelState {
       this.undo = { id: item.id, session, label: deleteLabel(item), startedAt: Date.now(), duration: UNDO_MS };
       this.undoTimer = setTimeout(() => { this.undoTimer = null; this.undo = null; }, UNDO_MS);
     } catch {
-      if (session === this.session && this.visible) this.message = "删除失败，请重试。";
+      if (session === this.session && this.visible) this.message = "没删掉，再试一次";
     } finally {
       this.deleting = false;
     }
@@ -466,7 +466,7 @@ export class PanelState {
     try {
       const restored = await ipc.undoDelete();
       if (session !== this.session || !this.visible) return;
-      if (!restored) { this.message = "没有可以撤销的删除。"; return; }
+      if (!restored) { this.message = "没有能撤销的"; return; }
       const snapshot = await ipc.getHistory();
       if (session !== this.session || !this.visible) return;
       this.history = snapshot;
@@ -479,7 +479,7 @@ export class PanelState {
       const index = this.sourceIndex(restored.id);
       if (index >= 0) this.selected = index;
     } catch {
-      if (session === this.session && this.visible) this.message = "撤销失败，请重试。";
+      if (session === this.session && this.visible) this.message = "没撤销成，再试一次";
     }
   };
 
@@ -488,13 +488,13 @@ export class PanelState {
     const item = this.currentItem;
     const text = window.getSelection?.()?.toString() ?? "";
     if (!item || !this.previewOpen) return;
-    if (!text) { this.message = "先用鼠标选中要复制的文字。"; return; }
+    if (!text) { this.message = "先选中要复制的字"; return; }
     try {
       await ipc.copySelection(item.id, text);
       this.message = "";
       this.showNotice(`已复制选中的 ${[...text].length} 字`);
     } catch {
-      this.message = "复制没有完成，请重试。";
+      this.message = "没复制成，再试一次";
     }
   };
   notice = $state("");
@@ -525,7 +525,7 @@ export class PanelState {
 
   private showFailure(message: string) {
     this.clearFeedback();
-    this.feedback = { kind: "failed", title: "粘贴失败", detail: message, duration: 5000, startedAt: Date.now() };
+    this.feedback = { kind: "failed", title: "没贴上", detail: message, duration: 5000, startedAt: Date.now() };
     this.feedbackTimer = setTimeout(() => { this.clearFeedback(); }, 5000);
   }
 
@@ -546,7 +546,7 @@ export class PanelState {
       this.selected = Math.max(0, index);
       if (reset) this.spreadScroll = 0;
     } catch {
-      if (requestId === this.searchRequest && this.visible && currentSession === this.session) this.message = "搜索没有完成，请再试一次。";
+      if (requestId === this.searchRequest && this.visible && currentSession === this.session) this.message = "没搜成，再试一次";
     }
   };
 
@@ -580,7 +580,7 @@ export class PanelState {
     catch (error) {
       if (this.session !== session || !this.visible || this.interaction === "passive" || this.interaction === "close_only") return false;
       // start_queue 会直接返回给用户看的中文原因（空、超过 32 张、重复、复制模式），原样显示。
-      this.message = showReason && typeof error === "string" && error.trim() ? error : "操作没有完成，请再试一次；仍不行就关闭面板后重新呼出。";
+      this.message = showReason && typeof error === "string" && error.trim() ? error : "没做成，再试一次";
       this.busy = false;
       return false;
     }
@@ -595,7 +595,7 @@ export class PanelState {
     this.pendingDom = null;
     this.awaitingRelease = false;
     if (clearHeld) this.heldDomKeys.clear();
-    if (["请松开按键以完成取用。", "请松开按键以收起面板。", "请松开按键以开始逐张放。"].includes(this.message)) this.message = "";
+    if (["松开就贴", "松开就收起", "松开就开始逐张放"].includes(this.message)) this.message = "";
   }
 
   private cancelDomFocus() {
@@ -662,7 +662,7 @@ export class PanelState {
       this.clearSearchTimer();
       this.searchStarting = false;
       this.searchStartFailed = true;
-      this.message = "未能进入搜索，请关闭面板后重新呼出。";
+      this.message = "没能开始搜，收起再呼出一次";
     };
     this.searchTimer = setTimeout(failed, 1000);
     void ipc.startSearch(session).catch(failed);
@@ -698,7 +698,7 @@ export class PanelState {
     if (this.pendingDom) return;
     this.pendingDom = choice;
     this.awaitingRelease = true;
-    this.message = choice.id === null ? "请松开按键以收起面板。" : choice.queueIds ? "请松开按键以开始逐张放。" : "请松开按键以完成取用。";
+    this.message = choice.id === null ? "松开就收起" : choice.queueIds ? "松开就开始逐张放" : "松开就贴";
     this.releaseDomChoice();
   }
 
@@ -711,7 +711,7 @@ export class PanelState {
     if (choice.id === null) { void this.command(() => ipc.hidePanel(choice.session), choice.session); return; }
     if (this.mode !== choice.panelMode || !this.interactive || this.busy) return;
     if (choice.selection && (!this.foregroundSnapshot || choice.selection.revision !== this.foregroundRevision)) {
-      this.message = "选择期间前台状态已变化，请重新选择条目。";
+      this.message = "窗口变了，请重选一张";
       return;
     }
     if (choice.queueIds) {
@@ -722,7 +722,7 @@ export class PanelState {
       return;
     }
     const index = this.sourceIndex(choice.id);
-    if (index < 0) { this.message = "这条记录刚刚变了，请重新选择。"; return; }
+    if (index < 0) { this.message = "这张刚变过，请重选一张"; return; }
     this.selected = index;
     this.busy = true;
     void this.command(() => ipc.pasteItem(choice.session, choice.id!, choice.mode, choice.selection), choice.session);
@@ -772,7 +772,7 @@ export class PanelState {
     this.foregroundSnapshot = { session: this.session, revision: this.foregroundRevision, receivedAt };
     if (this.pendingDom?.selection && this.pendingDom.selection.revision !== this.foregroundRevision) {
       this.clearDomChoice();
-      this.message = "选择期间前台状态已变化，请重新选择条目。";
+      this.message = "窗口变了，请重选一张";
     }
   }
 
@@ -834,7 +834,7 @@ export class PanelState {
     if (enteringPassive) {
       const index = this.sourceIndex(selectedId);
       this.selected = Math.max(0, index);
-      this.busy = true; this.message = "正在确认复制结果…";
+      this.busy = true; this.message = "正在复制…";
     }
   }
 
@@ -937,7 +937,7 @@ export class PanelState {
     const mode = pasteMode;
     const selection = this.mode === "search" ? this.captureSelection(event) : undefined;
     if (selection === null) {
-      this.message = this.foregroundSnapshot ? "无法确认选择与前台状态的先后，请重新选择条目。" : "前台状态不可用，请关闭面板后重新呼出。";
+      this.message = this.foregroundSnapshot ? "窗口变了，请重选一张" : "出了点岔子，收起再呼出一次";
       return;
     }
     if (this.interaction === "activated") {
@@ -1038,7 +1038,7 @@ export class PanelState {
     const ids = this.stack.map((item) => item.id);
     const selection = this.mode === "search" ? this.captureSelection(event, true) : undefined;
     if (selection === null) {
-      this.message = this.foregroundSnapshot ? "无法确认选择与前台状态的先后，请重新选择。" : "前台状态不可用，请关闭面板后重新呼出。";
+      this.message = this.foregroundSnapshot ? "窗口变了，请重选" : "出了点岔子，收起再呼出一次";
       return;
     }
     if (this.interaction === "activated") {
@@ -1448,7 +1448,7 @@ export class PanelState {
             void this.refreshFavorites();
           }
         }
-      } catch { if (!disposed && this.interaction !== "close_only") this.message = "读取历史失败，请关闭面板后重新呼出。"; }
+      } catch { if (!disposed && this.interaction !== "close_only") this.message = "没打开你记下的东西。收起再呼出试试"; }
       finally { fetching = false; }
     };
     const frame = (callback: () => void) => {
@@ -1640,7 +1640,7 @@ export class PanelState {
           && (this.interaction !== "close_only" || payload.close_only === true)) {
           if (payload.close_only) this.setInteraction("close_only");
           this.message = payload.message; this.busy = false;
-          if (!payload.close_only && ["这条记录已不在历史里", "读取历史失败", "写入剪贴板失败", "原文件不在了"].some((text) => payload.message.includes(text))) {
+          if (!payload.close_only && ["这张已经删了，没贴", "没读出这张，剪贴板没动", "没放进剪贴板，再试一次", "原文件不在了，没贴"].some((text) => payload.message.includes(text))) {
             this.showFailure(payload.message);
           }
         }
@@ -1652,19 +1652,19 @@ export class PanelState {
         if (payload.paste_result === "native_submission_unknown") {
           this.clearFeedback();
           this.setInteraction("passive");
-          this.message = "粘贴结果未确认，请先检查目标，避免重复粘贴";
+          this.message = "不确定贴上没有，先看一眼，别贴两遍";
           return;
         }
         // 被动提示已归还前台，不承诺按键送达；只展示后端确认的提示，留明确鼠标关闭入口。
         if (payload.hint_dwell_ms) {
           const administrator = payload.paste_result === "copied_only" && payload.reason === "target_may_be_elevated";
           const detail = administrator
-            ? "目标程序以管理员身份运行。请切到它按 Ctrl+V。"
-            : payload.hint_message || "粘贴前前台窗口变了，为免粘错，只复制到剪贴板。请按 Ctrl+V。";
+            ? "那个程序权限更高，贴不进去。切过去按 Ctrl+V"
+            : payload.hint_message || "窗口换了，怕贴错，只复制了。按 Ctrl+V 贴上";
           this.clearFeedback();
           this.setInteraction("passive");
           this.feedback = {
-            kind: "copied", title: "已复制，未粘贴", detail,
+            kind: "copied", title: "复制好了，没贴上", detail,
             duration: payload.hint_dwell_ms, startedAt: Date.now(),
           };
           this.message = payload.hint_message || COPIED_HINT;
@@ -1674,15 +1674,15 @@ export class PanelState {
         this.busy = false;
         const notes: string[] = [];
         if (payload.paste_result === "copied_only") notes.push(payload.hint_message || COPIED_HINT);
-        if (payload.paste_result === "sent" && payload.layer2?.timed_out) notes.push("已发出粘贴，目标可能没收到");
-        if (payload.as_text?.error) notes.push("转文字失败，已按原样写入");
+        if (payload.paste_result === "sent" && payload.layer2?.timed_out) notes.push("贴了，但那边可能没收到");
+        if (payload.as_text?.error) notes.push("没能转成纯文字，按原样贴了");
         this.message = notes.join(" · ");
       });
       if (!disposed) await settingsReady;
       if (!disposed) await this.prewarm();
       if (!disposed) await this.command(() => ipc.frontendReady());
     };
-    void initialize().catch(() => { this.message = "拈来没有准备好，请从托盘退出后重新打开。"; });
+    void initialize().catch(() => { this.message = "拈来没启动好。退出后重新打开"; });
     return () => {
       disposed = true; this.searchRequest += 1; this.foregroundSnapshot = null;
       this.clearDomChoice(true); this.cancelDomFocus(); this.clearSearchTimer();

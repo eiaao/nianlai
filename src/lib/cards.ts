@@ -119,7 +119,7 @@ export function cardKind(item: Pick<HistoryItem, "kind" | "preview" | "file_name
 
 export const fileExt = (name: string) => (/\.([a-z0-9]{1,5})$/i.exec(name)?.[1] ?? "文件").toUpperCase();
 export const firstLine = (text: string) => text.split("\n").find((line) => line.trim()) ?? "";
-export const sourceName = (item: HistoryItem) => item.source_name?.trim() || item.source || "来源未知";
+export const sourceName = (item: HistoryItem) => item.source_name?.trim() || item.source || "来源不明";
 /** 图片条目的“1280 × 720”；后端的预览文字形如“图片 1280×720”。 */
 export const imageSize = (item: HistoryItem) => (/(\d+)\s*[×x]\s*(\d+)/.exec(item.preview ?? "") ?? []).slice(1, 3).join(" × ");
 export const cardLabel = (item: HistoryItem) => item.title || firstLine(item.preview ?? "") || item.file_names[0] || "图片";
