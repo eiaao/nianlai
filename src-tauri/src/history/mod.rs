@@ -15,7 +15,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex, OnceLock, RwLock,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -56,7 +56,7 @@ pub struct Trashed {
 
 #[derive(Clone, Serialize)]
 pub struct Preview {
-    id: usize,
+    pub(crate) id: usize,
     kind: String,
     preview: String,
     file_names: Vec<String>,
@@ -81,7 +81,7 @@ pub struct Preview {
 }
 #[derive(Serialize)]
 pub struct Snapshot {
-    items: Vec<Preview>,
+    pub(crate) items: Vec<Preview>,
     total: usize,
     recording: bool,
     last_recorded_ms: Option<u64>,
@@ -162,7 +162,11 @@ pub struct Inner {
     // 被判损坏的库不能因此被改动；所以像旧版本那样一直持有到进程退出。
     retired: Mutex<Vec<Store>>,
     status: Mutex<Option<&'static str>>,
+    // 类型化存储健康（v11）：0 Loading / 1 Ready / 2 Failed；不从界面文案反推。
+    store_health: AtomicU8,
     recording: AtomicBool,
+    // 托盘记录健康：低两位 0 Starting / 1 Recording / 2 Failed / 3 Stopping；bit 2 为读取线程已终止。
+    capture: AtomicU8,
     last_write: Mutex<Option<Instant>>,
     refresh: Mutex<Option<crate::platform::apps::Refresher>>,
     // 待删除（撤销窗口内）的那一条；同一时间只挂一条，新的删除会先提交上一条。
@@ -173,11 +177,14 @@ pub struct Inner {
     // 最近一次出现在剪贴板上的内容（含我们自己写回的）。
     last_seen: Mutex<Option<Fingerprint>>,
     changed: Mutex<Option<Changed>>,
+    health_changed: Mutex<Option<Changed>>,
+    #[cfg(test)]
+    injected_store_error: Mutex<Option<nianlai_store::Error>>,
     files: files::Marks,
     // 预览图缓存：见 preview.rs。
     images: Mutex<preview::ImageCache>,
     hash: Hash,
-    logger: Logger,
+    pub(crate) logger: Logger,
 }
 
 #[derive(Clone)]
@@ -196,7 +203,9 @@ impl History {
             store: RwLock::new(memory_store(hash)),
             retired: Mutex::new(Vec::new()),
             status: Mutex::new(Some("正在加载历史")),
+            store_health: AtomicU8::new(0),
             recording: AtomicBool::new(false),
+            capture: AtomicU8::new(0),
             last_write: Mutex::new(None),
             refresh: Mutex::new(None),
             undo_stack: Mutex::new(Vec::new()),
@@ -204,6 +213,9 @@ impl History {
             generation: AtomicU64::new(0),
             last_seen: Mutex::new(None),
             changed: Mutex::new(None),
+            health_changed: Mutex::new(None),
+            #[cfg(test)]
+            injected_store_error: Mutex::new(None),
             files: files::Marks::default(),
             images: Mutex::default(),
             hash,
@@ -228,8 +240,105 @@ impl History {
     pub fn set_changed(&self, changed: Changed) {
         *self.changed.lock().unwrap() = Some(changed);
     }
+    /// 只刷新健康外观，不派发 panel:history-changed，错误路径不改变普通面板事件时序。
+    pub fn set_health_changed(&self, changed: Changed) {
+        *self.health_changed.lock().unwrap() = Some(changed);
+    }
+    pub fn notify_health_changed(&self) {
+        let changed = self.health_changed.lock().unwrap().clone();
+        if let Some(changed) = changed {
+            changed();
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn inject_store_error(&self, error: nianlai_store::Error) {
+        *self.injected_store_error.lock().unwrap() = Some(error);
+    }
     pub fn set_recording(&self, value: bool) {
         self.recording.store(value, Ordering::Release);
+        // 低两位是监听生命周期，bit 2 持久记录读取线程已经终止；同一个原子避免交错覆盖。
+        self.capture
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                let reader_failed = current & 0b100;
+                let next = if current & 0b11 == 3 {
+                    3
+                } else if value && reader_failed == 0 {
+                    1
+                } else {
+                    2
+                };
+                Some(next | reader_failed)
+            })
+            .expect("记录健康迁移总是产生新状态");
+    }
+    /// 读取线程 panic、协调失败或意外返回是持久事实，监听重挂不能把它擦掉。
+    pub fn fail_capture_reader(&self) {
+        self.recording.store(false, Ordering::Release);
+        self.capture
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                let state = if current & 0b11 == 3 { 3 } else { 2 };
+                Some(state | 0b100)
+            })
+            .expect("读取故障迁移总是产生新状态");
+    }
+    /// 托盘用的记录健康状态（v11）。
+    pub fn capture_health(&self) -> crate::health::CaptureHealth {
+        match self.capture.load(Ordering::Acquire) & 0b11 {
+            1 => crate::health::CaptureHealth::Recording,
+            2 => crate::health::CaptureHealth::Failed,
+            3 => crate::health::CaptureHealth::Stopping,
+            _ => crate::health::CaptureHealth::Starting,
+        }
+    }
+    #[cfg(test)]
+    pub fn set_capture_health(&self, health: crate::health::CaptureHealth) {
+        let code = match health {
+            crate::health::CaptureHealth::Starting => 0,
+            crate::health::CaptureHealth::Recording => 1,
+            crate::health::CaptureHealth::Failed => 2,
+            crate::health::CaptureHealth::Stopping => 3,
+        };
+        self.capture.store(code, Ordering::Release);
+    }
+    /// 正常退出前标记：随后的 set_recording(false) 不再当故障（v11）。
+    pub fn begin_capture_shutdown(&self) {
+        self.capture
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                Some(3 | (current & 0b100))
+            })
+            .expect("退出健康迁移总是产生新状态");
+    }
+    /// 存储健康与旧面板提示并列保存；文案本身不参与判断。
+    pub fn store_health(&self) -> crate::health::StoreHealth {
+        match self.store_health.load(Ordering::Acquire) {
+            1 => crate::health::StoreHealth::Ready,
+            2 => crate::health::StoreHealth::Failed,
+            _ => crate::health::StoreHealth::Loading,
+        }
+    }
+    fn set_store_health(&self, health: crate::health::StoreHealth) {
+        let code = match health {
+            crate::health::StoreHealth::Loading => 0,
+            crate::health::StoreHealth::Ready => 1,
+            crate::health::StoreHealth::Failed => 2,
+        };
+        self.store_health.store(code, Ordering::Release);
+    }
+    /// 只有真实的存储/连接错误影响健康；内容校验错误不是存储故障。
+    pub(crate) fn note_store_error(&self, error: &nianlai_store::Error) -> bool {
+        use nianlai_store::Error;
+        let failed = matches!(
+            error,
+            Error::Sqlite(_)
+                | Error::Io(_)
+                | Error::Busy
+                | Error::Closed
+                | Error::NewerSchema { .. }
+        );
+        if failed {
+            self.set_store_health(crate::health::StoreHealth::Failed);
+        }
+        failed
     }
     pub fn last_write(&self) -> Option<Instant> {
         *self.last_write.lock().unwrap()
@@ -294,6 +403,7 @@ impl History {
         }
         self.images.lock().unwrap().clear();
         *self.status.lock().unwrap() = Some(status);
+        self.set_store_health(crate::health::StoreHealth::Failed);
     }
     pub fn initialize(&self) {
         let location = self.logger.directories.data_source;
@@ -325,6 +435,7 @@ impl History {
                 *self.refresh.lock().unwrap() = Some(refresher);
                 *self.store.write().unwrap() = store;
                 self.images.lock().unwrap().clear();
+                self.set_store_health(crate::health::StoreHealth::Ready);
             }
             Err(error) => {
                 *self.status.lock().unwrap() = Some(
@@ -338,6 +449,7 @@ impl History {
                     "store_open_failed",
                     json!({"location":location,"error_code":error.to_string()}),
                 );
+                self.set_store_health(crate::health::StoreHealth::Failed);
             }
         }
         if std::env::var("NIANLAI_G0_SAMPLES").as_deref() == Ok("1") {
@@ -473,6 +585,16 @@ impl History {
             SearchReply { request_id, items }
         })
     }
+    fn finish_ingest(&self, result: nianlai_store::Result<Ingest>) -> Result<Ingest, String> {
+        if let Err(error) = &result
+            && self.note_store_error(error)
+        {
+            // 内容没变，只让托盘健康外观刷新；不得多发普通面板历史事件。
+            self.notify_health_changed();
+        }
+        // 错误只进日志（采集线程），不给用户看，保持原始文本。
+        result.map_err(|e| e.to_string())
+    }
     pub fn ingest(
         &self,
         content: Arc<Content>,
@@ -480,11 +602,12 @@ impl History {
         partial: bool,
         now: Instant,
     ) -> Result<Ingest, String> {
-        // 错误只进日志（采集线程），不给用户看，保持原始文本。
-        let result = self
-            .db()
-            .ingest(content, event, partial, now)
-            .map_err(|e| e.to_string())?;
+        #[cfg(test)]
+        if let Some(error) = self.injected_store_error.lock().unwrap().take() {
+            return self.finish_ingest(Err(error));
+        }
+        let result = self.db().ingest(content, event, partial, now);
+        let result = self.finish_ingest(result)?;
         // 合并到已有 id：它的格式被重写了，缩略图缓存里的旧图要作废。
         if result.merged()
             && let Some(id) = result.record_id
@@ -913,6 +1036,118 @@ mod startup_tests {
         assert_eq!(history.exports(), Some(directories.data.join("exports")));
         assert_eq!(fs::read(database_file).unwrap(), database);
         assert!(!directories.data.join("backups").exists());
+    }
+
+    #[test]
+    fn task2_health_store_status_text_is_not_a_health_signal() {
+        let directory = Directory::new();
+        let directories = directories(&directory);
+        let logger = Logger::with_settings(&directories, 20).unwrap();
+        let history = History::new(nianlai_store::hash::sha256, logger);
+        assert_eq!(history.health().store, crate::health::StoreHealth::Loading);
+        history.initialize();
+        assert_eq!(history.health().store, crate::health::StoreHealth::Ready);
+        // store_status 是旧面板文案，不是故障枚举；即使文案变化也不能凭它猜健康状态。
+        *history.status.lock().unwrap() = Some("与存储健康无关的界面提示");
+        assert_eq!(history.health().store, crate::health::StoreHealth::Ready);
+        assert_eq!(
+            history.snapshot().store_status,
+            Some("与存储健康无关的界面提示")
+        );
+    }
+
+    #[test]
+    fn task2_health_open_failure_and_memory_fallback_are_typed_and_reopen_recovers() {
+        let directory = Directory::new();
+        let mut directories = directories(&directory);
+        directories.data = directory.0.join("blocked");
+        fs::write(&directories.data, b"not a directory").unwrap();
+        let logger = Logger::with_settings(&directories, 20).unwrap();
+        let history = History::new(nianlai_store::hash::sha256, logger);
+        history.initialize();
+        assert_eq!(history.health().store, crate::health::StoreHealth::Failed);
+        assert_eq!(history.snapshot().store_status, Some("历史库异常，未落盘"));
+
+        fs::remove_file(&directories.data).unwrap();
+        history.initialize();
+        assert_eq!(history.health().store, crate::health::StoreHealth::Ready);
+        assert_eq!(history.snapshot().store_status, None);
+        history.fall_back_to_memory("历史库异常，未落盘");
+        assert_eq!(history.health().store, crate::health::StoreHealth::Failed);
+        assert_eq!(history.snapshot().store_status, Some("历史库异常，未落盘"));
+    }
+
+    #[test]
+    fn task2_health_storage_write_failures_do_not_rewrite_legacy_status() {
+        let directory = Directory::new();
+        let first_directories = directories(&directory);
+        let logger = Logger::with_settings(&first_directories, 20).unwrap();
+        let history = History::new(nianlai_store::hash::sha256, logger);
+        history.initialize();
+        assert!(history.note_store_error(&nianlai_store::Error::Sqlite(13)));
+        assert_eq!(history.health().store, crate::health::StoreHealth::Failed);
+        assert_eq!(history.snapshot().store_status, None);
+
+        let other_directory = Directory::new();
+        let other_directories = directories(&other_directory);
+        let other = History::new(
+            nianlai_store::hash::sha256,
+            Logger::with_settings(&other_directories, 20).unwrap(),
+        );
+        other.initialize();
+        assert!(!other.note_store_error(&nianlai_store::Error::Invalid("text_too_large")));
+        assert_eq!(other.health().store, crate::health::StoreHealth::Ready);
+    }
+
+    #[test]
+    fn task2_fix_ingest_error_notifies_health_without_panel_history_event() {
+        let directory = Directory::new();
+        let directories = directories(&directory);
+        let logger = Logger::with_settings(&directories, 20).unwrap();
+        let history = History::new(nianlai_store::hash::sha256, logger);
+        history.initialize();
+        let panel_events = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let health_events = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let panel_counter = panel_events.clone();
+        history.set_changed(Arc::new(move || {
+            panel_counter.fetch_add(1, Ordering::Relaxed);
+        }));
+        let health_counter = health_events.clone();
+        history.set_health_changed(Arc::new(move || {
+            health_counter.fetch_add(1, Ordering::Relaxed);
+        }));
+        history.inject_store_error(nianlai_store::Error::Sqlite(13));
+        let now = Instant::now();
+        let error = history
+            .ingest(
+                Content::text("真实 ingest 错误注入", nianlai_store::hash::sha256).unwrap(),
+                CopyEvent {
+                    time_ms: 1_700_000_000_000,
+                    sequence: 1,
+                    source_process: "health-test.exe".into(),
+                    source_path: String::new(),
+                    owner_process: "health-test.exe".into(),
+                    owner_pid: 1,
+                    observed: now,
+                },
+                false,
+                now,
+            )
+            .unwrap_err();
+        assert!(!error.is_empty());
+        assert_eq!(history.health().store, crate::health::StoreHealth::Failed);
+        assert_eq!(history.snapshot().store_status, None);
+        assert_eq!(history.db().copied_since(0).unwrap(), 0);
+        assert_eq!(
+            panel_events.load(Ordering::Relaxed),
+            0,
+            "错误不得新增普通面板历史事件"
+        );
+        assert_eq!(
+            health_events.load(Ordering::Relaxed),
+            1,
+            "只独立通知托盘健康"
+        );
     }
 
     // 命令层（lib.rs）拿到的就是这个 History 句柄，磁盘与内存模式行为一致（M1-S）。

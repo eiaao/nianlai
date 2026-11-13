@@ -416,7 +416,7 @@ pub(super) fn run(shared: &Shared) {
         if coordination_failed {
             // poison 不能恢复：停采且保留未读 sequence，不能反复自检重试或冒充已处理。
             shared.stop();
-            shared.history.set_recording(false);
+            shared.history.fail_capture_reader();
             (shared.changed)();
         }
         let read_ms = started.elapsed().as_secs_f64() * 1000.0;

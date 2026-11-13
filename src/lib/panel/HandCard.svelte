@@ -153,7 +153,7 @@
         {/if}
       </div>
       <div class="foot">{item.title ? "常用" : meta}</div>
-      {#if showSeal}<i class="seal" aria-label="常用">常</i>{/if}
+      {#if showSeal}<i class="seal" aria-label="常用">藏</i>{/if}
     </div>
 
     <!-- 摊开的行面：单行；选中时展开 3–4 行 -->
@@ -202,7 +202,7 @@
           </div>
         {/if}
       </div>
-      <span class="mt">{#if showSeal}<i class="sl">常</i>{/if}<span class="src">{meta}</span></span>
+      <span class="mt">{#if showSeal}<i class="sl">藏</i>{/if}<span class="src">{meta}</span></span>
     </div>
 
     {#if holding}<i class="hold" style={`animation-duration:${holding.duration}ms`}></i>{/if}
@@ -243,7 +243,7 @@
   .favorite .kind { color: var(--hand-ink-2); font-weight: 600; }
   .bd { position: absolute; left: 12px; right: 12px; top: 46px; bottom: 32px; overflow: hidden; color: var(--hand-ink); font-size: 13px; line-height: 20px; overflow-wrap: anywhere; }
   .foot { position: absolute; z-index: 2; left: 12px; right: 12px; bottom: 8px; overflow: hidden; color: var(--hand-ink-3); font-size: 12px; line-height: 16px; text-overflow: ellipsis; white-space: nowrap; }
-  .seal { position: absolute; z-index: 3; right: 10px; top: 10px; width: 18px; height: 18px; border-radius: 3px; background: var(--hand-seal); color: var(--hand-on-seal); font: 600 12px/18px var(--font-display); font-style: normal; text-align: center; }
+  .seal { position: absolute; z-index: 3; right: 10px; top: 10px; width: 18px; height: 18px; border-radius: 4px; background: var(--hand-seal); color: var(--hand-on-seal); font: 600 12px/18px var(--font-display); font-style: normal; text-align: center; }
   .short { height: 100%; display: flex; align-items: center; justify-content: center; text-align: center; font-size: 15px; line-height: 22px; }
   .short.big { font-size: 20px; font-weight: 500; line-height: 28px; }
   .long { white-space: pre-wrap; mask-image: linear-gradient(#000 70%, transparent); }
@@ -308,7 +308,7 @@
   .k-code .r1 .mono { font-size: 12px; }
   .mt { flex: none; max-width: 160px; display: flex; align-items: center; gap: 6px; color: var(--hand-ink-3); font-size: 12px; line-height: 26px; white-space: nowrap; }
   .src { overflow: hidden; text-overflow: ellipsis; }
-  .sl { width: 18px; height: 18px; flex: none; border-radius: 3px; background: var(--hand-seal); color: var(--hand-on-seal); font: 600 12px/18px var(--font-display); font-style: normal; text-align: center; }
+  .sl { width: 18px; height: 18px; flex: none; border-radius: 4px; background: var(--hand-seal); color: var(--hand-on-seal); font: 600 12px/18px var(--font-display); font-style: normal; text-align: center; }
 
   .taken { cursor: default; }
   .taken .face { background: var(--hand-card-back); box-shadow: none; outline: 1.5px dashed var(--hand-line-strong); outline-offset: -1.5px; }

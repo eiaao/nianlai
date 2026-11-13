@@ -2,6 +2,7 @@ mod app;
 mod autocycle;
 mod capture;
 mod directories;
+mod health;
 mod history;
 mod hotkey;
 mod log;
@@ -733,10 +734,12 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("G0 样机初始化失败");
     app.run(|app, event| {
-        if matches!(event, tauri::RunEvent::Exit)
-            && let Some(controller) = app.try_state::<Controller>()
-        {
-            controller.shutdown();
+        if matches!(event, tauri::RunEvent::Exit) {
+            // 先释放托盘消息回调里的 AppHandle，再走原有退出清理；不改变退出动作。
+            tray::shutdown();
+            if let Some(controller) = app.try_state::<Controller>() {
+                controller.shutdown();
+            }
         }
     });
 }

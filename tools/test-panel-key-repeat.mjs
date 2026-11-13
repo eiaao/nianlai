@@ -2218,3 +2218,22 @@ test("九种牌面判定与网址拆分（纯函数）", async (suite) => {
     assert.equal(cards.relativeTime(new Date(2026, 10, 11, 14, 51).getTime(), now), "昨天 14:51");
   });
 });
+
+test("v11 HandCard 两处藏印与普通点击接线", () => {
+  const source = readFileSync(join(root, "src/lib/panel/HandCard.svelte"), "utf8");
+  assert.match(source, /<i class="seal" aria-label="常用">藏<\/i>/);
+  assert.match(source, /<i class="sl">藏<\/i>/);
+  assert.doesNotMatch(source, /<i class="seal"[^>]*>常<\/i>|<i class="sl">常<\/i>/);
+  for (const name of ["seal", "sl"]) {
+    const rule = source.match(new RegExp(`\\.${name} \\{[^}]*\\}`))?.[0];
+    assert.ok(rule, `缺少 .${name} 规则`);
+    assert.match(rule, /width: 18px/);
+    assert.match(rule, /height: 18px/);
+    assert.match(rule, /border-radius: 4px/);
+    assert.match(rule, /background: var\(--hand-seal\)/);
+  }
+  // 本任务只换印面，不改变普通点击、拖动收尾和 Enter 的既有调用。
+  assert.match(source, /onclick=\{click\}/);
+  assert.match(source, /panel\.chooseByMouse\(index, event\)/);
+  assert.match(source, /void panel\.choose\(index, "paste", event\)/);
+});

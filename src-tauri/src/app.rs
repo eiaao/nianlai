@@ -55,9 +55,16 @@ impl Controller {
     pub fn start_capture(&self, app: &AppHandle, automatic: bool) -> platform::Result<()> {
         self.history.initialize();
         let app = app.clone();
+        let health_app = app.clone();
         let changed: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
             let _ = panel::dispatch(&app, Action::HistoryChanged);
+            // 复制发生或健康变化时，托盘的“今天记下 n 条”和三态跟着刷新（v11）。
+            crate::tray::refresh(&app);
         });
+        let health_changed: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            crate::tray::refresh(&health_app);
+        });
+        self.history.set_health_changed(health_changed);
         changed();
         self.history.set_changed(changed.clone());
         self.history.maintenance(changed.clone());
@@ -65,13 +72,21 @@ impl Controller {
         if self.stopping.load(Ordering::Acquire) {
             return Ok(());
         }
-        *capture = Some(platform::capture::Service::start(
+        match platform::capture::Service::start(
             self.logger.clone(),
             self.history.clone(),
             &self.clipboard,
             automatic,
-            changed,
-        )?);
+            changed.clone(),
+        ) {
+            Ok(service) => *capture = Some(service),
+            Err(error) => {
+                // 记录服务起不来：托盘要报“出问题”；若已在正常退出则保留 Stopping。
+                self.history.set_recording(false);
+                self.history.notify_health_changed();
+                return Err(error);
+            }
+        }
         Ok(())
     }
     /// 完整预览里选中的文字复制到剪贴板（M2-7）：照“纯文本粘贴”的做法登记回声，不会被当成新复制记进历史。
@@ -93,6 +108,8 @@ impl Controller {
     }
     pub fn shutdown(&self) {
         self.stopping.store(true, Ordering::Release);
+        // 先标 Stopping：随后监听/读取线程末尾的 set_recording(false) 不当成故障（v11）。
+        self.history.begin_capture_shutdown();
         if let Some(capture) = self.capture.lock().unwrap().take() {
             capture.shutdown();
         }

@@ -835,6 +835,12 @@ fn rebuild_v2_fixture() {
     rebuild_fixture(2);
 }
 
+#[test]
+#[ignore = "重建夹具才跑，见 rebuild_fixture 的说明"]
+fn rebuild_v3_fixture() {
+    rebuild_fixture(3);
+}
+
 // v1 夹具里出现过的来源进程名（populate 的 sources）；回填的 source_apps 应当恰好是这些。
 const BACKFILLED_APPS: &[&str] = &["Code.exe", "chrome.exe", "explorer.exe", "notepad.exe"];
 
@@ -950,6 +956,98 @@ fn failing_v2_step_keeps_database_at_v1() {
 }
 
 // v2 夹具（0.1.0-alpha.3 发布时的结构，带来源应用）升到最新：记录、搜索、来源应用不变，回收站为空且可用。
+#[test]
+fn v4_migration_preserves_counts_without_resurrecting_purged_metadata() {
+    let manifest = load_manifest(2);
+    let temp = fixture_copy(2);
+    let id = manifest.records[0].id;
+    {
+        // 先构造一份带收藏和回收站内容的 v3 旧库，再由正常打开路径升到 v4。
+        let mut c = writable(&temp.0.join("history.db")).unwrap();
+        migrate(&mut c, &STEPS[..3], &mut |_, _| Ok(())).unwrap();
+        c.execute(
+            "INSERT INTO favorites(content_id,position,title,note,created_ms,updated_ms) VALUES(?1,1,'','',0,0)",
+            [id as i64],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO trash(content_id,deleted_ms) VALUES(?1,0)",
+            [id as i64],
+        )
+        .unwrap();
+    }
+    let store = temp.store();
+    assert_eq!(store.purge(Some(vec![id]), u64::MAX).unwrap(), 1);
+    assert_eq!(store.copied_since(0).unwrap(), manifest.counts.events);
+
+    for expected in manifest.records.iter().filter(|record| record.id != id) {
+        let cache = store.cache();
+        let actual = cache
+            .items
+            .iter()
+            .find(|item| item.id == expected.id)
+            .unwrap();
+        assert_eq!(actual.copy_count, expected.copy_count);
+        assert_eq!(actual.source, expected.source);
+    }
+    let c = writable(&temp.0.join("history.db")).unwrap();
+    assert_eq!(
+        c.query_row(
+            "SELECT count(*) FROM copy_events WHERE content_id IS NULL AND event_origin=0 AND source_process='' AND owner_process='' AND owner_pid=0 AND sequence=0 AND source_app_id IS NULL AND length(event_key)=16",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        c.query_row(
+            "SELECT (SELECT count(*) FROM contents WHERE id=?1),(SELECT count(*) FROM formats WHERE content_id=?1),(SELECT count(*) FROM favorites WHERE content_id=?1),(SELECT count(*) FROM trash WHERE content_id=?1)",
+            [id as i64],
+            |r| Ok(r.get::<_, i64>(0)? + r.get::<_, i64>(1)? + r.get::<_, i64>(2)? + r.get::<_, i64>(3)?),
+        )
+        .unwrap(),
+        0
+    );
+    let mut statement = c
+        .prepare("EXPLAIN QUERY PLAN SELECT count(*) FROM copy_events WHERE time_ms >= ?1")
+        .unwrap();
+    let details: Vec<String> = statement
+        .query_map([0i64], |r| r.get(3))
+        .unwrap()
+        .collect::<std::result::Result<_, _>>()
+        .unwrap();
+    assert!(
+        details.iter().any(|detail| detail.contains("event_time")),
+        "{details:?}"
+    );
+    drop(statement);
+    drop(c);
+
+    let backups = backups(&temp.0);
+    assert_eq!(backups.len(), 1);
+    let backup =
+        Connection::open_with_flags(&backups[0], OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    assert_eq!(user_version(&backup).unwrap(), 3);
+    assert!(
+        backup
+            .query_row(
+                "SELECT count(*) FROM copy_events WHERE content_id=?1 AND source_process!=''",
+                [id as i64],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+            > 0,
+        "迁移前备份必须保留旧事件及来源元数据"
+    );
+    drop(backup);
+    drop(store);
+    assert_eq!(
+        temp.store().copied_since(0).unwrap(),
+        manifest.counts.events
+    );
+}
+
 #[test]
 fn fixture_v2_opens_with_latest_code_and_trash_works() {
     let manifest = load_manifest(2);

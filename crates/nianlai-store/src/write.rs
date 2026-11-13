@@ -250,6 +250,22 @@ impl Store {
     pub fn latest_sequence(&self) -> Option<u32> {
         self.0.cache.read().unwrap().latest_sequence
     }
+    /// 自某时刻（epoch 毫秒）起成功写入的复制次数；同一内容再次复制各计一次，
+    /// 被规则跳过的内容不产生 copy_events，天然不计。删除不回滚历史事件。
+    pub fn copied_since(&self, since_ms: u64) -> Result<usize> {
+        // SQLite 时间戳是 i64；起点超出可表示范围时，不可能有非负事件时间达到它。
+        if since_ms > i64::MAX as u64 {
+            return Ok(0);
+        }
+        self.call(move |writer| {
+            let count = writer.connection.query_row(
+                "SELECT count(*) FROM copy_events WHERE time_ms >= ?1",
+                [since_ms as i64],
+                |row| row.get::<_, i64>(0),
+            )?;
+            usize::try_from(count).map_err(|_| Error::Invalid("count_overflow"))
+        })
+    }
     pub fn cache(&self) -> Cache {
         self.0.cache.read().unwrap().clone()
     }
@@ -560,7 +576,7 @@ impl Store {
         })
     }
     // 物理删除回收站里的内容：`ids` 为 None 时按删除时间早于 `before_ms` 的全部清掉。
-    // 收藏行先删（外键不级联）；formats、copy_events、trash 随内容级联，搜索索引由触发器同步。
+    // 收藏行先删（外键不级联）；formats、trash 随内容级联，copy_events 只保留匿名计数事实。
     pub fn purge(&self, ids: Option<Vec<usize>>, before_ms: u64) -> Result<usize> {
         self.call(move |w| {
             let tx = w.connection.transaction()?;
@@ -603,7 +619,7 @@ impl Store {
         let icons = self.0.directory.join("icons");
         self.call(move |w| {
             std::fs::create_dir_all(&icons)?;
-            let (report, sort_order) = backup::merge_into(
+            let (report, sort_order, events_changed) = backup::merge_into(
                 &mut w.connection,
                 &staging.join("history.db"),
                 &staging.join("icons"),
@@ -611,7 +627,7 @@ impl Store {
                 w.sort_order,
             )?;
             w.sort_order = sort_order;
-            if report.added_items > 0 || report.added_favorites > 0 {
+            if report.added_items > 0 || report.added_favorites > 0 || events_changed {
                 let counts = schema::counts(&w.connection)?;
                 let items = schema::recent(&w.connection)?;
                 let last_recorded_ms = w
@@ -907,8 +923,8 @@ impl Writer {
             return Err(Error::Invalid("injected_after_formats"));
         }
         let event_id = if merge_id.is_none() {
-            tx.execute("INSERT INTO copy_events(content_id,time_ms,source_process,owner_process,owner_pid,sequence,source_app_id) VALUES(?1,?2,?3,?4,?5,?6,?7)",
-                params![id as i64,event.time_ms as i64,event.source_process,event.owner_process,event.owner_pid,event.sequence,(source_app_id != 0).then_some(source_app_id)])?;
+            tx.execute("INSERT INTO copy_events(content_id,event_key,event_origin,time_ms,source_process,owner_process,owner_pid,sequence,source_app_id) VALUES(?1,randomblob(16),?2,?3,?4,?5,?6,?7,?8)",
+                params![id as i64,EVENT_ORIGIN_RANDOM,event.time_ms as i64,event.source_process,event.owner_process,event.owner_pid,event.sequence,(source_app_id != 0).then_some(source_app_id)])?;
             Some(tx.last_insert_rowid())
         } else {
             None

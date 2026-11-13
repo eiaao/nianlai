@@ -195,6 +195,8 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, wp: WPARAM, lp: LP
             }
             return true;
         }
+        // 设置与 DPI 变化只旁路请求托盘刷新；不解指针、不消费消息，原会话与系统路径继续。
+        let _ = crate::tray::window_message(message, lp);
         let event = if message == WM_POWERBROADCAST {
             match wp.0 as u32 {
                 4 => Some("suspend"),
@@ -400,17 +402,7 @@ fn listener(shared: Arc<Shared>, automatic: bool, ready: mpsc::SyncSender<Result
                         }
                     }
                 }
-                shared.history.set_recording(success);
-                {
-                    let mut counts = shared.counters.lock().unwrap();
-                    if success {
-                        counts.rearm_successes += 1;
-                    } else {
-                        counts.rearm_failures += 1;
-                    }
-                }
-                shared.logger.event("capture_listener_rearmed", json!({"success":success,"rebuilt_window":rebuilt,"elapsed_ms":started.elapsed().as_secs_f64()*1000.0}));
-                (shared.changed)();
+                finish_rearm(&shared, success, rebuilt, started);
                 if success {
                     let catch_up = notice("rearmed");
                     CONTEXT.with(|context| {
@@ -451,6 +443,40 @@ fn listener(shared: Arc<Shared>, automatic: bool, ready: mpsc::SyncSender<Result
     shared.logger.event("capture_listener_stopped", json!({}));
 }
 
+fn finish_rearm(shared: &Shared, success: bool, rebuilt: bool, started: Instant) {
+    shared.history.set_recording(success);
+    {
+        let mut counts = shared.counters.lock().unwrap();
+        if success {
+            counts.rearm_successes += 1;
+        } else {
+            counts.rearm_failures += 1;
+        }
+    }
+    shared.logger.event("capture_listener_rearmed", json!({"success":success,"rebuilt_window":rebuilt,"elapsed_ms":started.elapsed().as_secs_f64()*1000.0}));
+    (shared.changed)();
+}
+
+fn reader_main(shared: Arc<Shared>, done: mpsc::Sender<()>, run: impl FnOnce(&Shared)) {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&shared)));
+    if result.is_err() {
+        shared
+            .logger
+            .event("capture_reader_failed", json!({"reason":"thread_panicked"}));
+    }
+    // 无论是意外返回还是 panic，读取线程消失都等于记录失效；正常停止不报故障。
+    if !shared.stopping.load(Ordering::Acquire) {
+        if result.is_ok() {
+            shared
+                .logger
+                .event("capture_reader_failed", json!({"reason":"thread_ended"}));
+        }
+        shared.history.fail_capture_reader();
+        shared.history.notify_health_changed();
+    }
+    let _ = done.send(());
+}
+
 struct Threads {
     listener: JoinHandle<()>,
     reader: JoinHandle<()>,
@@ -484,17 +510,26 @@ impl Service {
         let read_shared = shared.clone();
         let reader = thread::Builder::new()
             .name("capture-reader".into())
-            .spawn(move || {
-                reader::run(&read_shared);
-                let _ = done.send(());
-            })
+            .spawn(move || reader_main(read_shared, done, reader::run))
             .map_err(|_| "capture_reader_start_failed")?;
         let listen_shared = shared.clone();
+        let listener_failure = shared.clone();
         let (ready, started) = mpsc::sync_channel(1);
         let listener = match thread::Builder::new()
             .name("capture-listener".into())
-            .spawn(move || listener(listen_shared, automatic, ready))
-        {
+            .spawn(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    listener(listen_shared, automatic, ready);
+                }));
+                if result.is_err() {
+                    listener_failure.logger.event(
+                        "capture_listener_failed",
+                        json!({"reason":"thread_panicked"}),
+                    );
+                    listener_failure.history.set_recording(false);
+                    listener_failure.history.notify_health_changed();
+                }
+            }) {
             Ok(thread) => thread,
             Err(_) => {
                 shared.stop();
@@ -559,6 +594,81 @@ impl Drop for Service {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn shared_for_reader_fault(directory: &crate::settings::tests::Directory) -> Arc<Shared> {
+        let directories = crate::settings::Directories {
+            settings_file: directory.0.join("settings.json"),
+            data: directory.0.join("data"),
+            logs: directory.0.join("logs"),
+            data_source: "测试",
+            test_data_dir: false,
+        };
+        let logger = Logger::with_settings(&directories, 20).unwrap();
+        let history = History::new(nianlai_store::hash::sha256, logger.clone());
+        history.set_recording(true);
+        Arc::new(Shared {
+            inbox: Inbox::default(),
+            stopping: AtomicBool::new(false),
+            history,
+            own_owner: 0,
+            capture_access: Arc::new(CaptureAccess::default()),
+            logger,
+            counters: Mutex::new(Counters::default()),
+            changed: Arc::new(|| {}),
+        })
+    }
+
+    #[test]
+    fn task2_fix_reader_panic_then_rearm_success_stays_failed() {
+        let directory = crate::settings::tests::Directory::new();
+        let shared = shared_for_reader_fault(&directory);
+        let reader_shared = shared.clone();
+        let (done, reader_done) = mpsc::channel();
+        let reader = thread::spawn(move || {
+            reader_main(reader_shared, done, |_| panic!("注入读取线程故障"));
+        });
+        reader_done.recv_timeout(Duration::from_secs(2)).unwrap();
+        reader.join().unwrap();
+        assert_eq!(
+            shared.history.capture_health(),
+            crate::health::CaptureHealth::Failed
+        );
+        // 走生产重挂完成路径，不是手写健康 setter 序列。
+        finish_rearm(&shared, true, false, Instant::now());
+        assert_eq!(
+            shared.history.capture_health(),
+            crate::health::CaptureHealth::Failed
+        );
+    }
+
+    #[test]
+    fn task2_fix_reader_panic_and_rearm_race_stays_failed() {
+        let directory = crate::settings::tests::Directory::new();
+        let shared = shared_for_reader_fault(&directory);
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let reader_shared = shared.clone();
+        let reader_barrier = barrier.clone();
+        let (done, reader_done) = mpsc::channel();
+        let reader = thread::spawn(move || {
+            reader_main(reader_shared, done, move |_| {
+                reader_barrier.wait();
+                panic!("注入并发读取线程故障");
+            });
+        });
+        let rearm_shared = shared.clone();
+        let rearm = thread::spawn(move || {
+            barrier.wait();
+            finish_rearm(&rearm_shared, true, false, Instant::now());
+        });
+        reader_done.recv_timeout(Duration::from_secs(2)).unwrap();
+        reader.join().unwrap();
+        rearm.join().unwrap();
+        assert_eq!(
+            shared.history.capture_health(),
+            crate::health::CaptureHealth::Failed
+        );
+    }
+
     #[test]
     fn busy_reader_keeps_latest_without_a_time_debounce() {
         let inbox = Inbox::default();

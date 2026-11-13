@@ -26,7 +26,7 @@
 //!    （v2 夹具同理：v2 定稿发布后跑 `rebuild_fixture(2)`，当前还没有生成。）
 
 use crate::*;
-use rusqlite::{Transaction, TransactionBehavior};
+use rusqlite::{Transaction, TransactionBehavior, params};
 use std::{fs, path::PathBuf};
 
 // 一步迁移就是一个函数；函数名 v<N> 即目标版本，说明写在函数上方的注释里。
@@ -35,7 +35,12 @@ pub struct Step {
     pub apply: fn(&Transaction<'_>) -> Result<()>,
 }
 
-pub const STEPS: &[Step] = &[Step { apply: v1 }, Step { apply: v2 }, Step { apply: v3 }];
+pub const STEPS: &[Step] = &[
+    Step { apply: v1 },
+    Step { apply: v2 },
+    Step { apply: v3 },
+    Step { apply: v4 },
+];
 pub const VERSION: u32 = STEPS.len() as u32;
 
 pub fn user_version(c: &Connection) -> Result<u32> {
@@ -196,4 +201,89 @@ fn v3(tx: &Transaction<'_>) -> Result<()> {
             CREATE INDEX trash_time ON trash(deleted_ms);",
     )?;
     Ok(())
+}
+
+// v4：复制计数是独立于正文生命周期的事实。正文彻底删除时，事件只保留标识和时间；
+// content_id、来源进程、所有者和剪贴板序号都清除，格式/正文/收藏/回收站仍按原规则删除。
+// 旧事件的 event_key 只由正常写入、迟到格式和内容合并前后都稳定的事件字段确定派生；
+// contents.fingerprint 会随迟到格式改变，不能参与身份。同一旧库每次独立升级得到相同键，
+// 新采集事件仍使用 randomblob(16)。event_time 避免按日起点计数时全表扫描。
+fn v4(tx: &Transaction<'_>) -> Result<()> {
+    let migrated = (|| -> Result<()> {
+        tx.execute_batch(
+            "CREATE TABLE copy_events_v4 (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    content_id INTEGER REFERENCES contents(id) ON DELETE SET NULL,
+                    event_key BLOB NOT NULL UNIQUE CHECK(length(event_key)=16),
+                    event_origin INTEGER NOT NULL CHECK(event_origin IN (0,1)),
+                    time_ms INTEGER NOT NULL, source_process TEXT NOT NULL, owner_process TEXT NOT NULL,
+                    owner_pid INTEGER NOT NULL, sequence INTEGER NOT NULL,
+                    source_app_id INTEGER REFERENCES source_apps(id));",
+        )?;
+        {
+            // v1–v3 没有数据库/事件 UUID；id、时间和以下来源字段在迟到格式及内容合并时不变。
+            // source_app_id 是各库局部行号，不纳入身份。无关库若这些字段全同，合并时必须保守冲突。
+            let mut events = tx.prepare(
+                "SELECT id,content_id,time_ms,source_process,owner_process,owner_pid,sequence,source_app_id \
+                 FROM copy_events ORDER BY id",
+            )?;
+            let mut rows = events.query([])?;
+            let mut insert = tx.prepare(
+                "INSERT INTO copy_events_v4(id,content_id,event_key,event_origin,time_ms,source_process,owner_process,owner_pid,sequence,source_app_id) \
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+            )?;
+            while let Some(row) = rows.next()? {
+                let id = row.get::<_, i64>(0)?;
+                let time_ms = row.get::<_, i64>(2)?;
+                let source_process = row.get::<_, String>(3)?;
+                let owner_process = row.get::<_, String>(4)?;
+                let owner_pid = row.get::<_, i64>(5)?;
+                let sequence = row.get::<_, i64>(6)?;
+                let mut hash = hash::Sha256::new();
+                hash.update(b"nianlai\0copy-event-v4\0");
+                for part in [
+                    &id.to_be_bytes(),
+                    &time_ms.to_be_bytes(),
+                    source_process.as_bytes(),
+                    owner_process.as_bytes(),
+                    &owner_pid.to_be_bytes(),
+                    &sequence.to_be_bytes(),
+                ] {
+                    hash.update(&(part.len() as u64).to_be_bytes());
+                    hash.update(part);
+                }
+                let event_key = hash.finish()[..16].to_vec();
+                insert.execute(params![
+                    id,
+                    row.get::<_, i64>(1)?,
+                    event_key,
+                    EVENT_ORIGIN_LEGACY,
+                    time_ms,
+                    source_process,
+                    owner_process,
+                    owner_pid,
+                    sequence,
+                    row.get::<_, Option<i64>>(7)?
+                ])?;
+            }
+        }
+        tx.execute_batch(
+            "DROP TABLE copy_events;
+             ALTER TABLE copy_events_v4 RENAME TO copy_events;
+             CREATE INDEX event_content ON copy_events(content_id,time_ms,id);
+             CREATE INDEX event_time ON copy_events(time_ms,id);
+             CREATE TRIGGER content_anonymize_events BEFORE DELETE ON contents BEGIN
+                 UPDATE copy_events SET source_process='',owner_process='',owner_pid=0,sequence=0,source_app_id=NULL
+                 WHERE content_id=old.id;
+             END;",
+        )?;
+        Ok(())
+    })();
+    migrated.map_err(|error| {
+        // 损坏快照里的悬空外键仍按关系损坏报告，不把 SQLite 原始约束错误漏给调用方。
+        match error {
+            Error::Sqlite(code) if code & 0xff == 19 => Error::Invalid("relational_integrity"),
+            other => other,
+        }
+    })
 }

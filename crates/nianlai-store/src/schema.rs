@@ -45,17 +45,18 @@ pub fn initialize(c: &mut Connection, directory: &Path) -> Result<Option<u32>> {
 pub fn structure(c: &Connection) -> Result<()> {
     c.prepare("SELECT id,fingerprint,kind,preview,file_names,bytes,partial,sort_ms,source,copy_count,sort_order,source_app_id FROM contents LIMIT 0")?;
     c.prepare("SELECT content_id,name,fingerprint,bytes,encoding,data FROM formats LIMIT 0")?;
-    c.prepare("SELECT id,content_id,time_ms,source_process,owner_process,owner_pid,sequence,source_app_id FROM copy_events LIMIT 0")?;
+    c.prepare("SELECT id,content_id,event_key,event_origin,time_ms,source_process,owner_process,owner_pid,sequence,source_app_id FROM copy_events LIMIT 0")?;
     c.prepare("SELECT id,process_name,exe_path,display_name,icon_file,icon_key,updated_ms FROM source_apps LIMIT 0")?;
     c.prepare(
         "SELECT content_id,position,title,note,created_ms,updated_ms FROM favorites LIMIT 0",
     )?;
     c.prepare("SELECT content_id,deleted_ms FROM trash LIMIT 0")?;
-    let triggers: i64 = c.query_row("SELECT count(*) FROM sqlite_schema WHERE type='trigger' AND name IN ('content_insert','content_delete','content_search_update')", [], |r|r.get(0))?;
-    if triggers != 3 {
+    let triggers: i64 = c.query_row("SELECT count(*) FROM sqlite_schema WHERE type='trigger' AND name IN ('content_insert','content_delete','content_search_update','content_anonymize_events')", [], |r|r.get(0))?;
+    if triggers != 4 {
         return Err(Error::Invalid("missing_index_triggers"));
     }
     c.prepare("SELECT id FROM contents INDEXED BY content_order LIMIT 0")?;
+    c.prepare("SELECT time_ms FROM copy_events INDEXED BY event_time LIMIT 0")?;
     Ok(())
 }
 
