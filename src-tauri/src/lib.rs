@@ -24,6 +24,63 @@ use serde_json::json;
 use std::time::Instant;
 use tauri::{AppHandle, Emitter, Manager, State};
 
+#[derive(serde::Serialize)]
+struct LicenseNotices {
+    nianlai: &'static str,
+    third_party: &'static str,
+}
+
+fn license_notices() -> LicenseNotices {
+    LicenseNotices {
+        nianlai: include_str!("../../LICENSE"),
+        third_party: include_str!("../../THIRD_PARTY_NOTICES.md"),
+    }
+}
+
+#[tauri::command]
+fn get_license_notices() -> LicenseNotices {
+    license_notices()
+}
+
+#[tauri::command]
+fn get_data_dir(app: AppHandle) -> String {
+    app.state::<Controller>()
+        .logger
+        .directories
+        .data
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn open_data_directory_with(
+    path: &std::path::Path,
+    open: impl FnOnce(&std::path::Path) -> Result<(), String>,
+) -> Result<(), String> {
+    if path.as_os_str().is_empty() {
+        return Err("没读到存东西的目录".to_owned());
+    }
+    if !path.is_dir() {
+        return Err("存东西的文件夹不存在，没法打开".to_owned());
+    }
+    open(path)
+}
+
+fn open_directory(path: &std::path::Path) -> Result<(), String> {
+    std::process::Command::new("explorer.exe")
+        .arg(path)
+        .spawn()
+        .map(drop)
+        .map_err(|_| "文件夹没打开，再试一次".to_owned())
+}
+
+#[tauri::command]
+async fn open_data_dir(app: AppHandle) -> Result<(), String> {
+    let path = app.state::<Controller>().logger.directories.data.clone();
+    tauri::async_runtime::spawn_blocking(move || open_data_directory_with(&path, open_directory))
+        .await
+        .map_err(|_| "文件夹没打开，再试一次".to_owned())?
+}
+
 #[tauri::command]
 fn get_settings(app: AppHandle) -> settings::Settings {
     app.state::<settings::Store>().get()
@@ -68,6 +125,8 @@ fn save_settings(app: &AppHandle, update: serde_json::Value) -> Result<settings:
     if update_hotkey {
         hotkey.record(&controller.logger);
     }
+    // 只刷新托盘既有菜单文字；不注册 accelerator，也不新增面板事件。
+    tray::notify_hotkey_settings_saved(update_hotkey);
     controller.logger.event(
         "settings_saved",
         json!({"reason":"设置已保存；呼出键即时应用，其他设置按各自策略生效"}),
@@ -587,6 +646,11 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_settings,
             set_settings,
+            get_license_notices,
+            get_data_dir,
+            open_data_dir,
+            tray::get_autostart,
+            tray::set_autostart,
             get_capture_state,
             set_capture_paused,
             set_ignore_next,
@@ -742,4 +806,59 @@ pub fn run() {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod task8_tests {
+    use super::*;
+
+    #[test]
+    fn task8_data_directory_opener_uses_real_path_and_preserves_errors() {
+        let root =
+            std::env::temp_dir().join(format!("nianlai-task8-open-data-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut opened = None;
+        open_data_directory_with(&root, |path| {
+            opened = Some(path.to_path_buf());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(opened, Some(root.clone()));
+
+        let error =
+            open_data_directory_with(&root, |_| Err("模拟打开失败".to_owned())).unwrap_err();
+        assert_eq!(error, "模拟打开失败");
+        let missing = root.join("not-here");
+        let mut called = false;
+        let error = open_data_directory_with(&missing, |_| {
+            called = true;
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(error.contains("不存在"));
+        assert!(!called, "目录不存在时不能调用资源管理器");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn task8_license_notices_embed_real_offline_text() {
+        let notices = license_notices();
+        assert!(notices.nianlai.starts_with("MIT License\n"));
+        assert!(
+            notices
+                .nianlai
+                .contains("Copyright (c) 2026 Nianlai contributors")
+        );
+        assert!(
+            notices
+                .nianlai
+                .contains("THE SOFTWARE IS PROVIDED \"AS IS\"")
+        );
+        assert!(notices.third_party.contains("rusqlite 0.41.1"));
+        assert!(notices.third_party.contains("完整性限制"));
+        assert!(notices.third_party.contains("Apache License"));
+        assert!(notices.third_party.len() > 5000);
+        assert!(!notices.third_party.contains("TODO"));
+    }
 }

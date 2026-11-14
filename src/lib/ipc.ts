@@ -140,6 +140,9 @@ export const restoreItem = (id: number) => invoke<HistoryItem | null>("restore_i
 export const purgeItems = (ids: number[] | null) => invoke<number>("purge_items", { ids });
 export const getSettings = () => invoke<AppSettings>("get_settings");
 export const setSettings = (settings: SettingsUpdate) => invoke<AppSettings>("set_settings", { settings });
+// 与托盘共用 tauri-plugin-autostart；返回值始终是插件写后读回的真实状态，不写入 settings.json。
+export const getAutostart = () => invoke<boolean>("get_autostart");
+export const setAutostart = (enabled: boolean) => invoke<boolean>("set_autostart", { enabled });
 export const validateHotkey = (value: string) => invoke<HotkeyValidation>("validate_hotkey", { value });
 export const getHotkeyStatus = () => invoke<HotkeyStatus>("get_hotkey_status");
 // 设置页录制新组合键期间暂时注销呼出键（后端 30 秒后自动恢复兜底）。
@@ -190,6 +193,10 @@ export const reportPainted = (session: number) => invoke("report_painted", { ses
 export const reportSearchInput = (session: number, inputType: string, composing: boolean, afterReadyMs: number) =>
   invoke("report_search_input", { session, inputType, composing, afterReadyMs });
 export const appVersion = () => getVersion();
+export type LicenseNotices = { nianlai: string; third_party: string };
+export const getDataDir = () => invoke<string>("get_data_dir");
+export const openDataDir = () => invoke<void>("open_data_dir");
+export const getLicenseNotices = () => invoke<LicenseNotices>("get_license_notices");
 
 // ---------- 事件 ----------
 type Handler<T> = (payload: T) => void;

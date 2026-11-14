@@ -4,7 +4,9 @@ use crate::{
     health::{HealthSnapshot, TrayState, select_tray},
     log::Logger,
     panel::{self, Action},
-    platform, settings_window,
+    platform,
+    settings::Store,
+    settings_window,
 };
 use serde_json::json;
 use std::sync::{Arc, Mutex};
@@ -16,6 +18,7 @@ use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
 use tauri_plugin_autostart::ManagerExt;
+use tauri_plugin_global_shortcut::Modifiers;
 use windows::{
     Win32::{
         Foundation::{LPARAM, POINT},
@@ -37,6 +40,8 @@ const PAUSE: &str = "tray_pause";
 const IGNORE_NEXT: &str = "tray_ignore_next";
 const ABOUT: &str = "tray_about";
 const QUIT: &str = "tray_quit";
+// Windows 原生菜单用文本中的 Tab 显示右侧键位；加速器始终为空，不注册第二个快捷键。
+const OPEN_PANEL_ACCELERATOR: Option<&str> = None;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TrayMenuEntry {
@@ -60,10 +65,57 @@ const TRAY_MENU_LAYOUT: [TrayMenuEntry; 12] = [
     TrayMenuEntry::Action(QUIT),
 ];
 
+fn hotkey_label(value: &str) -> String {
+    const FALLBACK: &str = "Ctrl+`";
+    if value.chars().any(char::is_control) {
+        return FALLBACK.into();
+    }
+    let Ok(shortcut) = crate::shortcut::parse(value) else {
+        return FALLBACK.into();
+    };
+    let mut parts = Vec::new();
+    for (modifier, label) in [
+        (Modifiers::CONTROL, "Ctrl"),
+        (Modifiers::ALT, "Alt"),
+        (Modifiers::SHIFT, "Shift"),
+        (Modifiers::SUPER, "Win"),
+    ] {
+        if shortcut.mods.contains(modifier) {
+            parts.push(label.to_owned());
+        }
+    }
+    let key = shortcut.key.to_string();
+    let key = match key.as_str() {
+        "Backquote" => "`".into(),
+        "ArrowUp" => "↑".into(),
+        "ArrowDown" => "↓".into(),
+        "ArrowLeft" => "←".into(),
+        "ArrowRight" => "→".into(),
+        _ => key
+            .strip_prefix("Key")
+            .filter(|key| key.len() == 1)
+            .map(str::to_owned)
+            .or_else(|| key.strip_prefix("Digit").map(str::to_owned))
+            .or_else(|| key.strip_prefix("Numpad").map(|key| format!("小键盘{key}")))
+            .unwrap_or(key),
+    };
+    parts.push(key);
+    parts.join("+")
+}
+
+/// 生产菜单构造、后续刷新和测试共用；Tab 只是菜单文字，accelerator 参数仍为 None。
+fn open_panel_label(hotkey: &str) -> String {
+    format!("打开拈来\t{}", hotkey_label(hotkey))
+}
+
+/// refresh 与测试共用同一 setter 路径；测试用 fake sink 观察真实刷新调用，而非另算标签自证。
+fn refresh_open_panel_label(hotkey: &str, set_text: impl FnOnce(String)) {
+    set_text(open_panel_label(hotkey));
+}
+
 // 静态文字由生产构造与测试共同读取；动态状态和暂停文字仍由 tray_view 刷新。
 fn static_menu_label(id: &str) -> Option<&'static str> {
     match id {
-        OPEN_PANEL => Some("打开拈来"),
         IGNORE_NEXT => Some("下一次复制不记"),
         AUTOSTART => Some("开机时启动"),
         ABOUT => Some("关于拈来"),
@@ -263,6 +315,13 @@ pub(crate) fn fire_settings_change() {
     }
 }
 
+/// 设置保存的生产协调入口：只有 hotkey 变化才请求既有托盘 refresh。
+pub(crate) fn notify_hotkey_settings_saved(update_hotkey: bool) {
+    if update_hotkey {
+        fire_settings_change();
+    }
+}
+
 /// 从真实健康状态刷新图标、首行、暂停文字和 tooltip。
 pub fn refresh(app: &AppHandle) {
     let Some(controller) = app.try_state::<Controller>() else {
@@ -281,6 +340,13 @@ pub fn refresh(app: &AppHandle) {
         let _ = tray.set_tooltip(Some(view.tooltip));
     }
     if let Some(items) = app.try_state::<TrayMenuItems>() {
+        let hotkey = app
+            .try_state::<Store>()
+            .map(|settings| settings.get().hotkey)
+            .unwrap_or_else(|| "Ctrl+`".into());
+        refresh_open_panel_label(&hotkey, |label| {
+            let _ = items.open.set_text(label);
+        });
         let _ = items.status.set_text(view.status_line);
         let _ = items.pause.set_text(view.pause_label);
         let _ = items.ignore.set_checked(view.ignore_next);
@@ -290,9 +356,11 @@ pub fn refresh(app: &AppHandle) {
 
 /// 菜单项句柄，供 refresh 就地改字。
 struct TrayMenuItems {
+    open: MenuItem<Wry>,
     status: MenuItem<Wry>,
     pause: MenuItem<Wry>,
     ignore: CheckMenuItem<Wry>,
+    autostart: CheckMenuItem<Wry>,
 }
 
 pub fn single_instance() -> TauriPlugin<Wry> {
@@ -308,6 +376,47 @@ pub fn autostart() -> TauriPlugin<Wry> {
     tauri_plugin_autostart::Builder::new().build()
 }
 
+#[tauri::command]
+pub fn get_autostart(app: AppHandle) -> Result<bool, String> {
+    let query = app.autolaunch().is_enabled();
+    // 设置页初次进入、重进和聚焦读取时，也把托盘菜单同步到同一真实状态。
+    if let Some(items) = app.try_state::<TrayMenuItems>() {
+        apply_autostart_state(&app, &items.autostart, &query);
+    }
+    query.map_err(|error| {
+        record(&app, "开机自启：状态查询失败");
+        format!("没读到开机启动状态，再试一次（{error}）")
+    })
+}
+
+#[tauri::command]
+pub fn set_autostart(app: AppHandle, enabled: bool) -> Result<bool, String> {
+    let manager = app.autolaunch();
+    let (write, query) = write_autostart(
+        enabled,
+        |enabled| {
+            if enabled {
+                manager.enable()
+            } else {
+                manager.disable()
+            }
+        },
+        || manager.is_enabled(),
+    );
+    // 设置页和托盘始终展示同一次插件回读；失败也同步真实状态，不能按请求值打勾。
+    if let Some(items) = app.try_state::<TrayMenuItems>() {
+        apply_autostart_state(&app, &items.autostart, &query);
+    }
+    write.map_err(|error| {
+        record(&app, "开机自启：设置未完成，已重新查询状态");
+        format!("开机启动没改成，再试一次（{error}）")
+    })?;
+    query.map_err(|error| {
+        record(&app, "开机自启：设置后回读失败");
+        format!("没读到开机启动状态，再试一次（{error}）")
+    })
+}
+
 pub fn setup(app: &AppHandle, logger: &Logger) -> Result<(), Box<dyn std::error::Error>> {
     logger.event("单实例：主实例", json!({}));
     // 第一行只说状态，不可点；暂停/故障时它和图标一起变。
@@ -315,9 +424,9 @@ pub fn setup(app: &AppHandle, logger: &Logger) -> Result<(), Box<dyn std::error:
     let open = MenuItem::with_id(
         app,
         OPEN_PANEL,
-        static_menu_label(OPEN_PANEL).expect("静态菜单文字与布局不一致"),
+        open_panel_label(&app.state::<Store>().get().hotkey),
         true,
-        None::<&str>,
+        OPEN_PANEL_ACCELERATOR,
     )?;
     let settings = MenuItem::with_id(app, SETTINGS, "设置…", true, None::<&str>)?;
     let about = MenuItem::with_id(
@@ -404,9 +513,11 @@ pub fn setup(app: &AppHandle, logger: &Logger) -> Result<(), Box<dyn std::error:
     };
     on_settings_change(settings_callback);
     app.manage(TrayMenuItems {
+        open: open.clone(),
         status: status.clone(),
         pause: pause.clone(),
         ignore: ignore.clone(),
+        autostart: autostart.clone(),
     });
     let menu_autostart = autostart.clone();
     let initial = tauri::image::Image::from_bytes(RECORDING_16)?;
@@ -474,7 +585,7 @@ pub fn setup(app: &AppHandle, logger: &Logger) -> Result<(), Box<dyn std::error:
                 if update.is_err() {
                     record(app, "开机自启：设置未完成，已重新查询状态");
                 }
-                apply_autostart_state(app, &menu_autostart, query);
+                apply_autostart_state(app, &menu_autostart, &query);
             }
             QUIT => {
                 record(app, "托盘：请求退出");
@@ -501,7 +612,7 @@ pub fn setup(app: &AppHandle, logger: &Logger) -> Result<(), Box<dyn std::error:
                     ..
                 } => {
                     let app = tray.app_handle();
-                    apply_autostart_state(app, &autostart, app.autolaunch().is_enabled());
+                    apply_autostart_state(app, &autostart, &app.autolaunch().is_enabled());
                     refresh(app);
                 }
                 _ => {}
@@ -591,6 +702,16 @@ impl AutostartMenuState {
     }
 }
 
+fn write_autostart<E>(
+    enabled: bool,
+    mut set_enabled: impl FnMut(bool) -> Result<(), E>,
+    mut query: impl FnMut() -> Result<bool, E>,
+) -> (Result<(), E>, Result<bool, E>) {
+    // 无论写入成败都回读插件状态；请求值只用于写入，绝不当成实际结果返回。
+    let update = set_enabled(enabled);
+    (update, query())
+}
+
 fn update_autostart<E>(
     mut query: impl FnMut() -> Result<bool, E>,
     mut set_enabled: impl FnMut(bool) -> Result<(), E>,
@@ -613,9 +734,9 @@ fn autostart_menu_state(
 fn apply_autostart_state(
     app: &AppHandle,
     item: &CheckMenuItem<Wry>,
-    query: Result<bool, tauri_plugin_autostart::Error>,
+    query: &Result<bool, tauri_plugin_autostart::Error>,
 ) {
-    let state = autostart_menu_state(app, &query);
+    let state = autostart_menu_state(app, query);
     let checked = item.set_checked(state.checked);
     let enabled = item.set_enabled(state.enabled);
     if checked.is_err() || enabled.is_err() {
@@ -784,6 +905,29 @@ mod tests {
     }
 
     #[test]
+    fn hotkey_save_notification_calls_the_registered_refresh_only_for_hotkey_updates() {
+        let _guard = MESSAGE_TEST_LOCK.lock().unwrap();
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = Arc::new(AtomicUsize::new(0));
+        let callback = {
+            let calls = calls.clone();
+            Arc::new(move || {
+                calls.fetch_add(1, Ordering::Relaxed);
+            })
+        };
+        on_settings_change(callback);
+        notify_hotkey_settings_saved(false);
+        assert_eq!(calls.load(Ordering::Relaxed), 0, "非呼出键保存不刷新标签");
+        notify_hotkey_settings_saved(true);
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            1,
+            "呼出键保存必须进入生产 refresh 回调"
+        );
+        shutdown();
+    }
+
+    #[test]
     fn shutdown_releases_the_registered_callback_and_clears_its_slot() {
         let _guard = MESSAGE_TEST_LOCK.lock().unwrap();
         let callback: Arc<dyn Fn() + Send + Sync> = Arc::new(|| {});
@@ -842,7 +986,6 @@ mod tests {
         assert_eq!(
             labels,
             [
-                (OPEN_PANEL, "打开拈来"),
                 (IGNORE_NEXT, "下一次复制不记"),
                 (AUTOSTART, "开机时启动"),
                 (ABOUT, "关于拈来"),
@@ -1043,5 +1186,112 @@ mod tests {
                 enabled: false,
             }
         );
+    }
+
+    fn refreshed_open_panel_labels(hotkey: &str) -> Vec<String> {
+        let mut labels = Vec::new();
+        refresh_open_panel_label(hotkey, |label| labels.push(label));
+        labels
+    }
+
+    #[test]
+    fn open_panel_label_shows_current_hotkey_with_safe_fallbacks() {
+        assert_eq!(refreshed_open_panel_labels("Ctrl+`"), ["打开拈来\tCtrl+`"]);
+        assert_eq!(
+            refreshed_open_panel_labels("Ctrl+Shift+F11"),
+            ["打开拈来\tCtrl+Shift+F11"]
+        );
+        assert_eq!(
+            refreshed_open_panel_labels("shift+control+KeyK"),
+            ["打开拈来\tCtrl+Shift+K"]
+        );
+        for invalid in ["", "   ", "not-a-key", "Ctrl+\tF11", "Ctrl+\nF11"] {
+            assert_eq!(
+                refreshed_open_panel_labels(invalid),
+                ["打开拈来\tCtrl+`"],
+                "{invalid:?}"
+            );
+        }
+        assert_eq!(
+            refreshed_open_panel_labels("Ctrl+`").len(),
+            1,
+            "刷新必须调用一次真实文字 sink"
+        );
+        assert_eq!(open_panel_label("Ctrl+`").matches('\t').count(), 1);
+        assert!(!open_panel_label("Ctrl+`").contains("undefined"));
+        assert!(
+            OPEN_PANEL_ACCELERATOR.is_none(),
+            "标签文字不得变成第二个快捷键"
+        );
+        assert!(matches!(
+            TRAY_MENU_LAYOUT[2],
+            TrayMenuEntry::Action(OPEN_PANEL)
+        ));
+    }
+
+    #[test]
+    fn saved_and_reloaded_hotkey_drive_the_same_open_panel_label() {
+        let directory = crate::settings::tests::Directory::new();
+        let path = directory.0.join("settings.json");
+        let (store, _) = crate::settings::Store::load(path.clone());
+        assert_eq!(
+            refreshed_open_panel_labels(&store.get().hotkey),
+            ["打开拈来\tCtrl+`"]
+        );
+        let (saved, _) =
+            crate::settings::save(&store, json!({"hotkey":"Ctrl+Shift+F11"}), |_| {}, |_| {})
+                .unwrap();
+        assert_eq!(
+            refreshed_open_panel_labels(&saved.hotkey),
+            ["打开拈来\tCtrl+Shift+F11"]
+        );
+        let (reloaded, issues) = crate::settings::Store::load(path);
+        assert!(issues.is_empty());
+        assert_eq!(
+            refreshed_open_panel_labels(&reloaded.get().hotkey),
+            ["打开拈来\tCtrl+Shift+F11"]
+        );
+    }
+
+    #[test]
+    fn direct_autostart_write_always_reads_back_and_external_state_wins() {
+        let calls = std::cell::RefCell::new(Vec::new());
+        let (write, query) = write_autostart(
+            true,
+            |enabled| {
+                calls.borrow_mut().push(format!("设置:{enabled}"));
+                Ok::<_, &str>(())
+            },
+            || {
+                calls.borrow_mut().push("回读".into());
+                Ok(false)
+            },
+        );
+        assert_eq!(write, Ok(()));
+        assert_eq!(query, Ok(false), "外部 false 优先于请求 true");
+        assert_eq!(*calls.borrow(), ["设置:true", "回读"]);
+    }
+
+    #[test]
+    fn direct_autostart_write_failure_still_queries_actual_state() {
+        let mut queried = false;
+        let (write, query) = write_autostart(
+            true,
+            |_| Err("写失败"),
+            || {
+                queried = true;
+                Ok(false)
+            },
+        );
+        assert_eq!(write, Err("写失败"));
+        assert_eq!(query, Ok(false));
+        assert!(queried);
+    }
+
+    #[test]
+    fn direct_autostart_readback_failure_is_not_a_success() {
+        let (write, query) = write_autostart(true, |_| Ok::<_, &str>(()), || Err("回读失败"));
+        assert_eq!(write, Ok(()));
+        assert_eq!(query, Err("回读失败"));
     }
 }

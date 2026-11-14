@@ -271,6 +271,12 @@ impl Session<'_> {
 /// 录制最长时长：设置页异常关闭、没来得及恢复时，到点自动把呼出键注册回来。
 const PAUSE_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
 
+fn restore_expired_pause(state: &mut State, generation: u64, backend: &impl Backend) {
+    if state.pause_generation == generation && state.paused.is_some() {
+        let _ = state.pause(false, backend);
+    }
+}
+
 #[tauri::command]
 pub async fn pause_hotkey(app: AppHandle, paused: bool) -> Result<(), String> {
     // 注册/注销由插件派回主线程；不能在主线程持锁等待它们完成（同 set_settings）。
@@ -293,9 +299,7 @@ pub async fn pause_hotkey(app: AppHandle, paused: bool) -> Result<(), String> {
                     std::thread::sleep(PAUSE_LIMIT);
                     let runtime = app.state::<Runtime>();
                     let mut state = runtime.state.lock().unwrap();
-                    if state.pause_generation == generation && state.paused.is_some() {
-                        let _ = state.pause(false, &SystemBackend(&app));
-                    }
+                    restore_expired_pause(&mut state, generation, &SystemBackend(&app));
                 });
         }
         Ok(())
@@ -626,6 +630,33 @@ mod tests {
         automatic.apply("Ctrl+`", &backend);
         assert!(backend.calls.borrow().is_empty());
         assert!(automatic.status.disabled);
+    }
+
+    #[test]
+    fn expired_recording_pause_restores_only_the_same_generation_after_30_seconds() {
+        assert_eq!(PAUSE_LIMIT, std::time::Duration::from_secs(30));
+        let mut state = State::default();
+        let backend = Fake::default();
+        state.apply("Ctrl+`", &backend);
+        state.pause(true, &backend).unwrap();
+        let generation = state.pause_generation;
+        backend.calls.borrow_mut().clear();
+        restore_expired_pause(&mut state, generation + 1, &backend);
+        assert!(
+            backend.calls.borrow().is_empty(),
+            "旧计时器不能恢复新一轮录制"
+        );
+        assert!(state.paused.is_some());
+        restore_expired_pause(&mut state, generation, &backend);
+        assert!(state.paused.is_none());
+        assert_eq!(state.active, Some(key("Ctrl+`")));
+        assert_eq!(
+            *backend.calls.borrow(),
+            [
+                format!("register:{}", key("Ctrl+`")),
+                format!("panel:{}", key("Ctrl+`"))
+            ]
+        );
     }
 
     #[test]

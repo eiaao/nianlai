@@ -87,7 +87,7 @@
     busy = true; error = ""; notice = "";
     try {
       const moved = await ipc.trashItems(picked.map((item) => item.id));
-      notice = `已移到回收站 ${moved} 张，7 天内可以在回收站里恢复`;
+      notice = `已移到回收站 ${moved} 张，7 天内能拿回来`;
       selected = new Set();
       await load();
       onchange();
@@ -99,7 +99,7 @@
   }
 </script>
 
-<div><p class="page-intro">截图、浏览器里复制的图片没有源文件，存在历史库里。选中的移到回收站，7 天后彻底删除；常用的不能选。</p></div>
+<div><p class="page-intro">截图、浏览器里复制的图片没有原文件，存在拈来里。选中的移到回收站，7 天内能拿回来；常用牌不能选。</p></div>
 
 <div class="card picker">
   <div class="toolbar">
@@ -113,7 +113,7 @@
   {#if items === null}
     {#if !error}<p class="note">正在读取…</p>{/if}
   {:else if !shown.length}
-    <p class="note">{items.length ? "这个范围里没有图片。" : "历史里没有存在库里的图片。"}</p>
+    <p class="note">{items.length ? "这个范围里没有图片。" : "还没有存在拈来里的图片。"}</p>
   {:else}
     <div class="grid" role="listbox" aria-multiselectable="true" aria-label="图片">
       {#each shown as item (item.id)}
@@ -136,22 +136,22 @@
 
 <style>
   .picker { display: flex; flex-direction: column; }
-  .toolbar { display: flex; align-items: center; gap: 8px; padding: 10px 16px; border-bottom: 1px solid var(--settings-line); color: var(--settings-muted); font-size: 11px; }
+  .toolbar { display: flex; align-items: center; gap: 8px; padding: 10px 16px; border-bottom: 1px solid var(--settings-line); color: var(--settings-muted); font-size: 12px; }
   .toolbar.foot { border-top: 1px solid var(--settings-line); border-bottom: 0; }
   .toolbar label { display: flex; align-items: center; gap: 6px; }
   .toolbar select { min-width: 0; min-height: 28px; }
   .grow { flex: 1; }
-  .note { margin: 0; padding: 14px 16px; color: var(--settings-muted); font-size: 11px; }
+  .note { margin: 0; padding: 14px 16px; color: var(--settings-muted); font-size: 12px; }
   .note.error { color: var(--state-critical); }
   .grid { max-height: 380px; overflow: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(108px, 1fr)); gap: 8px; padding: 12px 16px; }
   .thumb { position: relative; aspect-ratio: 4 / 3; min-height: 0; padding: 0; overflow: hidden; border: 1px solid var(--settings-line); border-radius: var(--radius-sm); background: var(--settings-selected); }
   .thumb img { width: 100%; height: 100%; display: block; object-fit: cover; }
   .thumb.on { outline: 2px solid var(--settings-accent); outline-offset: -2px; }
   .thumb.fav { opacity: .45; cursor: default; }
-  .thumb b { position: absolute; right: 4px; top: 4px; width: 15px; height: 15px; display: grid; place-items: center; border: 1px solid var(--settings-line); border-radius: var(--radius-sm); background: var(--settings-card); color: var(--settings-accent); font-size: 10px; }
-  .thumb .label { position: absolute; left: 0; right: 0; bottom: 0; padding: 2px 5px; background: color-mix(in srgb, var(--settings-card) 82%, transparent); color: var(--settings-text); font: 9px var(--font-mono); text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .broken { position: absolute; inset: 0; display: grid; place-items: center; color: var(--settings-muted); font-size: 10px; }
-  button { min-height: 28px; padding: 3px 12px; border: 1px solid var(--settings-line); border-radius: var(--radius-sm); background: var(--settings-selected); font-size: 11px; }
+  .thumb b { position: absolute; right: 4px; top: 4px; width: 15px; height: 15px; display: grid; place-items: center; border: 1px solid var(--settings-line); border-radius: var(--radius-sm); background: var(--settings-card); color: var(--settings-accent); font-size: 12px; }
+  .thumb .label { position: absolute; left: 0; right: 0; bottom: 0; padding: 2px 5px; background: color-mix(in srgb, var(--settings-card) 82%, transparent); color: var(--settings-text); font: 12px var(--font-mono); text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .broken { position: absolute; inset: 0; display: grid; place-items: center; color: var(--settings-muted); font-size: 12px; }
+  button { min-height: 28px; padding: 3px 12px; border: 1px solid var(--settings-line); border-radius: var(--radius-sm); background: var(--settings-selected); font-size: 12px; }
   button.primary { border-color: var(--settings-accent); color: var(--settings-accent); font-weight: 600; }
   button:disabled { opacity: .6; }
   .thumb:disabled { opacity: 1; }
