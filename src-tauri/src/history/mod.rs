@@ -593,6 +593,13 @@ impl History {
         {
             // 内容没变，只让托盘健康外观刷新；不得多发普通面板历史事件。
             self.notify_health_changed();
+        } else if result.is_ok()
+            && self.store_health() == crate::health::StoreHealth::Failed
+            && !self.db().is_memory()
+        {
+            // 同一磁盘库已经真实写成功才恢复；内存降级可写不代表磁盘故障消失。
+            self.set_store_health(crate::health::StoreHealth::Ready);
+            self.notify_health_changed();
         }
         // 错误只进日志（采集线程），不给用户看，保持原始文本。
         result.map_err(|e| e.to_string())
@@ -1156,6 +1163,109 @@ mod startup_tests {
             1,
             "只独立通知托盘健康"
         );
+    }
+
+    #[test]
+    fn task14_disk_ingest_success_recovers_failed_health_once() {
+        let directory = Directory::new();
+        let directories = directories(&directory);
+        let logger = Logger::with_settings(&directories, 20).unwrap();
+        let history = History::new(nianlai_store::hash::sha256, logger);
+        history.initialize();
+        let panel_events = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let health_events = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let panel_counter = panel_events.clone();
+        history.set_changed(Arc::new(move || {
+            panel_counter.fetch_add(1, Ordering::Relaxed);
+        }));
+        let health_counter = health_events.clone();
+        history.set_health_changed(Arc::new(move || {
+            health_counter.fetch_add(1, Ordering::Relaxed);
+        }));
+        let now = Instant::now();
+        let ingest = |text: &str, sequence: u32| {
+            history.ingest(
+                Content::text(text, nianlai_store::hash::sha256).unwrap(),
+                CopyEvent {
+                    time_ms: 1_700_000_000_000 + u64::from(sequence),
+                    sequence,
+                    source_process: "health-test.exe".into(),
+                    source_path: String::new(),
+                    owner_process: "health-test.exe".into(),
+                    owner_pid: 1,
+                    observed: now,
+                },
+                false,
+                now,
+            )
+        };
+
+        history.inject_store_error(nianlai_store::Error::Sqlite(13));
+        ingest("故障中的写入", 1).unwrap_err();
+        assert_eq!(history.health().store, crate::health::StoreHealth::Failed);
+        assert_eq!(health_events.load(Ordering::Relaxed), 1);
+
+        let recovered = ingest("磁盘恢复后的真实记录", 2).unwrap();
+        assert_eq!(history.health().store, crate::health::StoreHealth::Ready);
+        assert_eq!(health_events.load(Ordering::Relaxed), 2, "恢复只通知一次");
+        let id = recovered.record_id.unwrap();
+        assert!(
+            history.load(id).unwrap().is_some(),
+            "恢复后的真实磁盘记录可读"
+        );
+        assert_eq!(
+            panel_events.load(Ordering::Relaxed),
+            0,
+            "健康恢复不新增面板历史事件"
+        );
+
+        ingest("恢复后的第二次真实记录", 3).unwrap();
+        assert_eq!(history.health().store, crate::health::StoreHealth::Ready);
+        assert_eq!(
+            health_events.load(Ordering::Relaxed),
+            2,
+            "后续成功不反复通知恢复"
+        );
+        assert_eq!(panel_events.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn task14_memory_ingest_does_not_fake_disk_health_recovery() {
+        let directory = Directory::new();
+        let directories = directories(&directory);
+        let logger = Logger::with_settings(&directories, 20).unwrap();
+        let history = History::new(nianlai_store::hash::sha256, logger);
+        history.initialize();
+        history.fall_back_to_memory("存东西的文件出了问题");
+        let health_events = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let health_counter = health_events.clone();
+        history.set_health_changed(Arc::new(move || {
+            health_counter.fetch_add(1, Ordering::Relaxed);
+        }));
+        let now = Instant::now();
+        let saved = history
+            .ingest(
+                Content::text("内存降级中的真实记录", nianlai_store::hash::sha256).unwrap(),
+                CopyEvent {
+                    time_ms: 1_700_000_000_000,
+                    sequence: 1,
+                    source_process: "health-test.exe".into(),
+                    source_path: String::new(),
+                    owner_process: "health-test.exe".into(),
+                    owner_pid: 1,
+                    observed: now,
+                },
+                false,
+                now,
+            )
+            .unwrap();
+        assert_eq!(history.health().store, crate::health::StoreHealth::Failed);
+        assert_eq!(
+            health_events.load(Ordering::Relaxed),
+            0,
+            "内存可写不等于磁盘恢复"
+        );
+        assert!(history.load(saved.record_id.unwrap()).unwrap().is_some());
     }
 
     // 命令层（lib.rs）拿到的就是这个 History 句柄，磁盘与内存模式行为一致（M1-S）。

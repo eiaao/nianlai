@@ -6,10 +6,14 @@
 """
 from __future__ import annotations
 
+import importlib.util
 import os
 import re
 import struct
 import sys
+import tempfile
+import types
+import unittest.mock
 import zlib
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -109,7 +113,106 @@ def assert_grid_equal(actual, expected, what: str) -> None:
     assert len(actual) == len(expected), f"{what} 尺寸不符"
     for y, (row_a, row_e) in enumerate(zip(actual, expected)):
         for x, (a, e) in enumerate(zip(row_a, row_e)):
-            assert a == e, f"{what} 在 ({x},{y}) 像素 {a} ≠ 手绘源 {e}"
+            assert a == e, f"{what} 在 ({x},{y}) 像素 {a} ≠ 期望源 {e}"
+
+
+def read_ico_entries(data: bytes) -> dict[int, bytes]:
+    assert data[:4] == b"\x00\x00\x01\x00", "ICO 头不对"
+    (count,) = struct.unpack("<H", data[4:6])
+    assert count > 0 and len(data) >= 6 + count * 16, "ICO 目录越界"
+    entries = {}
+    for i in range(count):
+        start = 6 + i * 16
+        width = data[start] or 256
+        height = data[start + 1] or 256
+        assert width == height, f"ICO 第 {i} 项宽高不符：{width}×{height}"
+        assert width not in entries, f"ICO 尺寸重复：{width}"
+        (length, offset) = struct.unpack("<II", data[start + 8:start + 16])
+        assert offset >= 6 + count * 16 and offset + length <= len(data), f"ICO {width} 档越界"
+        entries[width] = data[offset:offset + length]
+    return entries
+
+
+def decode_ico_entry(size: int, payload: bytes):
+    if payload[:8] == b"\x89PNG\r\n\x1a\n":
+        width, height, grid = png_rgba(payload)
+        assert (width, height) == (size, size), f"ICO {size} PNG 是 {width}×{height}"
+        return grid
+    # BMP 条目：BITMAPINFOHEADER + 自底向上 BGRA + AND 掩码。
+    assert len(payload) >= 40, f"ICO {size} BMP 头截断"
+    (header_size,) = struct.unpack("<I", payload[:4])
+    (width_i, h2) = struct.unpack("<ii", payload[4:12])
+    (planes, bpp) = struct.unpack("<HH", payload[12:16])
+    assert header_size == 40 and width_i == size and h2 == size * 2, f"{size} 档 BMP 尺寸不合规"
+    assert planes == 1 and bpp == 32, f"{size} 档 BMP 格式不合规"
+    height = h2 // 2
+    stride = ((size * 4 + 3) // 4) * 4
+    mask_row = ((size + 31) // 32) * 4
+    assert len(payload) >= 40 + stride * height + mask_row * height, f"ICO {size} BMP 像素或掩码越界"
+    grid = []
+    for y in range(height):
+        row = []
+        base = 40 + (height - 1 - y) * stride
+        for x in range(size):
+            b, g, r, a = payload[base + x * 4:base + x * 4 + 4]
+            row.append((r, g, b, a))
+        grid.append(row)
+    return grid
+
+
+def load_generator():
+    spec = importlib.util.spec_from_file_location("nianlai_build_icons_under_test", GENERATOR)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def expect_raises(exception, run, what: str):
+    try:
+        run()
+    except exception as error:
+        return error
+    raise AssertionError(f"{what} 应抛出 {exception.__name__}")
+
+
+def tree_snapshot(root: str):
+    if not os.path.exists(root):
+        return None
+    snapshot = {}
+    for base, directories, files in os.walk(root):
+        directories.sort()
+        files.sort()
+        relative_base = os.path.relpath(base, root)
+        if relative_base != ".":
+            snapshot[relative_base.replace(os.sep, "/") + "/"] = None
+        for name in files:
+            path = os.path.join(base, name)
+            relative = os.path.relpath(path, root).replace(os.sep, "/")
+            with open(path, "rb") as source:
+                snapshot[relative] = source.read()
+    return snapshot
+
+
+def fake_grid(size: int):
+    color = (size % 256, 80, 120, 255)
+    return [[color for _ in range(size)] for _ in range(size)]
+
+
+def run_generator(module, output: str):
+    with unittest.mock.patch.object(module.sys, "argv", ["build_icons.py", "--output", output]):
+        return module.main()
+
+
+def seeded_output(parent: str) -> str:
+    output = os.path.join(parent, "custom-icons")
+    os.makedirs(os.path.join(output, "source"))
+    with open(os.path.join(output, "source", "keep.txt"), "wb") as target:
+        target.write(b"source must survive\x00\xff")
+    with open(os.path.join(output, "icon.png"), "wb") as target:
+        target.write(b"the only old icon")
+    with open(os.path.join(output, "unrelated.bin"), "wb") as target:
+        target.write(bytes(range(256)))
+    return output
 
 
 def main() -> int:
@@ -120,7 +223,7 @@ def main() -> int:
         try:
             run()
             print(f"PASS  {name}")
-        except (AssertionError, OSError, struct.error, ValueError, KeyError, IndexError, zlib.error) as error:
+        except (AssertionError, OSError, RuntimeError, struct.error, ValueError, KeyError, IndexError, zlib.error) as error:
             failures.append(f"{name}: {error}")
             print(f"FAIL  {name}: {error}")
 
@@ -140,53 +243,103 @@ def main() -> int:
             assert (width, height) == (size, size), f"{name} 是 {width}×{height}，应为 {size}"
         check(f"PNG 尺寸 {name}={size}", png_size)
 
-    # 2. ICO：五档齐全；16/24 像素等于手绘源（不能从 256 缩小）。
+    # 2. ICO：五档齐全，所有载荷都解码并与对应生产源逐像素比较。
     def ico_has_all_sizes():
         data = open(os.path.join(icons, "icon.ico"), "rb").read()
-        assert data[:4] == b"\x00\x00\x01\x00", "ICO 头不对"
-        (count,) = struct.unpack("<H", data[4:6])
-        sizes = set()
-        for i in range(count):
-            width = data[6 + i * 16] or 256
-            height = data[7 + i * 16] or 256
-            assert width == height, f"ICO 第 {i} 项宽高不符：{width}×{height}"
-            assert width not in sizes, f"ICO 尺寸重复：{width}"
-            sizes.add(width)
-        assert sizes == ICO_REQUIRED, f"ICO 应严格为 {sorted(ICO_REQUIRED)}，实际 {sorted(sizes)}"
+        entries = read_ico_entries(data)
+        assert set(entries) == ICO_REQUIRED, f"ICO 应严格为 {sorted(ICO_REQUIRED)}，实际 {sorted(entries)}"
     check("ICO 包含 16/24/32/48/256", ico_has_all_sizes)
 
     def ico_entry_matches_source():
         data = open(os.path.join(icons, "icon.ico"), "rb").read()
-        (count,) = struct.unpack("<H", data[4:6])
-        entries = {}
-        for i in range(count):
-            width = data[6 + i * 16] or 256
-            assert width not in entries, f"ICO 尺寸重复：{width}"
-            (length, offset) = struct.unpack("<II", data[6 + i * 16 + 8:6 + i * 16 + 16])
-            assert offset >= 6 + count * 16 and offset + length <= len(data), f"ICO {width} 档越界"
-            entries[width] = data[offset:offset + length]
-        for size, source_name in ((16, "app-16.svg"), (24, "app-24.svg")):
-            payload = entries[size]
-            expected = pixel_svg_grid(os.path.join(SOURCE, source_name))
-            if payload[:8] == b"\x89PNG\r\n\x1a\n":
-                _, _, grid = png_rgba(payload)
-            else:  # BMP 条目：BITMAPINFOHEADER + 自底向上 BGRA + AND 掩码
-                (width_i, h2) = struct.unpack("<ii", payload[4:12])
-                (bpp,) = struct.unpack("<H", payload[14:16])
-                assert width_i == size and bpp == 32, f"{size} 档 BMP 头不合规"
-                height = h2 // 2
-                stride = ((size * 4 + 3) // 4) * 4
-                start = 40
-                grid = []
-                for y in range(height):
-                    row = []
-                    base = start + (height - 1 - y) * stride
-                    for x in range(size):
-                        b, g, r, a = payload[base + x * 4:base + x * 4 + 4]
-                        row.append((r, g, b, a))
-                    grid.append(row)
+        entries = read_ico_entries(data)
+        for size, source_name in (
+            (16, "source/app-16.svg"),
+            (24, "source/app-24.svg"),
+            (32, "32x32.png"),
+            (48, "Square48x48Logo.png"),
+            (256, "128x128@2x.png"),
+        ):
+            if source_name.endswith(".svg"):
+                expected = pixel_svg_grid(os.path.join(icons, source_name))
+            else:
+                width, height, expected = png_rgba(open(os.path.join(icons, source_name), "rb").read())
+                assert (width, height) == (size, size), f"生产 PNG {source_name} 尺寸不符"
+            grid = decode_ico_entry(size, entries[size])
             assert_grid_equal(grid, expected, f"ICO {size} 档")
-    check("ICO 16/24 与手绘源逐像素一致", ico_entry_matches_source)
+    check("ICO 16/24/32/48/256 与对应生产源逐像素一致", ico_entry_matches_source)
+
+    def edge_nonzero_rejects_even_with_decodable_screenshot():
+        module = load_generator()
+        with tempfile.TemporaryDirectory(prefix="nianlai-icon-edge-red-") as work:
+            def nonzero(command, **kwargs):
+                shot_arg = next(arg for arg in command if arg.startswith("--screenshot="))
+                shot = shot_arg.split("=", 1)[1]
+                with open(shot, "wb") as target:
+                    target.write(module.encode_png(fake_grid(32)))
+                return types.SimpleNamespace(returncode=23, stderr="mock Edge failed")
+            with unittest.mock.patch.object(module.subprocess, "run", side_effect=nonzero):
+                error = expect_raises(
+                    RuntimeError,
+                    lambda: module.render_vector(work, 32, "app-32.svg"),
+                    "Edge 非零返回码",
+                )
+            assert "32" in str(error) and "returncode=23" in str(error), error
+    check("Edge 非零返回码拒绝可解码截图", edge_nonzero_rejects_even_with_decodable_screenshot)
+
+    def render_failure_preserves_custom_output():
+        module = load_generator()
+        with tempfile.TemporaryDirectory(prefix="nianlai-icon-atomic-red-") as parent:
+            output = seeded_output(parent)
+            before = tree_snapshot(output)
+            def fail_midway(work, size, source_name):
+                if size == 64:
+                    raise RuntimeError("mock 渲染中途失败")
+                return fake_grid(size)
+            with unittest.mock.patch.object(module, "render_vector", side_effect=fail_midway):
+                expect_raises(RuntimeError, lambda: run_generator(module, output), "渲染中途失败")
+            assert tree_snapshot(output) == before, "失败前原 custom output 已逐字节改变"
+            assert os.listdir(parent) == ["custom-icons"], "失败后不得留下 staging/backup"
+    check("渲染中途失败保持自定义输出逐字节不变", render_failure_preserves_custom_output)
+
+    def commit_failure_rolls_back_custom_output():
+        module = load_generator()
+        with tempfile.TemporaryDirectory(prefix="nianlai-icon-rollback-") as parent:
+            output = seeded_output(parent)
+            before = tree_snapshot(output)
+            real_replace = module.os.replace
+            replacements = 0
+            def fail_second_replace(source, target):
+                nonlocal replacements
+                replacements += 1
+                if replacements == 2:
+                    raise OSError("mock staging 提交失败")
+                return real_replace(source, target)
+            with unittest.mock.patch.object(module, "render_vector", side_effect=lambda work, size, source: fake_grid(size)), \
+                    unittest.mock.patch.object(module.os, "replace", side_effect=fail_second_replace):
+                expect_raises(OSError, lambda: run_generator(module, output), "staging 提交失败")
+            assert replacements >= 3, "提交失败后必须实际调用 rollback replace"
+            assert tree_snapshot(output) == before, "rollback 后原 output 应逐字节不变"
+            assert os.listdir(parent) == ["custom-icons"], "rollback 后不得留下 staging/backup"
+    check("提交替换失败 rollback 恢复原输出", commit_failure_rolls_back_custom_output)
+
+    def successful_custom_output_is_complete_and_preserves_source():
+        module = load_generator()
+        with tempfile.TemporaryDirectory(prefix="nianlai-icon-success-") as parent:
+            output = seeded_output(parent)
+            with unittest.mock.patch.object(module, "render_vector", side_effect=lambda work, size, source: fake_grid(size)):
+                assert run_generator(module, output) == 0
+            for name in TARGETS:
+                path = os.path.join(output, name)
+                assert os.path.isfile(path), f"成功产物缺少 {name}"
+                if name.endswith(".png"):
+                    width, height, _ = png_rgba(open(path, "rb").read())
+                    expected = PNG_SIZES.get(name, 32 if name.startswith("tray/") and name.endswith("-32.png") else 16 if name.endswith("-16.png") else 24)
+                    assert (width, height) == (expected, expected), f"{name} 尺寸 {width}×{height}"
+            assert open(os.path.join(output, "source", "keep.txt"), "rb").read() == b"source must survive\x00\xff"
+            assert open(os.path.join(output, "unrelated.bin"), "rb").read() == bytes(range(256))
+            assert os.listdir(parent) == ["custom-icons"], "成功后必须清理 staging/backup"
+    check("成功提交完整产物并保留 source 与既有内容", successful_custom_output_is_complete_and_preserves_source)
 
     # 3. ICNS：魔数与 PNG 载荷。
     def icns_magic():

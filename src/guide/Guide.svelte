@@ -176,7 +176,11 @@
 
     if (settingsResult.status === "fulfilled") {
       applySettings(settingsResult.value);
-      flow = GuideFlow.createState(settingsResult.value.guide);
+      const restored = GuideFlow.createState(settingsResult.value.guide);
+      // 手动重读排队后新产生的保存尚未执行，必须保留其 pending/token；已经失败并 dispatch 完的旧保存则可按磁盘状态重建。
+      const pending = flow.error === null ? flow.pending : null;
+      const nextToken = flow.nextToken;
+      flow = pending ? { ...restored, pending, nextToken } : restored;
       animationSeen = flow.guide.phase !== "await_copy";
     } else {
       loadError = errorMessage(settingsResult.reason, "还没读到设置，再试一次");
@@ -208,6 +212,11 @@
     loaded = true;
     acceptEvents = settingsResult.status === "fulfilled";
     requestAnimationFrame(() => syncHitRegions());
+  }
+
+  function retryLoad() {
+    // 初次 onMount 仍直接 load；只有手动重试排在已有持久化后，restore 新产生的保存接在此队列之后。
+    persistQueue = persistQueue.then(() => load());
   }
 
   function syncHitRegions() {
@@ -371,7 +380,7 @@
       {#if loadError}
         <div class="notice problem" role="alert">
           <p>{loadError}</p>
-          <button type="button" class="text-button" data-action="retry-load" onclick={() => void load()}>再试一次</button>
+          <button type="button" class="text-button" data-action="retry-load" onclick={retryLoad}>再试一次</button>
         </div>
       {/if}
       {#if runtimeError}<p class="notice problem" role="alert">{runtimeError}</p>{/if}

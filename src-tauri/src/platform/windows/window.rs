@@ -207,6 +207,15 @@ pub fn window_scale(panel: &WebviewWindow) -> f64 {
     if dpi == 0 { 1.0 } else { dpi as f64 / 96.0 }
 }
 
+/// 只有非空武装区域需要真实窗口 DPI；普通清除保持零新增原生查询。
+fn hit_region_scale(regions: &[HitRegion], armed: bool, read: impl FnOnce() -> f64) -> f64 {
+    if armed && !regions.is_empty() {
+        read()
+    } else {
+        1.0
+    }
+}
+
 /// 设置命中区域（主线程）。缩放按窗口 DPI 算，不信前端的 devicePixelRatio。
 /// 返回内容包围盒（客户区物理像素，未加边）；未武装或没有区域时为 None。
 pub fn set_hit_regions(
@@ -214,7 +223,8 @@ pub fn set_hit_regions(
     regions: &[HitRegion],
     armed: bool,
 ) -> Result<Option<NativeRegion>> {
-    set_hit_regions_at_scale(panel, regions, armed, window_scale(panel))
+    let scale = hit_region_scale(regions, armed, || window_scale(panel));
+    set_hit_regions_at_scale(panel, regions, armed, scale)
 }
 
 /// guide 初次展示前，窗口尚未移到目标屏，必须显式传目标 monitor 的 DPI。
@@ -2067,6 +2077,27 @@ mod tests {
         assert_eq!(
             layout.caret().unwrap(),
             serde_json::json!({"left":200.0,"top":200.0,"bottom":220.0})
+        );
+    }
+
+    #[test]
+    fn task14_hit_region_clear_does_not_read_window_dpi() {
+        let region = HitRegion {
+            left: 0.0,
+            top: 0.0,
+            right: 10.0,
+            bottom: 10.0,
+        };
+        for (regions, armed) in [(&[][..], true), (&[region][..], false)] {
+            assert_eq!(
+                hit_region_scale(regions, armed, || panic!("普通清除不得读取窗口 DPI")),
+                1.0
+            );
+        }
+        assert_eq!(
+            hit_region_scale(&[region], true, || 1.5),
+            1.5,
+            "非空武装仍读真实 DPI"
         );
     }
 

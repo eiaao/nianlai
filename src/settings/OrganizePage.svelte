@@ -1,5 +1,5 @@
 <script lang="ts">
-  // 常用牌：真实收藏顺序（E03）、标题和备注（E04）。结构操作共用一个队列，
+  // 常用牌：真实收藏顺序（E03）、标题和备注（E04）。读取与结构操作共用一个队列，
   // 每张牌的草稿由 FavoriteCard 各自串行保存；移出与撤销只调用既有常用 IPC。
   import { onMount, tick } from "svelte";
   import { flip } from "svelte/animate";
@@ -63,9 +63,9 @@
 
   onMount(() => {
     disposed = false;
-    void load();
+    void serialize(load);
     const refresh = () => {
-      if (!drag && !liveCards().some((card) => card.isOpen())) void load();
+      if (!drag && !liveCards().some((card) => card.isOpen())) void serialize(load);
     };
     window.addEventListener("focus", refresh);
     return () => {

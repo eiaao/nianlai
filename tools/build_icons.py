@@ -95,8 +95,10 @@ def render_vector(work: str, size: int, source_name: str) -> list[list[tuple[int
     ]
     done = subprocess.run(command, capture_output=True, text=True, timeout=60)
     if done.stderr.strip():
-        # 非阻断输出照抄给使用者判断。
+        # 非阻断输出照抄给使用者判断；是否失败只由返回码决定。
         print(f"[edge {size}] {done.stderr.strip()[:200]}", file=sys.stderr)
+    if done.returncode != 0:
+        raise RuntimeError(f"Edge 渲染 {size}×{size} 失败，returncode={done.returncode}")
     data = open(shot, "rb").read()
     grid = decode_png(data)
     assert len(grid) == size and len(grid[0]) == size, f"Edge 渲染 {size} 得到 {len(grid[0])}×{len(grid)}"
@@ -171,14 +173,43 @@ def build_icns(sizes: dict[int, bytes]) -> bytes:
     return b"icns" + struct.pack(">I", len(body) + 8) + body
 
 
+def commit_staging(staging: str, output: str) -> None:
+    """同文件系统替换整个目录；旧目录先保留为 backup，失败可改回。"""
+    backup = staging + "-backup"
+    had_output = os.path.exists(output)
+    if had_output:
+        os.replace(output, backup)
+    try:
+        os.replace(staging, output)
+    except OSError as commit_error:
+        if had_output:
+            try:
+                os.replace(backup, output)
+            except OSError as rollback_error:
+                raise RuntimeError(
+                    f"图标提交失败且 rollback 失败；旧输出仍在 {backup}："
+                    f"commit={commit_error}; rollback={rollback_error}"
+                ) from rollback_error
+        raise
+    if had_output:
+        shutil.rmtree(backup)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="生成拈来全部程序图标")
     parser.add_argument("--output", default=DEFAULT_OUTPUT, help="输出目录（默认 src-tauri/icons）")
     options = parser.parse_args()
-    output = options.output
-    os.makedirs(os.path.join(output, "tray"), exist_ok=True)
-    work = tempfile.mkdtemp(prefix="nianlai-icons-")
+    output = os.path.abspath(options.output)
+    if os.path.exists(output) and not os.path.isdir(output):
+        raise NotADirectoryError(f"图标输出不是目录：{output}")
+    parent = os.path.dirname(output)
+    os.makedirs(parent, exist_ok=True)
+    staging = tempfile.mkdtemp(prefix=f".{os.path.basename(output)}-staging-", dir=parent)
+    work = tempfile.mkdtemp(prefix="work-", dir=staging)
     try:
+        # source/ 和其它既有内容随 staging 一起保留；原 output 在提交前完全不动。
+        if os.path.isdir(output):
+            shutil.copytree(output, staging, dirs_exist_ok=True)
         grids: dict[int, list[list[tuple[int, int, int, int]]]] = {}
         # 手绘档：应用图标 16/24、托盘 16/24/32。
         app16 = pixel_grid(os.path.join(SOURCE, "app-16.svg"))
@@ -186,29 +217,34 @@ def main() -> int:
         for name, (s16, s24) in TRAY.items():
             grid16 = pixel_grid(os.path.join(SOURCE, s16))
             grid24 = pixel_grid(os.path.join(SOURCE, s24))
+            os.makedirs(os.path.join(staging, "tray"), exist_ok=True)
             for size, grid in ((16, grid16), (24, grid24), (32, upscale2x(grid16))):
-                open(os.path.join(output, "tray", f"{name}-{size}.png"), "wb").write(encode_png(grid))
+                open(os.path.join(staging, "tray", f"{name}-{size}.png"), "wb").write(encode_png(grid))
         # 矢量档：Edge 渲染。
         special = {512: "icon.png", 256: "128x128@2x.png", 128: "128x128.png", 32: "32x32.png", 50: "StoreLogo.png"}
         for size, source_name in sorted(VECTOR.items()):
             grid = render_vector(work, size, source_name)
             grids[size] = grid
             name = special.get(size) or f"Square{size}x{size}Logo.png"
-            open(os.path.join(output, name), "wb").write(encode_png(grid))
+            open(os.path.join(staging, name), "wb").write(encode_png(grid))
             print(f"渲染 {size}×{size} -> {name}")
         # ICO：四档 BMP + 256 PNG，共五档；16/24 用手绘源，绝不能从 256 缩小。
         entries: list[tuple[int, bytes]] = [(16, bmp_entry(app16)), (24, bmp_entry(app24))]
         for size in (32, 48):
             entries.append((size, bmp_entry(grids[size])))
         entries.append((256, encode_png(grids[256])))
-        open(os.path.join(output, "icon.ico"), "wb").write(build_ico(entries))
+        open(os.path.join(staging, "icon.ico"), "wb").write(build_ico(entries))
         # ICNS。
-        open(os.path.join(output, "icon.icns"), "wb").write(
+        open(os.path.join(staging, "icon.icns"), "wb").write(
             build_icns({size: encode_png(grids[size]) for size in (128, 256, 512)}))
+        # 临时 Edge 页面不属于产物；全部成功后才同文件系统提交。
+        shutil.rmtree(work)
+        commit_staging(staging, output)
         print(f"图标已生成：{output}")
         return 0
     finally:
         shutil.rmtree(work, ignore_errors=True)
+        shutil.rmtree(staging, ignore_errors=True)
 
 
 if __name__ == "__main__":

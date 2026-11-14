@@ -110,7 +110,7 @@
 
   <div class="group"><span class="group-title split">这些程序里复制的不记<em>已经放了常见的密码管理器</em></span><div class="card">
     <div class="setting column">
-      <span class="setting-copy"><strong>扣着的牌，就是这个程序里复制的不记</strong><small>按程序名匹配，不区分大小写。点 × 拿掉。</small></span>
+      <span class="setting-copy"><strong>名单里的程序，复制的内容不记</strong><small>按程序名匹配，不区分大小写。点 × 拿掉。</small></span>
       <ul class="chips" aria-label="排除的程序">
         {#each excluded as app (app)}
           <li><span>{app}</span><button type="button" aria-label={`拿掉 ${app}`} disabled={off} onclick={() => saveApps(excluded.filter((name) => name !== app), `已拿掉 ${app}`)}>×</button></li>

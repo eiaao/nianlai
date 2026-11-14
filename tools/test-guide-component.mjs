@@ -591,6 +591,64 @@ test("组件：打开时记录读取失败不伪造基线，重试后从真实�
   assert.equal((await api("settings()")).guide.baseline_ms, 100);
 });
 
+test("Task14 手动 reload 等在途整份跳过之后，旧成功只保存并关闭一次", async () => {
+  await openGuide("manualSaves=1&historyErrors=1");
+  assert.match(await paperText(), /还没读到复制记录/);
+  await click("skip-guide");
+  await waitFor(async () => (await pendingSaves()).length === 1, "skip 保存在途");
+  await click("retry-load");
+  await settle();
+  await api("resolveSave(1)");
+  await settle();
+  await settle();
+  assert.equal(await phase(), "skipped");
+  assert.equal(await closeCalls(), 1, "旧 skip 成功必须关闭，不能被 reload 重置 token");
+  assert.equal((await saveCalls()).length, 1, "终态恢复不能再写 baseline");
+  assert.equal((await api("settings()")).guide.phase, "skipped");
+  assert.deepEqual(await pendingSaves(), []);
+  assert.equal((await targetedEvents()).length, 0);
+});
+
+test("Task14 旧跳过保存失败后 reload 可恢复真实基线，旧 token 不冒充新保存", async () => {
+  await openGuide("manualSaves=1&historyErrors=1");
+  await click("skip-guide");
+  await waitFor(async () => (await pendingSaves()).length === 1, "skip 保存在途");
+  await click("retry-load");
+  await settle();
+  await api(`rejectSave(1, "旧跳过保存失败")`);
+  await settle();
+  await settle();
+  await resolveNextSave();
+  assert.equal(await phase(), "await_copy");
+  assert.equal(await closeCalls(), 0);
+  assert.equal((await saveCalls()).length, 2, "失败后只补一次真实 baseline");
+  assert.equal((await api("settings()")).guide.phase, "await_copy");
+  assert.equal((await api("settings()")).guide.baseline_ms, 100);
+  assert.deepEqual(await pendingSaves(), []);
+});
+
+test("Task14 reload 排队后新产生的跳过保存保持 reducer token 与执行顺序", async () => {
+  await openGuide("manualSaves=1&historyErrors=1");
+  await click("skip-guide");
+  await waitFor(async () => (await pendingSaves()).length === 1, "第一笔 skip 在途");
+  await click("retry-load");
+  await settle();
+  await click("close-guide");
+  await api("resolveSave(1)");
+  await settle();
+  await settle();
+  assert.equal(await closeCalls(), 0, "新 skip 尚未成功不能提前关闭");
+  const second = (await saveCalls())[1];
+  assert.equal(second.update.guide.phase, "skipped", "reload 后执行的必须是新 skip，不是 baseline");
+  await api(`resolveSave(${second.id})`);
+  await settle();
+  assert.equal(await phase(), "skipped");
+  assert.equal((await api("settings()")).guide.phase, "skipped");
+  assert.equal(await closeCalls(), 1);
+  assert.equal((await saveCalls()).length, 2, "不得夹带一笔旧 baseline 保存");
+  assert.deepEqual(await pendingSaves(), []);
+});
+
 test("组件：首读未返回也能整份跳过，迟到快照不覆盖 skipped", async () => {
   await openGuide("manualHistory=1&manualSaves=1");
   assert.equal((await saveCalls()).length, 0);

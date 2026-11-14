@@ -16,8 +16,12 @@ export function defaultGuideSettings(): GuideSettings {
 export function normalizePanelGuide(value?: GuideSettings): GuideSettings {
   const fallback = defaultGuideSettings();
   if (!value) return fallback;
+  const phase = value.phase === "await_copy" || value.phase === "await_show" || value.phase === "await_paste"
+    || value.phase === "completed" || value.phase === "skipped" ? value.phase : fallback.phase;
+  const terminal = phase === "completed" || phase === "skipped";
   return {
-    ...fallback, ...value, version: 1,
+    ...fallback, ...value, version: 1, phase,
+    cards_dealt: terminal && value.cards_dealt === true,
     dismissed: GUIDE_CARD_IDS.filter((id) => value.dismissed?.includes(id)),
   };
 }
@@ -33,7 +37,7 @@ export function guideCardItem(id: GuideCardId): HistoryItem {
 }
 
 export function dealtGuideItems(guide: GuideSettings): HistoryItem[] {
-  if (!guide.cards_dealt) return [];
+  if (!guide.cards_dealt || (guide.phase !== "completed" && guide.phase !== "skipped")) return [];
   return GUIDE_CARD_IDS.filter((id) => !guide.dismissed.includes(id)).map(guideCardItem);
 }
 

@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 const { GuideFlow } = await import("../src/lib/guide.ts");
+const { dealtGuideItems, normalizePanelGuide } = await import("../src/lib/guideCards.ts");
 
 const healthy = { store: "ready", capture: "recording" };
 const oldSnapshot = {
@@ -568,6 +569,31 @@ test("About 显式重发可保留 skipped+cards_dealt=true，进行中和普通�
   const skippedAgain = advance(readyAtShow(), { type: "skip_guide" });
   assert.equal(skippedAgain.guide.phase, "skipped");
   assert.equal(skippedAgain.guide.cards_dealt, false);
+});
+
+test("Task14 面板归一化与发牌防御拒绝 await_* 或非法 phase 的 cards_dealt=true", () => {
+  for (const phase of ["await_copy", "await_show", "await_paste"]) {
+    const input = {
+      version: 1, phase, baseline_ms: 100, baseline_total: 1,
+      sample_id: phase === "await_copy" ? null : 1,
+      cards_dealt: true, dismissed: [], future: { keep: true },
+    };
+    const normalized = normalizePanelGuide(input);
+    assert.equal(normalized.phase, phase);
+    assert.equal(normalized.cards_dealt, false);
+    assert.deepEqual(dealtGuideItems(normalized), []);
+    assert.deepEqual(dealtGuideItems({ ...normalized, cards_dealt: true }), [], "直接调用发牌也必须有终态防御");
+    assert.deepEqual(normalized.future, { keep: true }, "面板未知字段继续保留");
+  }
+  for (const phase of ["completed", "skipped"]) {
+    const normalized = normalizePanelGuide({ phase, cards_dealt: true, dismissed: [] });
+    assert.equal(normalized.cards_dealt, true);
+    assert.deepEqual(dealtGuideItems(normalized).map((item) => item.id), [-1, -2, -3, -4]);
+  }
+  const invalid = normalizePanelGuide({ phase: "done", cards_dealt: true, dismissed: [] });
+  assert.equal(invalid.phase, "await_copy");
+  assert.equal(invalid.cards_dealt, false);
+  assert.deepEqual(dealtGuideItems(invalid), []);
 });
 
 // 真实 Svelte 组件、生产 IPC 执行器和三态截图；仍只使用内存 Tauri 替身。

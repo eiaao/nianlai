@@ -1170,6 +1170,75 @@ test("常用牌 Alt+上下使用完整真实 ID 顺序、数字与焦点跟随�
   assert.equal(await cdp.evaluate(`document.querySelector('[data-order-status][data-phase="saved"]')`), null);
 });
 
+test("Task14 常用牌 focus 旧读晚于排序响应也不能回滚真实 DOM 与后端顺序", async () => {
+  await openSettings("fav", "favPair=1");
+  await waitFor(async () => (await favoriteIds()).length === 2, "初始 [A,B]");
+  assert.deepEqual(await favoriteIds(), [101, 102]);
+  await cdp.evaluate(`window.__settingsPagesTest.favoriteDeferred({ order: true, read: true })`);
+  await keyOn('[data-favorite-card][data-id="101"] [data-favorite-front]', { key: "ArrowDown", code: "ArrowDown", altKey: true });
+  await waitFor(() => cdp.evaluate("window.__settingsPagesTest.pendingFavorites().order === 1"), "deferred reorder([B,A]) 在途");
+  await cdp.evaluate("window.dispatchEvent(new Event('focus'))");
+  await settleDom();
+  const earlyReads = await cdp.evaluate("window.__settingsPagesTest.favoriteReadSnapshots()");
+  if (earlyReads.length) {
+    assert.deepEqual(earlyReads[0].items.map((item) => item.id), [101, 102], "未修路径确实在写完成前取得旧 [A,B]");
+  }
+  await cdp.evaluate("window.__settingsPagesTest.resolveFavoriteOrder()");
+  await waitFor(() => cdp.evaluate("window.__settingsPagesTest.pendingFavorites().read === 1"), "focus 读取待完成");
+  await cdp.evaluate("window.__settingsPagesTest.resolveFavoriteRead()");
+  await settleDom();
+  assert.deepEqual(await favoriteIds(), [102, 101], "旧读不能覆盖排序响应");
+  assert.deepEqual(await cdp.evaluate("window.__settingsPagesTest.favorites().map((item) => item.id)"), [102, 101]);
+});
+
+test("Task14 常用牌撤销与 focus 共用结构顺序，旧读不能回滚恢复后的完整顺序", async () => {
+  await openSettings("fav", "favPair=1");
+  await waitFor(async () => (await favoriteIds()).length === 2, "初始两张");
+  await click('[data-favorite-card][data-id="101"] [data-favorite-front]');
+  await click('[data-favorite-card][data-id="101"] [data-action="remove-favorite"]');
+  await waitFor(async () => JSON.stringify(await favoriteIds()) === JSON.stringify([102]), "先移出 A");
+  await cdp.evaluate(`window.__settingsPagesTest.favoriteDeferred({ order: true, read: true })`);
+  await click('[data-action="undo-favorite"]');
+  await waitFor(() => cdp.evaluate("window.__settingsPagesTest.pendingFavorites().order === 1"), "撤销恢复原顺序在途");
+  await cdp.evaluate("window.dispatchEvent(new Event('focus'))");
+  await settleDom();
+  const earlyReads = await cdp.evaluate("window.__settingsPagesTest.favoriteReadSnapshots()");
+  if (earlyReads.length) {
+    assert.deepEqual(earlyReads[0].items.map((item) => item.id), [102, 101], "旧读捕获恢复常用后的末尾顺序");
+  }
+  await cdp.evaluate("window.__settingsPagesTest.resolveFavoriteOrder()");
+  await waitFor(() => cdp.evaluate("window.__settingsPagesTest.pendingFavorites().read === 1"), "撤销后的 focus 读取");
+  await cdp.evaluate("window.__settingsPagesTest.resolveFavoriteRead()");
+  await settleDom();
+  assert.deepEqual(await favoriteIds(), [101, 102]);
+  assert.deepEqual(await cdp.evaluate("window.__settingsPagesTest.favorites().map((item) => item.id)"), [101, 102]);
+});
+
+test("Task14 常用牌排队后的读取错误属于实际执行顺序，后续 focus 成功可恢复", async () => {
+  await openSettings("fav", "favPair=1");
+  await waitFor(async () => (await favoriteIds()).length === 2, "初始两张");
+  await cdp.evaluate(`window.__settingsPagesTest.favoriteDeferred({ order: true, read: true })`);
+  await keyOn('[data-favorite-card][data-id="101"] [data-favorite-front]', { key: "ArrowDown", code: "ArrowDown", altKey: true });
+  await waitFor(() => cdp.evaluate("window.__settingsPagesTest.pendingFavorites().order === 1"), "排序在途");
+  await cdp.evaluate(`window.__settingsPagesTest.favoriteScenario({ readErrors: 1 })`);
+  await cdp.evaluate("window.dispatchEvent(new Event('focus'))");
+  await settleDom();
+  await cdp.evaluate("window.__settingsPagesTest.resolveFavoriteOrder()");
+  await waitFor(() => cdp.evaluate("window.__settingsPagesTest.pendingFavorites().read === 1"), "实际执行到 focus 读取");
+  await cdp.evaluate("window.__settingsPagesTest.resolveFavoriteRead()");
+  await settleDom();
+  assert.match(await cdp.evaluate(`document.querySelector(".load-error")?.textContent ?? ""`), /模拟常用读取失败/);
+  assert.deepEqual(await favoriteIds(), [102, 101], "读取失败不能把已保存顺序回滚");
+  assert.deepEqual(await cdp.evaluate("window.__settingsPagesTest.favorites().map((item) => item.id)"), [102, 101]);
+
+  await cdp.evaluate("window.dispatchEvent(new Event('focus'))");
+  await waitFor(() => cdp.evaluate("window.__settingsPagesTest.pendingFavorites().read === 1"), "后续 focus 成功读取");
+  await cdp.evaluate("window.__settingsPagesTest.resolveFavoriteRead()");
+  await settleDom();
+  assert.equal(await cdp.evaluate(`document.querySelector(".load-error")`), null);
+  assert.deepEqual(await favoriteIds(), [102, 101]);
+});
+
 test("常用牌真实指针拖动保存完整 ID 列表并更新数字", async () => {
   const scene = await openSettings("fav");
   await cdp.evaluate(`Element.prototype.setPointerCapture = function () {}; Element.prototype.releasePointerCapture = function () {};`);
@@ -1954,6 +2023,22 @@ test("关于显示真实版本和目录，离线许可完整可读，首次启�
   await nativeKey("[data-license-dialog]", ESCAPE_KEY);
   await waitFor(() => cdp.evaluate(`!document.querySelector("[data-license-dialog]")`), "Escape 关闭许可");
   assert.match(await cdp.evaluate(`document.activeElement?.textContent`), /查看许可/);
+});
+
+test("Task14 关于页说明区直接区分重看、重发与只重试开窗", async () => {
+  await openSettings("about");
+  const notes = await cdp.evaluate(`document.querySelector("[data-settings-notes]").textContent`);
+  assert.doesNotMatch(notes, /两个首次启动入口还没接入|当前只留位置/);
+  assert.match(notes, /“再看一次”从第一拍重新保存引导/);
+  assert.match(notes, /“再发一遍”只把四张新手牌放回最近/);
+  assert.match(notes, /只重试开窗，不会重复保存引导进度/);
+});
+
+test("Task14 隐私页排除程序使用直白功能文案", async () => {
+  await openSettings("privacy");
+  const copy = await cdp.evaluate(`document.querySelector("[data-settings-page]").textContent`);
+  assert.match(copy, /名单里的程序，复制的内容不记/);
+  assert.doesNotMatch(copy, /扣着的牌，就是这个程序里复制的不记/);
 });
 
 test("关于版本和目录读取失败可读降级，不写死版本或猜目录", async () => {

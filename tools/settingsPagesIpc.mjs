@@ -63,6 +63,7 @@ let favorites = (() => {
   const query = new URLSearchParams(location.search);
   if (query.get("favEmpty") === "1") return [];
   if (query.get("favSingle") === "1") return clone(DEFAULT_FAVORITES.slice(0, 1));
+  if (query.get("favPair") === "1") return clone(DEFAULT_FAVORITES.slice(0, 2));
   return clone(DEFAULT_FAVORITES);
 })();
 function persistFavorites() { sessionStorage.setItem(FAVORITES_KEY, JSON.stringify(favorites)); }
@@ -72,9 +73,12 @@ function favoriteList() {
 let favoriteLabelErrors = 0;
 let favoriteOrderErrors = 0;
 let favoriteWriteErrors = 0;
+let favoriteReadErrors = 0;
+let deferFavoriteReads = false;
 let deferFavoriteLabels = false;
 let deferFavoriteOrders = false;
 let deferFavoriteWrites = false;
+const deferredFavoriteReads = [];
 const deferredFavoriteLabels = [];
 const deferredFavoriteOrders = [];
 const deferredFavoriteWrites = [];
@@ -101,6 +105,14 @@ function deferred() {
 }
 
 const truncate = (value, limit) => Array.from(String(value ?? "")).slice(0, limit).join("");
+function readFavoriteSnapshot() {
+  if (favoriteReadErrors > 0) {
+    favoriteReadErrors -= 1;
+    return { error: "模拟常用读取失败" };
+  }
+  // 必须在调用时取快照；Promise 晚到不能伪装成后端稍后才完成这次旧读。
+  return { items: favoriteList() };
+}
 function writeFavoriteLabel(args) {
   if (favoriteLabelErrors > 0) {
     favoriteLabelErrors -= 1;
@@ -336,7 +348,16 @@ export async function invoke(command, args = {}) {
         })),
         total: recentApps.length, recording: true, last_recorded_ms: null, store_status: null,
       };
-    case "get_favorites": return favoriteList();
+    case "get_favorites": {
+      const snapshot = readFavoriteSnapshot();
+      if (deferFavoriteReads) {
+        const call = { ...deferred(), snapshot };
+        deferredFavoriteReads.push(call);
+        return call.promise;
+      }
+      if (snapshot.error) throw new Error(snapshot.error);
+      return snapshot.items;
+    }
     case "set_favorite_label": {
       if (deferFavoriteLabels) {
         const call = { ...deferred(), id: args.id, args: clone(args) };
@@ -584,17 +605,31 @@ export const testApi = {
   },
   settingsReadCount: () => Number(sessionStorage.getItem(SETTINGS_READ_KEY) ?? 0),
   favorites: favoriteList,
-  favoriteScenario: ({ labelErrors = 0, reorderErrors = 0, favoriteErrors = 0 } = {}) => {
+  favoriteScenario: ({ labelErrors = 0, reorderErrors = 0, favoriteErrors = 0, readErrors = 0 } = {}) => {
     favoriteLabelErrors = labelErrors;
     favoriteOrderErrors = reorderErrors;
     favoriteWriteErrors = favoriteErrors;
+    favoriteReadErrors = readErrors;
   },
-  favoriteDeferred: ({ label = deferFavoriteLabels, order = deferFavoriteOrders, favorite = deferFavoriteWrites } = {}) => {
+  favoriteDeferred: ({ label = deferFavoriteLabels, order = deferFavoriteOrders, favorite = deferFavoriteWrites, read = deferFavoriteReads } = {}) => {
     deferFavoriteLabels = label;
     deferFavoriteOrders = order;
     deferFavoriteWrites = favorite;
+    deferFavoriteReads = read;
   },
-  pendingFavorites: () => ({ label: deferredFavoriteLabels.length, order: deferredFavoriteOrders.length, favorite: deferredFavoriteWrites.length }),
+  pendingFavorites: () => ({ label: deferredFavoriteLabels.length, order: deferredFavoriteOrders.length, favorite: deferredFavoriteWrites.length, read: deferredFavoriteReads.length }),
+  favoriteReadSnapshots: () => deferredFavoriteReads.map((call) => clone(call.snapshot)),
+  resolveFavoriteRead: () => {
+    const call = deferredFavoriteReads.shift();
+    if (!call) throw new Error("没有等待中的常用读取");
+    if (call.snapshot.error) call.reject(new Error(call.snapshot.error));
+    else call.resolve(clone(call.snapshot.items));
+  },
+  rejectFavoriteRead: (reason = "模拟延迟常用读取失败") => {
+    const call = deferredFavoriteReads.shift();
+    if (!call) throw new Error("没有等待中的常用读取");
+    call.reject(new Error(reason));
+  },
   resolveFavoriteLabel: (id) => {
     const call = takeDeferred(deferredFavoriteLabels, id);
     try { call.resolve(writeFavoriteLabel(call.args)); } catch (error) { call.reject(error); }

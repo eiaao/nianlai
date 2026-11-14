@@ -570,6 +570,18 @@ fn validate(mut value: Value) -> (Settings, Vec<Issue>) {
             "等待中的样本 ID 无效，已回到复制步骤",
         ));
     }
+    let terminal = matches!(
+        guide.get("phase").and_then(Value::as_str),
+        Some("completed" | "skipped")
+    );
+    if !terminal && guide.get("cards_dealt").and_then(Value::as_bool) == Some(true) {
+        // phase 校验和缺失样本回退之后统一收尾：只有终态可以显式重发新手牌。
+        guide.insert("cards_dealt".into(), json!(false));
+        issues.push(Issue::new(
+            "guide.cards_dealt",
+            "进行中的引导不能保留已发牌标记，已关闭",
+        ));
+    }
     // 已逐项规范所有已知字段；未知字段由各层 flatten 原样接收。
     (serde_json::from_value(value).unwrap(), issues)
 }
@@ -1008,6 +1020,65 @@ pub(crate) mod tests {
                 assert_eq!(store.get().guide.sample_id, Some(7));
             }
         }
+    }
+
+    #[test]
+    fn task14_nonterminal_guide_cannot_keep_cards_dealt() {
+        let directory = Directory::new();
+        let path = directory.0.join("settings.json");
+        for (phase, sample_id) in [
+            ("await_copy", Value::Null),
+            ("await_show", json!(7)),
+            ("await_paste", json!(7)),
+        ] {
+            fs::write(
+                &path,
+                json!({"guide":{
+                    "phase":phase,"sample_id":sample_id,"cards_dealt":true,
+                    "dismissed":["t2"],"future":{"keep":true}
+                }})
+                .to_string(),
+            )
+            .unwrap();
+            let (store, issues) = Store::load(path.clone());
+            assert!(!store.get().guide.cards_dealt, "{phase} 不得保留已发牌");
+            assert!(
+                issues
+                    .iter()
+                    .any(|issue| issue.field == "guide.cards_dealt")
+            );
+            assert_eq!(store.get().guide.dismissed, [GuideCardId::T2]);
+            assert_eq!(
+                serde_json::to_value(&store.get().guide).unwrap()["future"],
+                json!({"keep":true})
+            );
+        }
+
+        for phase in ["completed", "skipped"] {
+            fs::write(
+                &path,
+                json!({"guide":{"phase":phase,"cards_dealt":true}}).to_string(),
+            )
+            .unwrap();
+            let (store, issues) = Store::load(path.clone());
+            assert!(store.get().guide.cards_dealt, "{phase} 的显式重发必须保留");
+            assert!(issues.is_empty());
+        }
+
+        fs::write(
+            &path,
+            json!({"guide":{"phase":"done","cards_dealt":true}}).to_string(),
+        )
+        .unwrap();
+        let (store, issues) = Store::load(path.clone());
+        assert_eq!(store.get().guide.phase, GuidePhase::AwaitCopy);
+        assert!(!store.get().guide.cards_dealt);
+        assert!(issues.iter().any(|issue| issue.field == "guide.phase"));
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue.field == "guide.cards_dealt")
+        );
     }
 
     #[test]

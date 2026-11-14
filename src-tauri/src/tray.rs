@@ -597,30 +597,49 @@ pub fn setup(app: &AppHandle, logger: &Logger) -> Result<(), Box<dyn std::error:
             _ => {}
         })
         .on_tray_icon_event(move |tray, event| {
-            // 所有事件都以实时 rect 刷新；事件里的鼠标坐标不参与 DPI 判断。
-            refresh(tray.app_handle());
-            match event {
-                TrayIconEvent::Click {
-                    button: MouseButton::Left,
-                    button_state: MouseButtonState::Up,
-                    ..
-                } => handle_left_click(tray.app_handle()),
-                TrayIconEvent::Enter { .. }
-                | TrayIconEvent::Click {
-                    button: MouseButton::Right,
-                    button_state: MouseButtonState::Down,
-                    ..
-                } => {
+            dispatch_tray_icon_event(
+                event,
+                || refresh(tray.app_handle()),
+                || handle_left_click(tray.app_handle()),
+                || {
                     let app = tray.app_handle();
                     apply_autostart_state(app, &autostart, &app.autolaunch().is_enabled());
-                    refresh(app);
-                }
-                _ => {}
-            }
+                },
+            );
         })
         .build(app)?;
     refresh(app);
     Ok(())
+}
+
+fn dispatch_tray_icon_event(
+    event: TrayIconEvent,
+    refresh: impl FnOnce(),
+    left_click: impl FnOnce(),
+    sync_autostart: impl FnOnce(),
+) {
+    match event {
+        TrayIconEvent::Click {
+            button: MouseButton::Left,
+            button_state: MouseButtonState::Up,
+            ..
+        } => {
+            // 左键保持先读实时健康/rect/DPI，再执行既有路由。
+            refresh();
+            left_click();
+        }
+        TrayIconEvent::Enter { .. }
+        | TrayIconEvent::Click {
+            button: MouseButton::Right,
+            button_state: MouseButtonState::Down,
+            ..
+        } => {
+            // Enter/右键只查一次 autostart、刷新一次；Move/Leave 等事件完全无动作。
+            sync_autostart();
+            refresh();
+        }
+        _ => {}
+    }
 }
 
 fn route_left_click(
@@ -914,6 +933,71 @@ mod tests {
         Rect {
             position: Position::Physical((x, y).into()),
             size: Size::Physical((32, 32).into()),
+        }
+    }
+
+    #[test]
+    fn task14_tray_events_refresh_only_their_own_action_once() {
+        fn click(button: MouseButton, button_state: MouseButtonState) -> TrayIconEvent {
+            TrayIconEvent::Click {
+                id: "test".into(),
+                position: (0.0, 0.0).into(),
+                rect: physical_rect(0, 0),
+                button,
+                button_state,
+            }
+        }
+        fn hover(enter: bool) -> TrayIconEvent {
+            if enter {
+                TrayIconEvent::Enter {
+                    id: "test".into(),
+                    position: (0.0, 0.0).into(),
+                    rect: physical_rect(0, 0),
+                }
+            } else {
+                TrayIconEvent::Move {
+                    id: "test".into(),
+                    position: (0.0, 0.0).into(),
+                    rect: physical_rect(0, 0),
+                }
+            }
+        }
+        fn trace(event: TrayIconEvent) -> Vec<&'static str> {
+            let calls = std::cell::RefCell::new(Vec::new());
+            dispatch_tray_icon_event(
+                event,
+                || calls.borrow_mut().push("refresh"),
+                || calls.borrow_mut().push("left"),
+                || calls.borrow_mut().push("autostart"),
+            );
+            calls.into_inner()
+        }
+
+        assert_eq!(
+            trace(click(MouseButton::Left, MouseButtonState::Up)),
+            ["refresh", "left"],
+            "Left Up 仍是先 refresh 再 handle"
+        );
+        for event in [
+            hover(true),
+            click(MouseButton::Right, MouseButtonState::Down),
+        ] {
+            assert_eq!(trace(event), ["autostart", "refresh"], "各自一次查询与刷新");
+        }
+        for event in [
+            hover(false),
+            TrayIconEvent::Leave {
+                id: "test".into(),
+                position: (0.0, 0.0).into(),
+                rect: physical_rect(0, 0),
+            },
+            click(MouseButton::Left, MouseButtonState::Down),
+            click(MouseButton::Right, MouseButtonState::Up),
+        ] {
+            assert!(
+                trace(event).is_empty(),
+                "Move/Leave 与无动作点击不得刷新或查询"
+            );
         }
     }
 
