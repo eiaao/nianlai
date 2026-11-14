@@ -2,9 +2,10 @@
 // 这里的时序细节都是早期验证里踩过的坑，改之前先读 src/lib/README.md 的“不能动的细节”。
 import { tick, untrack } from "svelte";
 import * as ipc from "./ipc";
-import type { HistoryItem, HistorySnapshot, HitRegion, Outline, PanelInteraction, PasteMode, QueueState, SearchSelection, Timing, UnlistenFn } from "./ipc";
+import type { GuideSettings, HistoryItem, HistorySnapshot, HitRegion, Outline, PanelInteraction, PasteMode, QueueState, SearchSelection, Timing, UnlistenFn } from "./ipc";
 import { applyPreferences, DEFAULT_PREFERENCES, normalizePreferences, type Preferences } from "./preferences";
 import { cardKind, FAN, outlineFor, pageStep, spreadLayout, timeGroup, type SpreadLayout } from "./cards";
+import { dealtGuideItems, defaultGuideSettings, GUIDE_CARD_IDS, normalizePanelGuide } from "./guideCards";
 
 const HOLD_HINT_MS = 300;
 /** 后端 start_queue 一次最多接受的条数。 */
@@ -71,6 +72,16 @@ export class PanelState {
   private deleting = false;
   private undoTimer: ReturnType<typeof setTimeout> | null = null;
   preferences = $state<Preferences>({ ...DEFAULT_PREFERENCES });
+  guide = $state<GuideSettings>(defaultGuideSettings());
+  hotkey = $state("Ctrl+`");
+  autostart = $state(false);
+  autostartReady = $state(false);
+  autostartBusy = $state(false);
+  autostartError = $state("");
+  private guideRevision = 0;
+  private guideHotkeyPending: { session: number; request: string } | null = null;
+  private guideAutostartRequest = 0;
+  private guideAutostartKey = "";
   motion = $derived(this.preferences.motion);
   // M2-8：鼠标单击 / 中键点击条目的行为，保存设置后即时更新；键盘不受影响。
   mouseActions = $state<MouseActions>({ ...DEFAULT_MOUSE_ACTIONS });
@@ -186,9 +197,16 @@ export class PanelState {
   private pinnedSet = $derived(this.pinnedIds ? new Set(this.pinnedIds) : null);
   recentItems = $derived(this.filtered.filter((item) => this.recentSet ? this.recentSet.has(item.id) : !item.favorite));
   favoriteItems = $derived(this.filtered.filter((item) => this.pinnedSet ? this.pinnedSet.has(item.id) : item.favorite));
+  // 新手牌只存在于“最近”的可操作手牌，不进入 history、搜索、常用、统计或任何后端集合。
+  private recentWithGuides = $derived.by(() => {
+    const real = this.recentItems;
+    const guides = dealtGuideItems(this.guide);
+    if (!guides.length) return real;
+    return real.length ? [real[0], ...guides, ...real.slice(1)] : guides;
+  });
   // selected 始终相对当前来源：搜索时是实时结果，否则是冻结的最近 / 常用。
   handSource = $derived(this.interaction === "passive" ? []
-    : this.searching ? this.filtered : this.handList === "favorites" ? this.favoriteItems : this.recentItems);
+    : this.searching ? this.filtered : this.handList === "favorites" ? this.favoriteItems : this.recentWithGuides);
   visibleItems = $derived(this.interaction === "passive" ? this.visibleOrder.items : this.handSource);
   /** 扇面上的牌（最多 7 张）。 */
   fanItems = $derived(this.handSource.slice(0, FAN));
@@ -309,7 +327,107 @@ export class PanelState {
   applySettings = (settings: import("./ipc").AppSettings) => {
     this.preferences = normalizePreferences(settings);
     this.mouseActions = normalizeMouseActions(settings.interaction);
+    this.hotkey = settings.hotkey ?? this.hotkey;
+    if (settings.guide) this.applyGuide(settings.guide);
     applyPreferences(this.preferences);
+  };
+
+  private applyGuide(value: GuideSettings, syncAutostart = true) {
+    this.guide = normalizePanelGuide(value);
+    this.guideRevision += 1;
+    if (syncAutostart) this.syncGuideAutostart();
+  }
+
+  private syncGuideAutostart() {
+    const shouldRead = this.visible && this.interactive && !this.searching && this.handList === "recent"
+      && this.guide.cards_dealt && !this.guide.dismissed.includes("t4");
+    const key = `${this.session}:${shouldRead ? "shown" : "off"}`;
+    if (key === this.guideAutostartKey) return;
+    this.guideAutostartKey = key;
+    const request = ++this.guideAutostartRequest;
+    const session = this.session;
+    this.autostartReady = false;
+    this.autostartBusy = false;
+    this.autostartError = "";
+    if (!shouldRead) return;
+    void ipc.getAutostart().then((actual) => {
+      if (request !== this.guideAutostartRequest || session !== this.session || this.guideAutostartKey !== key) return;
+      this.autostart = actual;
+      this.autostartReady = true;
+    }).catch((error) => {
+      if (request !== this.guideAutostartRequest || session !== this.session || this.guideAutostartKey !== key) return;
+      this.autostartReady = true;
+      this.autostartError = `没读到开机启动状态：${typeof error === "string" ? error : error instanceof Error ? error.message : "再试一次"}`;
+    });
+  }
+
+  setGuideAutostart = async (requested: boolean, item: HistoryItem) => {
+    if (item.guide_id !== "t4" || !this.visible || !this.interactive || !this.handSource.includes(item)
+      || !this.autostartReady || this.autostartBusy) return;
+    const session = this.session;
+    const request = ++this.guideAutostartRequest;
+    this.autostartBusy = true;
+    this.autostartError = "";
+    const current = () => request === this.guideAutostartRequest && session === this.session && this.visible;
+    try {
+      const actual = await ipc.setAutostart(requested);
+      if (!current()) return;
+      this.autostart = actual;
+      this.autostartReady = true;
+    } catch (failure) {
+      // 与通用页一致：写失败后再读一次；读不到就保留请求前状态，绝不按请求值勾选。
+      try {
+        const actual = await ipc.getAutostart();
+        if (current()) { this.autostart = actual; this.autostartReady = true; }
+      } catch { /* 保留请求前状态。 */ }
+      if (current()) {
+        const reason = typeof failure === "string" ? failure : failure instanceof Error ? failure.message : "再试一次";
+        this.autostartError = `没改成开机启动：${reason}`;
+      }
+    } finally {
+      if (current()) this.autostartBusy = false;
+    }
+  };
+
+  openGuideHotkeySettings = async (item: HistoryItem) => {
+    if (item.guide_id !== "t3" || !this.visible || !this.interactive || !this.handSource.includes(item)) return;
+    const pending = { session: this.session, request: globalThis.crypto.randomUUID() };
+    this.guideHotkeyPending = pending;
+    this.message = "";
+    try { await ipc.openSettings(`general/hotkey?request=${encodeURIComponent(pending.request)}`); }
+    catch (error) {
+      if (this.guideHotkeyPending === pending) this.guideHotkeyPending = null;
+      if (this.visible && this.session === pending.session) {
+        this.message = `设置窗口没打开：${typeof error === "string" ? error : error instanceof Error ? error.message : "再试一次"}`;
+      }
+    }
+  };
+
+  private guideNotice(item: HistoryItem) {
+    if (!item.guide_id) return false;
+    this.showNotice("新手牌是说明，贴不出去");
+    return true;
+  }
+
+  private dismissGuide = async (item: HistoryItem) => {
+    const id = item.guide_id;
+    if (!id || !this.visible || !this.interactive || this.deleting) return;
+    const session = this.session;
+    const revision = this.guideRevision;
+    const dismissed = GUIDE_CARD_IDS.filter((card) => this.guide.dismissed.includes(card) || card === id);
+    this.deleting = true;
+    this.message = "";
+    try {
+      const saved = await ipc.setSettings({ guide: { dismissed } });
+      if (session !== this.session || !this.visible) return;
+      // settings:changed 可能已带来更新；外部修订之后到达的旧响应不得覆盖重看/重发状态。
+      if (revision === this.guideRevision && saved.guide) this.applyGuide(saved.guide);
+      this.selected = Math.max(0, Math.min(this.selected, this.handSource.length - 1));
+    } catch {
+      if (session === this.session && this.visible) this.message = "没保存上，新手牌还在，再试一次";
+    } finally {
+      this.deleting = false;
+    }
   };
 
   refreshFavorites = async () => {
@@ -346,8 +464,9 @@ export class PanelState {
 
   toggleFavorite = async (id: number) => {
     if (!this.visible || !this.interactive || this.busy || this.favoritePending !== null) return;
-    const item = this.filtered.find((entry) => entry.id === id);
+    const item = this.handSource.find((entry) => entry.id === id) ?? this.filtered.find((entry) => entry.id === id);
     if (!item) return;
+    if (this.guideNotice(item)) return;
     const selectedId = this.currentItem?.id;
     const session = this.session;
     if (this.pinnedIds === null || this.recentIds === null) {
@@ -393,6 +512,7 @@ export class PanelState {
   pressDelete = () => {
     const item = this.currentItem;
     if (!this.visible || !this.interactive || this.busy || !item || this.deleting || this.holdDelete?.phase === "holding") return;
+    if (item.guide_id) { void this.dismissGuide(item); return; }
     if (!item.favorite) { void this.deleteCurrent(); return; }
     const session = this.session;
     this.clearHold();
@@ -432,6 +552,7 @@ export class PanelState {
   private deleteCurrent = async () => {
     const item = this.currentItem;
     if (!this.visible || !this.interactive || this.busy || !item || this.deleting) return;
+    if (item.guide_id) { await this.dismissGuide(item); return; }
     const session = this.session;
     const index = this.selected;
     this.deleting = true;
@@ -461,6 +582,8 @@ export class PanelState {
   /** Ctrl+Z：恢复最近删除的一条。不限于这次呼出：后端记着本次运行里的删除顺序，可以连续撤销。 */
   undoDelete = async () => {
     if (!this.visible) return;
+    const item = this.currentItem;
+    if (item && this.guideNotice(item)) return;
     const session = this.session;
     this.clearUndo();
     try {
@@ -486,6 +609,7 @@ export class PanelState {
   /** 完整预览里 Ctrl+C：只复制选中的文字（面板不关，页脚提示）。 */
   copySelection = async () => {
     const item = this.currentItem;
+    if (item && this.guideNotice(item)) return;
     const text = window.getSelection?.()?.toString() ?? "";
     if (!item || !this.previewOpen) return;
     if (!text) { this.message = "先选中要复制的字"; return; }
@@ -714,6 +838,10 @@ export class PanelState {
       this.message = "窗口变了，请重选一张";
       return;
     }
+    if (choice.queueIds?.some((id) => id < 0) || (choice.id !== null && choice.id < 0)) {
+      this.showNotice("新手牌是说明，贴不出去");
+      return;
+    }
     if (choice.queueIds) {
       // 已选可以来自上一手或搜索前的列表，不要求出现在当前结果里；条目是否还在由后端核对。
       this.busy = true;
@@ -929,6 +1057,7 @@ export class PanelState {
   choose = async (index = this.selected, pasteMode: PasteMode = "paste", event?: KeyboardEvent | MouseEvent) => {
     const item = this.handSource[index];
     if (!this.visible || !this.interactive || this.busy || this.pendingDom || !item) return;
+    if (item.guide_id) { this.selected = index; this.guideNotice(item); return; }
     // 已选的牌只跟着已选一起粘贴，不响应数字或单击单独取用。
     if (this.isTaken(item.id)) { this.takenNotice(); return; }
     // 第一次 await 之前固定全部请求字段；绝不在 IPC/读库返回后换用更新的条目或 revision。
@@ -981,6 +1110,7 @@ export class PanelState {
   takeCurrent = () => {
     const item = this.currentItem;
     if (!this.visible || !this.interactive || this.busy || this.awaitingRelease || this.previewOpen || !item) return;
+    if (this.guideNotice(item)) return;
     if (this.isTaken(item.id)) return;
     if (this.stack.length >= STACK_LIMIT) {
       this.showNotice(`最多选 ${STACK_LIMIT} 张：先按 ↵ 一起粘贴，或 Backspace 放回`, 3600);
@@ -1030,6 +1160,8 @@ export class PanelState {
 
   /** Ctrl+Shift+Enter 只负责逐张放；Shift+Enter 永远只复制当前一张，不再按上下文换义。 */
   startStackQueue = async (automatic: boolean, pasteMode: "paste" | "text", event?: KeyboardEvent) => {
+    const guarded = this.stack.find((item) => item.guide_id);
+    if (guarded) { this.guideNotice(guarded); return; }
     if (!this.visible || !this.interactive || this.busy || this.pendingDom || !this.stack.length) {
       if (!this.stack.length) this.message = "先按空格多选几张，再按 Ctrl+Shift+Enter 逐张放";
       return;
@@ -1461,6 +1593,15 @@ export class PanelState {
     };
     const initialize = async () => {
       if (ipc.onSettingsChanged) await subscribe(ipc.onSettingsChanged, (settings) => this.applySettings(settings));
+      if (ipc.onGuideCardsDealt) await subscribe(ipc.onGuideCardsDealt, () => {
+        this.applyGuide({ ...this.guide, cards_dealt: true });
+      });
+      if (ipc.onGuideHotkeySaved) await subscribe(ipc.onGuideHotkeySaved, (payload) => {
+        const pending = this.guideHotkeyPending;
+        if (!pending || !this.visible || pending.session !== this.session || payload.request !== pending.request) return;
+        this.guideHotkeyPending = null;
+        void this.command(() => ipc.hidePanel(pending.session), pending.session);
+      });
       await subscribe(ipc.onPanelShown, (payload) => {
         const receivedAt = performance.now();
         if (!Number.isSafeInteger(payload.session) || payload.session < this.session) return;
@@ -1470,6 +1611,9 @@ export class PanelState {
             || this.visible || this.interaction === "close_only" || payload.interaction !== "close_only") return;
         } else if (payload.session <= this.lastShownSession) return;
         this.lastShownSession = payload.session;
+        this.guideHotkeyPending = null;
+        // 挂起恢复依赖 shown 自带的完整持久 guide；必须在冻结本次手牌之前消费。
+        if (payload.guide) this.applyGuide(payload.guide, false);
         this.searchRequest += 1;
         if (payload.session !== this.session) this.queueSubmission = null;
         this.session = payload.session;
@@ -1519,6 +1663,7 @@ export class PanelState {
         this.receiveForegroundRevision(payload.foregroundRevision, receivedAt);
         this.timing = { session: payload.session, hotkeyToShowMs: payload.hotkeyToShowMs };
         this.restoreQueueLeftovers(payload.history.items);
+        this.syncGuideAutostart();
         const current = this.session;
         if (this.interaction === "activated") this.prepareDomFocus();
         else this.input?.blur();
@@ -1576,6 +1721,12 @@ export class PanelState {
         if (payload.session !== this.session) return;
         this.searchRequest += 1;
         this.visible = false;
+        this.guideHotkeyPending = null;
+        this.guideAutostartRequest += 1;
+        this.guideAutostartKey = `${this.session}:off`;
+        this.autostartReady = false;
+        this.autostartBusy = false;
+        this.autostartError = "";
         // 异常停止的小指示要停留约 3 秒显示原因；其余情况收起时清掉。
         if (payload.queue !== true && !this.queue?.stopped) this.queue = null;
         // 清掉手牌画面：下次呼出在 panel:shown 带来新历史之前不渲染任何旧牌（避免首帧闪出旧画面）。
@@ -1685,6 +1836,7 @@ export class PanelState {
     void initialize().catch(() => { this.message = "拈来没启动好。退出后重新打开"; });
     return () => {
       disposed = true; this.searchRequest += 1; this.foregroundSnapshot = null;
+      this.guideHotkeyPending = null; this.guideAutostartRequest += 1; this.autostartBusy = false;
       this.clearDomChoice(true); this.cancelDomFocus(); this.clearSearchTimer();
       this.clearFeedback(); this.setModifiers(false, false); this.clearUndo(); this.clearHold();
       unlisten.forEach((stop) => stop()); frames.forEach(cancelAnimationFrame);

@@ -1,9 +1,22 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
   import * as ipc from "../lib/ipc";
-  import type { LicenseNotices } from "../lib/ipc";
+  import type { AppSettings, GuideSettings, LicenseNotices, SettingsUpdate } from "../lib/ipc";
   import appIcon from "../../src-tauri/icons/128x128.png?url";
   import { message } from "./format";
+  import SaveMark, { type SaveMarkState } from "./SaveMark.svelte";
+
+  const IDLE: SaveMarkState = { phase: "idle", message: "", error: "" };
+  let { guide, disabled = false, onsave, saveState = () => IDLE, openRecovery, onopenguide, dealPending, ondeal }: {
+    guide: GuideSettings;
+    disabled?: boolean;
+    onsave: (key: string, update: SettingsUpdate, message: string) => Promise<AppSettings | null>;
+    saveState?: (key: string) => SaveMarkState;
+    openRecovery: { pending: boolean } | null;
+    onopenguide: () => Promise<boolean>;
+    dealPending: boolean;
+    ondeal: () => Promise<string | null>;
+  } = $props();
 
   let version = $state("正在读取版本…");
   let dataDir = $state("正在读取目录…");
@@ -14,6 +27,11 @@
   let licenseOpen = $state(false);
   let licenseDialog = $state<HTMLDialogElement>();
   let licenseButton = $state<HTMLButtonElement>();
+  let actionPending = $state<"replay" | "deal" | "open" | null>(null);
+  let actionError = $state("");
+  let actionNotice = $state("");
+  const inFirstRun = $derived(guide.phase === "await_copy" || guide.phase === "await_show" || guide.phase === "await_paste");
+  const actionDisabled = $derived(disabled || inFirstRun || dealPending || actionPending !== null || saveState("about.guide").phase === "saving");
 
   onMount(() => {
     let alive = true;
@@ -41,12 +59,40 @@
     if (openingDirectory || dataDir.startsWith("正在") || dataDir.startsWith("目录没读到")) return;
     openingDirectory = true;
     directoryError = "";
+    try { await ipc.openDataDir(); }
+    catch (value) { directoryError = `文件夹没打开：${message(value)}`; }
+    finally { openingDirectory = false; }
+  }
+
+  async function guideAction(action: "replay" | "deal") {
+    if (actionDisabled) return;
+    actionPending = action;
+    actionError = "";
+    actionNotice = "";
     try {
-      await ipc.openDataDir();
-    } catch (value) {
-      directoryError = `文件夹没打开：${message(value)}`;
+      if (action === "deal") {
+        const notice = await ondeal();
+        if (notice) actionNotice = notice;
+        return;
+      }
+      const saved = await onsave("about.guide", { guide: { version: 1, phase: "await_copy", baseline_ms: null, baseline_total: 0, sample_id: null, cards_dealt: false } }, "首次启动设置已保存");
+      if (!saved) return;
+      // 已保存的 await_copy 不回滚；父层保留 open 失败恢复，页面重挂后仍能只重试开窗。
+      if (await onopenguide()) actionNotice = "首次启动已重新打开";
     } finally {
-      openingDirectory = false;
+      actionPending = null;
+    }
+  }
+
+  async function retryGuideOpen() {
+    if (disabled || actionPending || openRecovery?.pending) return;
+    actionPending = "open";
+    actionError = "";
+    actionNotice = "";
+    try {
+      if (await onopenguide()) actionNotice = "首次启动已重新打开";
+    } finally {
+      actionPending = null;
     }
   }
 
@@ -55,9 +101,7 @@
     await tick();
     licenseDialog?.showModal();
   }
-  function closeLicenses() {
-    licenseDialog?.close();
-  }
+  function closeLicenses() { licenseDialog?.close(); }
   async function closedLicenses() {
     licenseOpen = false;
     await tick();
@@ -83,12 +127,23 @@
       <button type="button" disabled={openingDirectory || dataDir.startsWith("正在") || dataDir.startsWith("目录没读到")} onclick={openDirectory}>{openingDirectory ? "正在打开…" : "打开文件夹"}</button>
     </div>
     <div class="setting">
-      <span class="setting-copy"><strong>再看一次首次启动</strong><small>这个入口还没接入，先留位置；现在不会假装已经打开。</small></span>
-      <button type="button" data-guide-action="replay" disabled title="后续版本接入">还没接入</button>
+      <span class="setting-copy"><strong>再看一次首次启动</strong><small>{inFirstRun ? "首次启动结束后可以再看一次或再发新手牌。" : "从复制一句话开始，重新走一遍首次启动。新手牌的丢弃记录会保留。"}</small></span>
+      <button type="button" data-guide-action="replay" disabled={actionDisabled} onclick={() => { void guideAction("replay"); }}>{actionPending === "replay" ? "正在保存…" : "再看一次"}</button>
     </div>
     <div class="setting">
-      <span class="setting-copy"><strong>再发一遍新手牌</strong><small>这个入口也还没接入，先留位置；现在不会发牌，也不会显示成功。</small></span>
-      <button type="button" data-guide-action="deal" disabled title="后续版本接入">还没接入</button>
+      <span class="setting-copy"><strong>再发一遍新手牌</strong><small>{inFirstRun ? "首次启动结束后可以再看一次或再发新手牌。" : "保留当前首次启动状态，把四张新手牌重新放进最近。"}</small></span>
+      <button type="button" data-guide-action="deal" disabled={actionDisabled} onclick={() => { void guideAction("deal"); }}>{actionPending === "deal" ? "正在保存…" : "再发一遍"}</button>
+    </div>
+    {#if openRecovery}
+      <div class="setting" data-guide-open-recovery>
+        <span class="setting-copy"><strong>首次启动窗口没有打开</strong><small class="error" role="alert">设置已保存，但窗口没打开，请再试一次</small></span>
+        <button type="button" data-guide-action="open" disabled={disabled || actionPending !== null || openRecovery.pending} onclick={() => { void retryGuideOpen(); }}>{openRecovery.pending || actionPending === "open" ? "正在打开…" : "重新打开窗口"}</button>
+      </div>
+    {/if}
+    <div class="guide-feedback" data-save-row="about.guide">
+      <SaveMark state={saveState("about.guide")} />
+      {#if actionError}<p class="error" role="alert">{actionError}</p>{/if}
+      {#if actionNotice}<p class="notice" role="status">{actionNotice}</p>{/if}
     </div>
     <div class="setting">
       <span class="setting-copy"><strong>开源许可</strong><small>拈来 MIT 全文和随包第三方许可说明，都在本机查看。</small></span>
@@ -103,7 +158,6 @@
     oncancel={(event) => { event.preventDefault(); closeLicenses(); }}
     onkeydown={(event) => { if (event.key === "Escape") { event.preventDefault(); closeLicenses(); } }}>
     <div class="license-head"><h2 id="license-title">开源许可</h2><button type="button" onclick={closeLicenses}>关闭</button></div>
-    <!-- 可滚动长文需要进入 Tab 顺序，方向键才能逐行阅读。 -->
     <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
     <div class="license-scroll" role="region" aria-label="许可正文" tabindex="0">
       {#if noticesError}
@@ -135,7 +189,10 @@
   button { min-height: 32px; flex: none; padding: 4px 12px; border: 1px solid var(--hand-line-strong); border-radius: 4px; background: var(--hand-card-back); color: var(--hand-ink); font-size: 12px; }
   button.link { border-color: transparent; background: transparent; color: var(--hand-seal); text-decoration: underline; }
   button:disabled { opacity: .6; }
+  .guide-feedback { padding: 0 16px; }
+  .guide-feedback p { margin: 8px 0 12px; font-size: 12px; line-height: 1.6; }
   .error { color: var(--state-critical); }
+  .notice { color: var(--hand-ink-2); }
   dialog { width: min(760px, calc(100vw - 64px)); height: min(600px, calc(100vh - 64px)); padding: 0; overflow: hidden; border: 1px solid var(--hand-line-strong); border-radius: 8px; background: var(--hand-paper); color: var(--hand-ink); box-shadow: var(--hand-lift); }
   dialog::backdrop { background: rgba(0, 0, 0, .42); }
   .license-head { height: 56px; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 0 20px; border-bottom: 1px solid var(--hand-line); }

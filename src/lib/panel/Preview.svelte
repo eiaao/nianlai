@@ -6,12 +6,16 @@
   import { formatTime, type PanelState } from "../state.svelte";
   import { cardKind, colorValue, linkParts, relativeTime, sourceName } from "../cards";
   import { SpringValue } from "./motion";
+  import { displayHotkey } from "../guideCards";
 
   let { panel, item, expanded = false, compact = false }: { panel: PanelState; item: HistoryItem | null; expanded?: boolean; compact?: boolean } = $props();
   let root: HTMLDivElement;
   let previousId: number | null | undefined;
   const kind = $derived(item ? cardKind(item) : "short");
   const rich = $derived(item?.kind === "富文本");
+  const guideText = $derived(item?.guide_id === "t3" ? displayHotkey(panel.hotkey)
+    : item?.guide_id === "t4" ? (panel.autostart ? "电脑开机后，拈来就在托盘里等着。" : "要用时从开始菜单打开拈来。")
+      : item?.preview ?? "");
   const link = $derived(item ? linkParts(item.preview ?? "") : null);
   const color = $derived(item ? colorValue(item.preview ?? "") : null);
   const y = new SpringValue(0, (value) => { if (root) root.style.transform = `translate3d(0, ${value}px, 0)`; }, () => panel.motion);
@@ -99,7 +103,7 @@
   let loadingRest = false;
   const textual = $derived(kind !== "image" && kind !== "file");
   $effect(() => {
-    const id = expanded && item && textual ? item.id : -1;
+    const id = expanded && item && textual && !item.guide_id ? item.id : -1;
     if (id === fullFor) return;
     fullFor = id; full = null; loadingRest = false;
     if (id < 0) return;
@@ -137,7 +141,7 @@
     </div>
   {:else}
     <div class="preview-eyebrow">
-      <span>{sourceName(item)} · {relativeTime(item.copied_ms)}</span>
+      <span>{item.guide_id ? "新手牌 · Delete 扔掉" : `${sourceName(item)} · ${relativeTime(item.copied_ms)}`}</span>
     </div>
     {#if item.favorite && (item.title || item.note)}
       <!-- M2-6：常用的标题和备注在设置“整理”页里编辑，这里只显示。 -->
@@ -147,7 +151,11 @@
       </div>
     {/if}
 
-    {#if kind === "image"}
+    {#if item.guide_id}
+      <h2 class="preview-title">{item.title}</h2>
+      <p class="preview-text">{guideText}</p>
+      <p class="preview-note">新手牌是说明，贴不出去</p>
+    {:else if kind === "image"}
       {#if expanded}
         <div class="image-stage" class:original={!fit} bind:this={stage} use:measure use:pan role="img" aria-label={item.preview || "图片记录"}>
           {#if image}

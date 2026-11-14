@@ -2,6 +2,7 @@ mod app;
 mod autocycle;
 mod capture;
 mod directories;
+mod guide_window;
 mod health;
 mod history;
 mod hotkey;
@@ -313,6 +314,10 @@ async fn discard_import(history: State<'_, History>, token: String) -> Result<()
 #[tauri::command]
 fn get_history(history: State<'_, History>) -> history::Snapshot {
     history.snapshot()
+}
+#[tauri::command]
+fn get_guide_health(history: State<'_, History>) -> health::HealthSnapshot {
+    history.health()
 }
 #[tauri::command]
 async fn search_history(
@@ -669,6 +674,7 @@ pub fn run() {
             import_backup,
             discard_import,
             get_history,
+            get_guide_health,
             search_history,
             get_favorites,
             set_favorite,
@@ -705,7 +711,11 @@ pub fn run() {
             set_hit_regions,
             report_painted,
             report_search_input,
-            settings_window::open_settings
+            settings_window::open_settings,
+            tray::guide_open_panel,
+            guide_window::guide_copy_sample,
+            guide_window::open_guide,
+            guide_window::set_guide_hit_regions
         ])
         .setup(|app| {
             let settings_file = settings::settings_path();
@@ -778,12 +788,32 @@ pub fn run() {
                 &resolved.settings.hotkey,
                 resolved.hotkey_overridden,
             );
+            if guide_window::should_open(resolved.settings.guide.phase) {
+                let guide_app = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(error) = guide_window::open_guide(guide_app.clone()).await
+                        && let Some(controller) = guide_app.try_state::<Controller>()
+                    {
+                        controller
+                            .logger
+                            .event("guide_open_failed", json!({"error":error}));
+                    }
+                });
+            }
             Ok(())
         })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                // 设置窗口关掉就销毁，下次再按需创建；只有面板窗口的关闭请求才走退出。
-                if window.label() == settings_window::LABEL {
+                // guide / settings 只销毁自己；只有 panel 等其他窗口维持原退出分支。
+                if guide_window::close_action(window.label())
+                    == guide_window::CloseAction::DestroySelf
+                {
+                    if window.label() == guide_window::LABEL
+                        && let Some(guide) =
+                            window.app_handle().get_webview_window(guide_window::LABEL)
+                    {
+                        platform::window::clear_hit_regions(&guide);
+                    }
                     return;
                 }
                 api.prevent_close();

@@ -2,10 +2,11 @@
 // Vite 编译并挂载真实 Svelte 设置组件；Edge 只访问本机临时服务器，IPC 全部是内存替身。
 import assert from "node:assert/strict";
 import { after, afterEach, before, test } from "node:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
+import { cleanupHeadlessEdge } from "./headlessEdgeCleanup.mjs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawn } from "node:child_process";
 import { createServer } from "vite";
@@ -148,25 +149,12 @@ before(async () => {
 });
 
 after(async () => {
-  cdp?.close();
+  if (cdp) {
+    await Promise.race([cdp.send("Browser.close").catch(() => {}), new Promise((resolve) => setTimeout(resolve, 3000))]);
+    cdp.close();
+  }
   await vite?.close();
-  if (edge && edge.exitCode === null) {
-    const exited = new Promise((resolve) => edge.once("exit", resolve));
-    edge.kill();
-    await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 3000))]);
-  }
-  if (temporary) {
-    assert.equal(dirname(temporary), temporaryBase);
-    assert.ok(temporary.includes("nianlai-settings-pages-"));
-    // Windows 上 Edge 子进程可能晚一拍释放配置目录；只在短暂锁定时重试，最终错误仍原样抛出。
-    for (let attempt = 0; ; attempt += 1) {
-      try { rmSync(temporary, { recursive: true, force: true }); break; }
-      catch (error) {
-        if (attempt >= 5 || !["EPERM", "EBUSY"].includes(error.code)) throw error;
-        await new Promise((resolve) => setTimeout(resolve, 250));
-      }
-    }
-  }
+  await cleanupHeadlessEdge({ edge, temporary, temporaryBase, prefix: "nianlai-settings-pages-", label: "SettingsPages" });
   const stderr = edgeStderr.join("").trimEnd();
   if (stderr) console.error(`\n[无头 Edge 非阻断 stderr 原文]\n${stderr}\n[/无头 Edge stderr]\n`);
 });
@@ -1938,7 +1926,7 @@ test("存档恢复、上限、手动存档和备份入口在重排后仍可达",
   }
 });
 
-test("关于显示真实版本和目录，离线许可完整可读，两个首次启动入口只保留未接入位置", async () => {
+test("关于显示真实版本和目录，离线许可完整可读，首次启动进行中禁用两个重放入口", async () => {
   await openSettings("about");
   await waitFor(() => cdp.evaluate(`document.querySelector("[data-about-version]")?.textContent.includes("0.0.0-test")`), "真实 appVersion");
   assert.match(await cdp.evaluate(`document.querySelector("[data-about-dir]")?.textContent`), /D:\\test-data\\nianlai/);

@@ -24,11 +24,12 @@ async function compilePanel() {
   const compiledPath = join(temporary, "state.svelte.mjs");
   const preferencesPath = join(temporary, "preferences.mjs");
   const cardsPath = join(temporary, "cards.mjs");
+  const guideCardsPath = join(temporary, "guideCards.mjs");
   const cleanup = () => {
     assert.equal(dirname(temporary), temporaryBase);
     assert.ok(basename(temporary).startsWith("nianlai-panel-key-repeat-"));
     // 只删除本次创建的几个文件和空目录，不递归清理任何路径。
-    for (const path of [compiledPath, preferencesPath, cardsPath, ipcPath]) if (existsSync(path)) unlinkSync(path);
+    for (const path of [compiledPath, preferencesPath, cardsPath, guideCardsPath, ipcPath]) if (existsSync(path)) unlinkSync(path);
     rmdirSync(temporary);
     assert.equal(existsSync(temporary), false);
   };
@@ -139,14 +140,16 @@ export function emit(name, payload) { return handlers.get(name)?.(payload); }
       ["./ipc", pathToFileURL(ipcPath).href],
       ["./preferences", pathToFileURL(preferencesPath).href],
       ["./cards", pathToFileURL(cardsPath).href],
+      ["./guideCards", pathToFileURL(guideCardsPath).href],
     ]);
     writeFileSync(cardsPath, transpile("src/lib/cards.ts"));
+    writeFileSync(guideCardsPath, transpile("src/lib/guideCards.ts"));
     // 真实的 preferences.ts 一并转译，面板与设置页用同一份偏好映射。
     writeFileSync(preferencesPath, ts.transpileModule(readFileSync(join(root, "src/lib/preferences.ts"), "utf8"), {
       compilerOptions: { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.ESNext },
     }).outputText);
     const compiled = compileModule(stripped, { filename: "state.svelte.js", generate: "client", dev: false }).js.code
-      .replace(/(from\s+)(["'])(svelte\/internal\/client|svelte|\.\/ipc|\.\/preferences|\.\/cards)\2/g,
+      .replace(/(from\s+)(["'])(svelte\/internal\/client|svelte|\.\/ipc|\.\/preferences|\.\/cards|\.\/guideCards)\2/g,
         (_, prefix, _quote, specifier) => prefix + JSON.stringify(imports.get(specifier)));
     writeFileSync(compiledPath, compiled);
     const { PanelState } = await import(pathToFileURL(compiledPath).href);
@@ -277,6 +280,34 @@ test("Activated DOM 快速取用、焦点准备与自然搜索输入", async (su
   const actions = submissions.filter((action) => action.key === "Enter" || Number(action.key) <= 7).map((action) => action.name.startsWith("Ctrl+") && action.key !== "Enter"
     ? { ...action, name: action.key, ctrlKey: false } : action);
   const expected = (action) => ({ command: "pasteItem", session: 37, id: 101 + action.index, mode: action.mode });
+
+  await suite.test("Activated DOM 单牌 releaseDomChoice 对实际负数 id 零 IPC", async (context) => {
+    const { panel } = await activatedPanel(context, PanelState, ipc);
+    const negative = { ...items()[0], id: -1, preview: "伪造负数项" };
+    panel.history = { ...panel.history, items: [negative, ...items()] };
+    panel.recentIds = [-1, ...items().map((item) => item.id)];
+    panel.selected = 0;
+    keydown(panel, { key: "Enter", code: "Enter" });
+    assert.equal(panel.pendingDom?.id, -1, "确实构造了 Activated DOM 单牌提交");
+    keyup(panel, { key: "Enter", code: "Enter" });
+    assert.deepEqual(ipc.calls, []);
+    assert.equal(panel.notice, "新手牌是说明，贴不出去");
+  });
+
+  await suite.test("Activated DOM 实际含负数 id 的 queue 在 releaseDomChoice 前零 IPC", async (context) => {
+    const { panel } = await activatedPanel(context, PanelState, ipc);
+    const negative = { ...items()[0], id: -1, preview: "伪造负数队列项" };
+    panel.history = { ...panel.history, items: [negative, ...items()] };
+    panel.recentIds = [-1, ...items().map((item) => item.id)];
+    panel.stack = [negative, items()[0]];
+    keydown(panel, { key: "Enter", code: "Enter", ctrlKey: true, shiftKey: true });
+    assert.deepEqual(panel.pendingDom?.queueIds, [-1, 101], "确实构造了含负数 ID 的 queue 提交");
+    keyup(panel, { key: "Enter", code: "Enter", ctrlKey: true, shiftKey: true });
+    keyup(panel, { key: "Shift", code: "ShiftLeft", ctrlKey: true });
+    keyup(panel, { key: "Control", code: "ControlLeft" });
+    assert.deepEqual(ipc.calls, []);
+    assert.equal(panel.notice, "新手牌是说明，贴不出去");
+  });
 
   for (const action of actions) {
     await suite.test(`${action.name} 固定首次按下的条目和模式，等确认键及修饰键真实松开`, async (context) => {

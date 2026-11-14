@@ -373,13 +373,28 @@ pub struct Record {
 
 struct WriteRequest<'a> {
     owner: HWND,
-    record: Record,
+    // Some 是普通粘贴：登记回声并写阻断标记；None 只用于 guide 示例，交给正常采集。
+    record: Option<Record>,
     content: &'a Content,
     history: &'a History,
     target: u32,
     delayed: bool,
     observation: Arc<Mutex<Observation>>,
     lease: Option<queue::Lease<'a>>,
+}
+
+fn before_clipboard_write(record: Option<Record>, before: impl FnOnce(Record) -> bool) -> bool {
+    record.is_none_or(before)
+}
+
+fn writes_blocking_markers(record: Option<Record>) -> bool {
+    record.is_some()
+}
+
+fn after_clipboard_write(record: Option<Record>, reuse: impl FnOnce(Record)) {
+    if let Some(record) = record {
+        reuse(record);
+    }
 }
 
 fn write(
@@ -426,24 +441,27 @@ fn write(
         w!("CanUploadToCloudClipboard"),
     ];
     let mut markers = Vec::new();
-    for (index, name) in names.iter().enumerate() {
-        let format = unsafe { RegisterClipboardFormatW(*name) };
-        if format == 0 {
-            return Err("clipboard_register_format_failed".into());
+    if writes_blocking_markers(record) {
+        for (index, name) in names.iter().enumerate() {
+            let format = unsafe { RegisterClipboardFormatW(*name) };
+            if format == 0 {
+                return Err("clipboard_register_format_failed".into());
+            }
+            markers.push((
+                format,
+                Memory::new(&(if index < 2 { 1u32 } else { 0u32 }).to_ne_bytes())?,
+            ));
         }
-        markers.push((
-            format,
-            Memory::new(&(if index < 2 { 1u32 } else { 0u32 }).to_ne_bytes())?,
-        ));
     }
-    // 登记回声要经过存储的写线程，它可能正在写一张大图；放在打开剪贴板之前，
-    // 免得占着剪贴板等数据库，挡住其他程序。
-    if !history.before_write(
-        record.id,
-        record.fingerprint,
-        content.fingerprint,
-        Instant::now(),
-    ) {
+    // 普通粘贴登记回声要经过存储的写线程，放在打开剪贴板之前；guide 示例没有 record，绝不登记。
+    if !before_clipboard_write(record, |record| {
+        history.before_write(
+            record.id,
+            record.fingerprint,
+            content.fingerprint,
+            Instant::now(),
+        )
+    }) {
         return Err("record_missing".into());
     }
     let started = Instant::now();
@@ -583,8 +601,61 @@ fn write(
             }
         }
     }
-    history.reuse(record.id);
+    after_clipboard_write(record, |record| history.reuse(record.id));
     Ok(())
+}
+
+fn create_sample_owner() -> Result<HWND> {
+    // 必须区别于 Service.owner，否则现有采集器会把这次变化归为 own_write。
+    unsafe {
+        let instance = HINSTANCE(
+            GetModuleHandleW(None)
+                .map_err(|_| "clipboard_module_failed")?
+                .0,
+        );
+        CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            w!("NianlaiG0Clipboard"),
+            w!("guide sample"),
+            WINDOW_STYLE(0),
+            0,
+            0,
+            0,
+            0,
+            Some(HWND_MESSAGE),
+            None,
+            Some(instance),
+            None,
+        )
+        .map_err(|_| "clipboard_window_failed".into())
+    }
+}
+
+fn write_sample_with(
+    service_owner: HWND,
+    content: &Content,
+    history: &History,
+    create_owner: impl FnOnce() -> Result<HWND>,
+    publish: impl FnOnce(WriteRequest<'_>) -> Result<()>,
+    destroy_owner: impl FnOnce(HWND),
+) -> Result<()> {
+    let sample_owner = create_owner()?;
+    if sample_owner.0 == service_owner.0 {
+        // 相同 owner 会被正常采集判为 own_write；绝不能把它当成外部示例发布。
+        return Err("clipboard_sample_owner_conflict".into());
+    }
+    let result = publish(WriteRequest {
+        owner: sample_owner,
+        record: None,
+        content,
+        history,
+        target: 0,
+        delayed: false,
+        observation: Arc::new(Mutex::new(Observation::default())),
+        lease: None,
+    });
+    destroy_owner(sample_owner);
+    result.map(drop)
 }
 
 enum Command {
@@ -597,6 +668,10 @@ enum Command {
         guard: Option<Arc<queue::Guard>>,
         reply: mpsc::SyncSender<Result<()>>,
     },
+    WriteSample {
+        content: Arc<Content>,
+        reply: mpsc::SyncSender<Result<()>>,
+    },
     Watch {
         watcher: Option<Watcher>,
         reply: mpsc::SyncSender<()>,
@@ -607,6 +682,8 @@ struct Inner {
     owner: usize,
     capture_access: Arc<CaptureAccess>,
     sender: mpsc::Sender<Command>,
+    // 生产实现仍是 PostMessageW；测试可替换通知，但命令、WriteSample 和采集观察都走生产入口。
+    notify: Arc<dyn Fn(usize) -> Result<()> + Send + Sync>,
     thread: Mutex<Option<JoinHandle<()>>>,
 }
 #[derive(Clone)]
@@ -691,7 +768,7 @@ impl Service {
                                     let lease = guard.as_ref().map(|guard| guard.lease());
                                     let _ = reply.send(write(WriteRequest {
                                         owner,
-                                        record,
+                                        record: Some(record),
                                         content: &content,
                                         history: &history,
                                         target,
@@ -699,6 +776,19 @@ impl Service {
                                         observation,
                                         lease,
                                     }));
+                                }
+                                Command::WriteSample { content, reply } => {
+                                    let result = write_sample_with(
+                                        owner,
+                                        &content,
+                                        &history,
+                                        create_sample_owner,
+                                        write,
+                                        |sample_owner| unsafe {
+                                            let _ = DestroyWindow(sample_owner);
+                                        },
+                                    );
+                                    let _ = reply.send(result);
                                 }
                                 Command::Watch { watcher, reply } => {
                                     WATCHER.with(|slot| *slot.borrow_mut() = watcher);
@@ -733,6 +823,10 @@ impl Service {
             owner,
             capture_access: Arc::new(CaptureAccess::default()),
             sender,
+            notify: Arc::new(|owner| unsafe {
+                PostMessageW(Some(window::hwnd(owner)), COMMAND, WPARAM(0), LPARAM(0))
+                    .map_err(|_| "clipboard_post_failed".into())
+            }),
             thread: Mutex::new(Some(thread)),
         })))
     }
@@ -745,15 +839,7 @@ impl Service {
             .sender
             .send(command)
             .map_err(|_| "clipboard_stopped")?;
-        unsafe {
-            PostMessageW(
-                Some(window::hwnd(self.0.owner)),
-                COMMAND,
-                WPARAM(0),
-                LPARAM(0),
-            )
-        }
-        .map_err(|_| "clipboard_post_failed".into())
+        (self.0.notify)(self.0.owner)
     }
 
     pub fn owner(&self) -> usize {
@@ -820,6 +906,21 @@ impl Service {
         Ok(observation)
     }
 
+    /// guide 示例复用同一个写线程和格式发布代码，但使用独立 owner、无阻断标记、无历史回声。
+    /// 返回值只表示剪贴板写入完成；暂停、排除、敏感和容量判断仍由正常采集器决定。
+    pub fn write_for_capture(&self, content: Arc<Content>) -> Result<()> {
+        let _access = self
+            .0
+            .capture_access
+            .native(native_access::BUDGET, || false)
+            .map_err(|error| error.reason().to_owned())?;
+        let (reply, receiver) = mpsc::sync_channel(1);
+        self.command(Command::WriteSample { content, reply })?;
+        receiver
+            .recv()
+            .map_err(|_| "clipboard_write_failed".to_owned())?
+    }
+
     pub fn shutdown(&self) {
         self.0.shutdown();
     }
@@ -829,14 +930,7 @@ impl Inner {
         let thread = self.thread.lock().unwrap().take();
         if let Some(thread) = thread {
             let _ = self.sender.send(Command::Stop);
-            unsafe {
-                let _ = PostMessageW(
-                    Some(window::hwnd(self.owner)),
-                    COMMAND,
-                    WPARAM(0),
-                    LPARAM(0),
-                );
-            }
+            let _ = (self.notify)(self.owner);
             let _ = thread.join();
         }
     }
@@ -850,6 +944,117 @@ impl Drop for Inner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn task11_guide_sample_uses_write_path_without_echo_or_blocking_markers() {
+        let record = Record {
+            id: 17,
+            fingerprint: [9; 32],
+        };
+        assert!(before_clipboard_write(Some(record), |seen| {
+            assert_eq!(seen.id, 17);
+            assert_eq!(seen.fingerprint, [9; 32]);
+            true
+        }));
+        assert!(writes_blocking_markers(Some(record)));
+        let mut reused = None;
+        after_clipboard_write(Some(record), |seen| reused = Some(seen.id));
+        assert_eq!(reused, Some(17));
+
+        assert!(before_clipboard_write(None, |_| {
+            panic!("示例复制不得登记历史回声")
+        }));
+        assert!(!writes_blocking_markers(None));
+        after_clipboard_write(None, |_| panic!("示例复制不得复用或改写既有历史记录"));
+        assert!(!before_clipboard_write(Some(record), |_| false));
+    }
+
+    #[test]
+    fn task11_fix_sample_command_reaches_normal_capture_as_an_external_write() {
+        use crate::paste::capture_access::{CaptureAttempt, OwnerSnapshot};
+        use std::{convert::Infallible, sync::atomic::AtomicBool};
+
+        const SERVICE_OWNER: usize = 41;
+        const SAMPLE_OWNER: usize = 77;
+        let directory = crate::settings::tests::Directory::new();
+        let directories = crate::settings::Directories {
+            settings_file: directory.0.join("settings.json"),
+            data: directory.0.join("data"),
+            logs: directory.0.join("logs"),
+            data_source: "测试",
+            test_data_dir: true,
+        };
+        let logger = Logger::with_settings(&directories, 20).unwrap();
+        let history = History::new(crate::platform::hash::sha256, logger);
+        let (sender, commands) = mpsc::channel();
+        let (published, publication) = mpsc::sync_channel(1);
+        let worker = thread::spawn(move || {
+            while let Ok(command) = commands.recv() {
+                match command {
+                    Command::WriteSample { content, reply } => {
+                        let published_content = content.clone();
+                        let published = published.clone();
+                        let result = write_sample_with(
+                            window::hwnd(SERVICE_OWNER),
+                            &content,
+                            &history,
+                            || Ok(window::hwnd(SAMPLE_OWNER)),
+                            move |request| {
+                                assert!(request.record.is_none());
+                                assert!(!request.delayed);
+                                assert!(request.lease.is_none());
+                                assert!(std::ptr::eq(request.content, &*published_content));
+                                published
+                                    .send((request.owner.0 as usize, published_content.clone()))
+                                    .unwrap();
+                                Ok(())
+                            },
+                            |_| {},
+                        );
+                        let _ = reply.send(result);
+                    }
+                    Command::Stop => break,
+                    Command::Watch { reply, .. } => {
+                        let _ = reply.send(());
+                    }
+                    Command::Write { .. } => panic!("本测试只注入 guide WriteSample"),
+                }
+            }
+        });
+        let service = Service(Arc::new(Inner {
+            owner: SERVICE_OWNER,
+            capture_access: Arc::new(CaptureAccess::default()),
+            sender,
+            notify: Arc::new(|_| Ok(())),
+            thread: Mutex::new(Some(worker)),
+        }));
+
+        crate::app::copy_guide_sample_to(&service).unwrap();
+        let (owner, content) = publication
+            .recv_timeout(Duration::from_secs(1))
+            .expect("write_for_capture 必须真的发出 WriteSample");
+        assert_eq!(
+            content.text_value().as_deref(),
+            Some(crate::guide_window::SAMPLE_TEXT)
+        );
+        let stopping = AtomicBool::new(false);
+        let observed = crate::platform::capture::observe_clipboard(
+            &service.capture_access(),
+            &stopping,
+            service.owner(),
+            || OwnerSnapshot {
+                sequence_before: 9,
+                owner,
+                sequence_after: 9,
+            },
+            || Ok::<_, Infallible>(()),
+        )
+        .unwrap();
+        assert!(
+            matches!(observed, CaptureAttempt::Opened(_)),
+            "独立 sample owner 必须穿过正常采集观察点；Service.owner 会被判为 own_write"
+        );
+    }
 
     #[test]
     fn immediate_publication_is_not_observable_even_without_a_reader() {

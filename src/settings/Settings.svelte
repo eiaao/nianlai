@@ -11,7 +11,8 @@
   import SettingsNotes from "./SettingsNotes.svelte";
   import SaveMark, { type SaveMarkState } from "./SaveMark.svelte";
   import { navigate, type SettingsPageId, type StorageView } from "../lib/settingsNavigation";
-  import type { AppSettings, CaptureSettings, InteractionSettings, SettingsUpdate } from "../lib/ipc";
+  import type { AppSettings, CaptureSettings, GuideSettings, InteractionSettings, SettingsUpdate } from "../lib/ipc";
+  import { defaultGuideSettings } from "../lib/guideCards";
   import {
     applyPreferences, DEFAULT_PREFERENCES, normalizePreferences,
     type Preferences,
@@ -28,6 +29,8 @@
   const IDLE_MARK: SaveMarkState = { phase: "idle", message: "", error: "" };
   let page = $state<SettingsPageId>("general");
   let generalPage = $state<ReturnType<typeof GeneralPage>>();
+  let recordHotkey = $state(false);
+  let hotkeyRequest = $state<string>();
   // 面板里的回收站入口仍通过 #trash 和 settings:navigate 到达原组件。
   let storageView = $state<StorageView>("main");
 
@@ -35,6 +38,8 @@
     const next = navigate(target);
     page = next.page;
     storageView = next.storageView;
+    recordHotkey = next.recordHotkey === true;
+    hotkeyRequest = next.hotkeyRequest;
   }
 
   onMount(() => {
@@ -52,6 +57,40 @@
   let capture = $state<CaptureSettings | null>(null);
   let snapshotMaxMb = $state(1024);
   let interaction = $state<InteractionSettings | null>(null);
+  let guide = $state<GuideSettings>(defaultGuideSettings());
+  // open 已成功保存 await_copy 后的失败恢复属于设置窗口，而不是会被页面切换销毁的 About 局部状态。
+  let aboutGuideOpen = $state<{ pending: boolean } | null>(null);
+  async function openAboutGuide(): Promise<boolean> {
+    if (aboutGuideOpen?.pending) return false;
+    aboutGuideOpen = { pending: true };
+    try {
+      await ipc.openGuide();
+      aboutGuideOpen = null;
+      return true;
+    } catch {
+      aboutGuideOpen = { pending: false };
+      return false;
+    }
+  }
+  // deal 从保存到定向通知完成只有这一把父层锁；About 重挂不会释放它，旧操作结束前也不能启动新操作。
+  let aboutGuideDealPending = $state(false);
+  async function dealAboutGuide(): Promise<string | null> {
+    if (aboutGuideDealPending) return null;
+    aboutGuideDealPending = true;
+    try {
+      const saved = await save("about.guide", { guide: { cards_dealt: true, dismissed: [] } }, "新手牌设置已保存");
+      if (!saved) return null;
+      try {
+        await ipc.notifyGuideCardsDealt();
+        return "新手牌已重新发出";
+      } catch {
+        // 设置确已保存；通知失败只影响当前可见面板，下一次 shown 会从持久 guide 恢复。
+        return "新手牌已保存，下次呼出会看到";
+      }
+    } finally {
+      aboutGuideDealPending = false;
+    }
+  }
   let reuseToTop = $state(true);
   let loading = $state(true);
   let loadError = $state("");
@@ -71,6 +110,7 @@
     capture = (settingsValue.capture as CaptureSettings | undefined) ?? null;
     snapshotMaxMb = settingsValue.snapshots?.max_mb ?? 1024;
     interaction = (settingsValue.interaction as InteractionSettings | undefined) ?? null;
+    if (settingsValue.guide) guide = settingsValue.guide;
     reuseToTop = settingsValue.history?.reuse_to_top !== false;
     preferences = normalizePreferences(settingsValue);
     applyPreferences(preferences);
@@ -189,6 +229,18 @@
       loading = false;
     }
   });
+  onMount(() => {
+    let disposed = false;
+    let stop: ipc.UnlistenFn | undefined;
+    void ipc.onSettingsChanged((settings) => {
+      if (disposed) return;
+      baseSettings = settings;
+      recomputeSettings();
+    }).then((unlisten) => {
+      if (disposed) unlisten(); else stop = unlisten;
+    }).catch(() => {});
+    return () => { disposed = true; stop?.(); };
+  });
   onDestroy(() => { for (const key of markTimers.keys()) clearMarkTimer(key); });
 </script>
 
@@ -216,7 +268,7 @@
     {#if loadError}<p class="load-error" role="alert">{loadError}</p>{/if}
     <div class="content">
       {#if page === "general"}
-        <GeneralPage bind:this={generalPage} {hotkey} {interaction} {preferences} {systemReduced} disabled={loading} onsave={save} saveState={row} />
+        <GeneralPage bind:this={generalPage} {hotkey} {interaction} {preferences} {systemReduced} {recordHotkey} {hotkeyRequest} onRecordHotkeyConsumed={() => { recordHotkey = false; hotkeyRequest = undefined; }} disabled={loading} onsave={save} saveState={row} />
       {:else if page === "privacy"}
         <CapturePage {capture} disabled={loading} onsave={saveCapture} />
       {:else if page === "data"}
@@ -226,7 +278,7 @@
       {:else if page === "habits"}
         <InteractionPage {interaction} {reuseToTop} disabled={loading} onsave={saveInteraction} saveState={row} />
       {:else}
-        <AboutPage />
+        <AboutPage {guide} disabled={loading} onsave={save} saveState={row} openRecovery={aboutGuideOpen} onopenguide={openAboutGuide} dealPending={aboutGuideDealPending} ondeal={dealAboutGuide} />
       {/if}
     </div>
   </main>

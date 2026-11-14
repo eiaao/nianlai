@@ -653,38 +653,123 @@ fn handle_left_click(app: &AppHandle) {
     );
 }
 
-fn open_panel(app: &AppHandle) {
+fn toggle_action(target: platform::Target) -> Action {
+    Action::Toggle {
+        started: Instant::now(),
+        target,
+        alt: false,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PanelVisibility {
+    Missing,
+    Visible,
+    Hidden,
+    Unavailable,
+}
+
+trait OpenPanelContext: Clone + Send + 'static {
+    fn run_on_main(&self, job: Box<dyn FnOnce() + Send>) -> Result<(), ()>;
+    fn controller_ready(&self) -> bool;
+    fn panel_visibility(&self) -> PanelVisibility;
+    fn capture_target(&self) -> platform::Target;
+    fn dispatch_panel(&self, action: Action) -> Result<(), String>;
+    fn record(&self, message: &'static str);
+}
+
+impl OpenPanelContext for AppHandle {
+    fn run_on_main(&self, job: Box<dyn FnOnce() + Send>) -> Result<(), ()> {
+        self.run_on_main_thread(job).map_err(|_| ())
+    }
+
+    fn controller_ready(&self) -> bool {
+        self.try_state::<Controller>().is_some()
+    }
+
+    fn panel_visibility(&self) -> PanelVisibility {
+        let Some(window) = self.get_webview_window("panel") else {
+            return PanelVisibility::Missing;
+        };
+        match window.is_visible() {
+            Ok(true) => PanelVisibility::Visible,
+            Ok(false) => PanelVisibility::Hidden,
+            Err(_) => PanelVisibility::Unavailable,
+        }
+    }
+
+    fn capture_target(&self) -> platform::Target {
+        platform::window::capture()
+    }
+
+    fn dispatch_panel(&self, action: Action) -> Result<(), String> {
+        panel::dispatch(self, action)
+    }
+
+    fn record(&self, message: &'static str) {
+        record(self, message);
+    }
+}
+
+fn open_panel_on_main(app: &impl OpenPanelContext) {
+    if !app.controller_ready() {
+        app.record("面板：尚未初始化，已跳过呼出");
+        return;
+    }
+    // 可见性检查和既有 Toggle 派发在同一主线程执行，重复打开不会反向隐藏。
+    match app.panel_visibility() {
+        PanelVisibility::Visible => {}
+        PanelVisibility::Hidden => {
+            let action = toggle_action(app.capture_target());
+            if app.dispatch_panel(action).is_err() {
+                app.record("面板：呼出请求未完成");
+            }
+        }
+        PanelVisibility::Missing => app.record("面板：未找到既有显示入口"),
+        PanelVisibility::Unavailable => app.record("面板：可见状态查询失败，已跳过呼出"),
+    }
+}
+
+fn open_panel(app: &impl OpenPanelContext) {
     let handle = app.clone();
     if app
-        .run_on_main_thread(move || {
-            if handle.try_state::<Controller>().is_none() {
-                record(&handle, "面板：尚未初始化，已跳过呼出");
-                return;
-            }
-            let Some(window) = handle.get_webview_window("panel") else {
-                record(&handle, "面板：未找到既有显示入口");
-                return;
-            };
-            // 可见性检查和既有 Toggle 派发在同一主线程执行，重复打开不会反向隐藏。
-            match window.is_visible() {
-                Ok(true) => {}
-                Ok(false) => {
-                    let action = Action::Toggle {
-                        started: Instant::now(),
-                        target: platform::window::capture(),
-                        alt: false,
-                    };
-                    if panel::dispatch(&handle, action).is_err() {
-                        record(&handle, "面板：呼出请求未完成");
-                    }
-                }
-                Err(_) => record(&handle, "面板：可见状态查询失败，已跳过呼出"),
-            }
-        })
+        .run_on_main(Box::new(move || open_panel_on_main(&handle)))
         .is_err()
     {
-        record(app, "面板：主线程呼出请求未完成");
+        app.record("面板：主线程呼出请求未完成");
     }
+}
+
+fn guide_open_panel_entry(app: &impl OpenPanelContext) -> Result<(), String> {
+    let handle = app.clone();
+    if app
+        .run_on_main(Box::new(move || {
+            if handle.controller_ready() && handle.panel_visibility() == PanelVisibility::Visible {
+                // 仅 guide 的失败重试需要真正换 session：沿用生产 Toggle 先收再开。
+                // 普通托盘 / 单实例仍走下面的 open_panel_on_main，Visible 空分支不变。
+                let hide = toggle_action(handle.capture_target());
+                if handle.dispatch_panel(hide).is_err() {
+                    handle.record("面板：呼出请求未完成");
+                    return;
+                }
+                let show = toggle_action(handle.capture_target());
+                if handle.dispatch_panel(show).is_err() {
+                    handle.record("面板：呼出请求未完成");
+                }
+            } else {
+                open_panel_on_main(&handle);
+            }
+        }))
+        .is_err()
+    {
+        app.record("面板：主线程呼出请求未完成");
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn guide_open_panel(app: AppHandle) -> Result<(), String> {
+    guide_open_panel_entry(&app)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -991,6 +1076,102 @@ mod tests {
                 (ABOUT, "关于拈来"),
             ]
         );
+    }
+
+    #[test]
+    fn task11_fix_guide_command_reaches_the_shared_production_open_panel_dispatch() {
+        #[derive(Default)]
+        struct State {
+            visibility: Option<PanelVisibility>,
+            toggles: Vec<(usize, String, bool)>,
+            toggle_states: Vec<PanelVisibility>,
+        }
+
+        #[derive(Clone, Default)]
+        struct FakeOpenPanel {
+            state: Arc<Mutex<State>>,
+        }
+
+        impl OpenPanelContext for FakeOpenPanel {
+            fn run_on_main(&self, job: Box<dyn FnOnce() + Send>) -> Result<(), ()> {
+                job();
+                Ok(())
+            }
+
+            fn controller_ready(&self) -> bool {
+                true
+            }
+
+            fn panel_visibility(&self) -> PanelVisibility {
+                self.state
+                    .lock()
+                    .unwrap()
+                    .visibility
+                    .unwrap_or(PanelVisibility::Hidden)
+            }
+
+            fn capture_target(&self) -> platform::Target {
+                platform::Target {
+                    window: 123,
+                    process_name: "notepad.exe".into(),
+                    ..platform::Target::default()
+                }
+            }
+
+            fn dispatch_panel(&self, action: Action) -> Result<(), String> {
+                match action {
+                    Action::Toggle { target, alt, .. } => {
+                        let mut state = self.state.lock().unwrap();
+                        let visibility = state.visibility.unwrap_or(PanelVisibility::Hidden);
+                        state.toggle_states.push(visibility);
+                        state
+                            .toggles
+                            .push((target.window, target.process_name, alt));
+                        state.visibility = Some(match visibility {
+                            PanelVisibility::Visible => PanelVisibility::Hidden,
+                            _ => PanelVisibility::Visible,
+                        });
+                        Ok(())
+                    }
+                    _ => Err("呼出只能派发既有 Toggle".to_owned()),
+                }
+            }
+
+            fn record(&self, message: &'static str) {
+                panic!("测试路径不应记录失败：{message}");
+            }
+        }
+
+        let app = FakeOpenPanel::default();
+        guide_open_panel_entry(&app).unwrap();
+        assert_eq!(
+            app.state.lock().unwrap().toggles,
+            [(123, "notepad.exe".to_owned(), false)]
+        );
+        app.state.lock().unwrap().visibility = Some(PanelVisibility::Visible);
+        guide_open_panel_entry(&app).unwrap();
+        {
+            let state = app.state.lock().unwrap();
+            assert_eq!(state.toggles.len(), 3, "guide Visible 重试必须收窗再开");
+            assert_eq!(
+                state.toggle_states,
+                [
+                    PanelVisibility::Hidden,
+                    PanelVisibility::Visible,
+                    PanelVisibility::Hidden,
+                ],
+                "专用入口的真实动作序列是 Hidden→show，再 Visible→hide→show"
+            );
+            assert_eq!(state.visibility, Some(PanelVisibility::Visible));
+        }
+        open_panel(&app);
+        let state = app.state.lock().unwrap();
+        assert_eq!(
+            state.toggles.len(),
+            3,
+            "普通托盘 Visible 仍保持空分支，不 dispatch"
+        );
+        assert_eq!(state.visibility, Some(PanelVisibility::Visible));
     }
 
     #[test]

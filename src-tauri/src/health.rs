@@ -4,9 +4,11 @@
 //! 这里的状态只供托盘、设置状态行和首次引导使用（v11 实现方案第 2 节）。
 
 use crate::history::History;
+use serde::Serialize;
 
 /// 存储库的健康状态。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum StoreHealth {
     /// 正在打开数据、还没有结论。
     Loading,
@@ -17,7 +19,8 @@ pub enum StoreHealth {
 }
 
 /// 记录（剪贴板监视）的健康状态。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CaptureHealth {
     /// 记录线程尚未就绪。
     Starting,
@@ -29,7 +32,7 @@ pub enum CaptureHealth {
     Stopping,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub struct HealthSnapshot {
     pub store: StoreHealth,
     pub capture: CaptureHealth,
@@ -165,6 +168,31 @@ mod tests {
             capture,
             recorded_today: 0,
         }
+    }
+
+    #[test]
+    fn task12_fix_guide_health_uses_typed_snake_case_snapshot() {
+        let value =
+            serde_json::to_value(snapshot(StoreHealth::Failed, CaptureHealth::Starting)).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({"store":"failed","capture":"starting","recorded_today":0})
+        );
+    }
+
+    #[test]
+    fn task12_fix_guide_health_reads_real_failure_when_legacy_status_is_null() {
+        let directory = Directory::new();
+        let history = history(&directory);
+        history.initialize();
+        assert!(history.note_store_error(&nianlai_store::Error::Sqlite(13)));
+        assert_eq!(
+            serde_json::to_value(history.snapshot()).unwrap()["store_status"],
+            serde_json::Value::Null
+        );
+        assert_eq!(history.health().store, StoreHealth::Failed);
+        history.set_recording(false);
+        assert_eq!(history.health().capture, CaptureHealth::Failed);
     }
 
     // ---------- 选择器：第 2 节表格逐行 ----------

@@ -6,7 +6,7 @@ use crate::{
         Captured, CopyEvent,
         content::{Content, DIB, DIBV5, Data, FILES, TEXT},
     },
-    paste::capture_access::{AccessError, CaptureAttempt, OwnerSnapshot, capture_attempt},
+    paste::capture_access::{AccessError, CaptureAttempt, OwnerSnapshot},
     platform::Result,
 };
 use serde_json::{Value, json};
@@ -199,7 +199,7 @@ fn read_once(shared: &Shared, owner: Option<HWND>, mut attempt: Attempt) -> Atte
             attempt.reason = Some("stopping");
             return attempt;
         }
-        match capture_attempt(
+        match super::observe_clipboard(
             &shared.capture_access,
             &shared.stopping,
             shared.own_owner,

@@ -8,7 +8,9 @@ use crate::{
     capture::SelfCheck,
     history::{History, older},
     log::{Logger, now_ms},
-    paste::capture_access::CaptureAccess,
+    paste::capture_access::{
+        AccessError, CaptureAccess, CaptureAttempt, OwnerSnapshot, capture_attempt,
+    },
     platform::Result,
 };
 use serde::Serialize;
@@ -74,6 +76,18 @@ fn notice(trigger: &'static str) -> Notice {
         owner: process(unsafe { GetClipboardOwner() }.unwrap_or_default()),
         trigger,
     }
+}
+
+/// 正常采集读取的唯一 owner/sequence 观察入口。guide 测试在 fake native 发布后也经过这里，
+/// 因而独立 owner 与误用 Service.owner 会分别得到 Opened 与 OwnWrite，而不是另写规则自证。
+pub(crate) fn observe_clipboard<R, E>(
+    access: &Arc<CaptureAccess>,
+    stopping: &AtomicBool,
+    own_owner: usize,
+    snapshot: impl FnOnce() -> OwnerSnapshot,
+    open: impl FnOnce() -> std::result::Result<R, E>,
+) -> std::result::Result<CaptureAttempt<R, E>, AccessError> {
+    capture_attempt(access, stopping, own_owner, snapshot, open)
 }
 
 #[derive(Default)]

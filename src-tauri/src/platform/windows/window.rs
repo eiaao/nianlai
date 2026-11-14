@@ -135,7 +135,7 @@ const HIT_MARGIN: f64 = 8.0;
 
 /// 前端上报的 CSS 像素矩形换成客户区物理像素（纯函数）。`scale` 是窗口 DPI / 96。
 /// 返回（加了边的命中区域，未加边的内容包围盒）。
-fn convert_regions(
+pub(crate) fn convert_hit_regions(
     regions: &[HitRegion],
     scale: f64,
 ) -> Result<(Vec<NativeRegion>, Option<NativeRegion>)> {
@@ -189,14 +189,14 @@ pub fn convert_avoid(avoid: Avoid, scale: f64) -> Result<NativeRegion> {
         right: avoid.left + avoid.width,
         bottom: avoid.top + avoid.height,
     };
-    convert_regions(&[region], scale)?
+    convert_hit_regions(&[region], scale)?
         .1
         .ok_or_else(|| "避让外形无效".into())
 }
 
 /// 只校验，不碰窗口：命令在派发到主线程之前用它把错误直接还给前端。
 pub fn validate_hit_regions(regions: &[HitRegion]) -> Result<()> {
-    convert_regions(regions, 1.0).map(|_| ())
+    convert_hit_regions(regions, 1.0).map(|_| ())
 }
 
 /// 窗口当前 DPI 的缩放（DPI / 96）。读不到按 100%。
@@ -214,10 +214,21 @@ pub fn set_hit_regions(
     regions: &[HitRegion],
     armed: bool,
 ) -> Result<Option<NativeRegion>> {
+    set_hit_regions_at_scale(panel, regions, armed, window_scale(panel))
+}
+
+/// guide 初次展示前，窗口尚未移到目标屏，必须显式传目标 monitor 的 DPI。
+/// 其它窗口仍走 set_hit_regions，不改变既有窗口 DPI 查询路径。
+pub fn set_hit_regions_at_scale(
+    panel: &WebviewWindow,
+    regions: &[HitRegion],
+    armed: bool,
+    scale: f64,
+) -> Result<Option<NativeRegion>> {
     // 武装但一个区域都没有（前端还没渲染出来）按清除处理：整窗可点，而不是整窗消失。
     let armed = armed && !regions.is_empty();
     let (hits, bounds) = if armed {
-        convert_regions(regions, window_scale(panel))?
+        convert_hit_regions(regions, scale)?
     } else {
         (Vec::new(), None)
     };
@@ -681,17 +692,20 @@ pub fn process_path(id: u32) -> Option<String> {
     }
 }
 
+pub fn no_activate_style(style: isize, enabled: bool) -> isize {
+    if enabled {
+        style | WS_EX_NOACTIVATE.0 as isize
+    } else {
+        style & !(WS_EX_NOACTIVATE.0 as isize)
+    }
+}
+
 pub fn no_activate(panel: &WebviewWindow, enabled: bool) -> Result<()> {
     // 不能调 tao 的 set_focusable：面板由我们自己显示，tao 仍认为窗口隐藏，
     // 它重算样式时会顺手 ShowWindow(SW_HIDE)，切到搜索模式时面板就消失了。
     unsafe {
         let window = hwnd(handle(panel)?);
-        let style = GetWindowLongPtrW(window, GWL_EXSTYLE);
-        let style = if enabled {
-            style | WS_EX_NOACTIVATE.0 as isize
-        } else {
-            style & !(WS_EX_NOACTIVATE.0 as isize)
-        };
+        let style = no_activate_style(GetWindowLongPtrW(window, GWL_EXSTYLE), enabled);
         SetLastError(WIN32_ERROR(0));
         if SetWindowLongPtrW(window, GWL_EXSTYLE, style) == 0 && GetLastError().0 != 0 {
             return Err(windows::core::Error::from_thread().to_string());
@@ -1058,7 +1072,14 @@ pub fn show_queue(panel: &WebviewWindow, target: &Target) -> Result<bool> {
     }
 }
 
-fn present(panel: &WebviewWindow, x: i32, y: i32, width: i32, height: i32) -> Result<()> {
+fn present_with_before_show(
+    panel: &WebviewWindow,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    before_show: impl FnOnce() -> Result<()>,
+) -> Result<()> {
     // 与 main 一致：先在隐藏状态下摆好位置和大小，再显示，再重新确认置顶。
     unsafe {
         let window = hwnd(handle(panel)?);
@@ -1072,6 +1093,7 @@ fn present(panel: &WebviewWindow, x: i32, y: i32, width: i32, height: i32) -> Re
             SWP_NOACTIVATE | SWP_NOOWNERZORDER,
         )
         .map_err(|e| e.to_string())?;
+        before_show()?;
         let _ = ShowWindow(window, SW_SHOWNOACTIVATE);
         SetWindowPos(
             window,
@@ -1084,6 +1106,49 @@ fn present(panel: &WebviewWindow, x: i32, y: i32, width: i32, height: i32) -> Re
         )
         .map_err(|e| e.to_string())?;
         Ok(())
+    }
+}
+
+fn present(panel: &WebviewWindow, x: i32, y: i32, width: i32, height: i32) -> Result<()> {
+    present_with_before_show(panel, x, y, width, height, || Ok(()))
+}
+
+pub fn present_guide(panel: &WebviewWindow, x: i32, y: i32, width: i32, height: i32) -> Result<()> {
+    no_activate(panel, true)?;
+    present(panel, x, y, width, height)
+}
+
+pub fn present_guide_initial(
+    panel: &WebviewWindow,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    regions: &[HitRegion],
+    target_scale: f64,
+) -> Result<()> {
+    no_activate(panel, true)?;
+    present_with_before_show(panel, x, y, width, height, || {
+        // 已移到最终目标位置、仍未展示：用目标屏 DPI 安装首帧命中区域。
+        set_hit_regions_at_scale(panel, regions, true, target_scale).map(drop)
+    })
+}
+
+pub fn show_no_activate(panel: &WebviewWindow) -> Result<()> {
+    no_activate(panel, true)?;
+    unsafe {
+        let window = hwnd(handle(panel)?);
+        let _ = ShowWindow(window, SW_SHOWNOACTIVATE);
+        SetWindowPos(
+            window,
+            Some(HWND_TOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_NOOWNERZORDER,
+        )
+        .map_err(|error| error.to_string())
     }
 }
 
@@ -2022,7 +2087,7 @@ mod tests {
                 bottom: 540.0,
             },
         ];
-        let (hits, bounds) = convert_regions(&regions, 1.5).unwrap();
+        let (hits, bounds) = convert_hit_regions(&regions, 1.5).unwrap();
         assert_eq!(
             hits[0],
             NativeRegion {
@@ -2042,14 +2107,14 @@ mod tests {
                 bottom: 810
             })
         );
-        assert_eq!(convert_regions(&[], 1.0).unwrap(), (Vec::new(), None));
+        assert_eq!(convert_hit_regions(&[], 1.0).unwrap(), (Vec::new(), None));
         let bad = HitRegion {
             left: 5.0,
             top: 0.0,
             right: 5.0,
             bottom: 1.0,
         };
-        assert!(convert_regions(&[bad], 1.0).is_err());
+        assert!(convert_hit_regions(&[bad], 1.0).is_err());
         let nan = HitRegion {
             left: f64::NAN,
             top: 0.0,
@@ -2057,6 +2122,6 @@ mod tests {
             bottom: 1.0,
         };
         assert!(validate_hit_regions(&[nan]).is_err());
-        assert!(convert_regions(&regions, 0.0).is_err());
+        assert!(convert_hit_regions(&regions, 0.0).is_err());
     }
 }

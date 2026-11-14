@@ -490,6 +490,14 @@ function emit(event, payload) {
   for (const handler of listeners.get(event) ?? []) handler({ event, payload });
 }
 
+// 共享 ipc.ts 的 guide 边界也在这里补齐；设置测试不触发发牌或关闭 guide。
+export async function emitTo(target, event, payload) {
+  if (target === "settings") emit(event, payload);
+}
+export function getCurrentWindow() {
+  return { close: async () => {} };
+}
+
 function useManualSaves() { manualSaves = true; }
 function saveCalls() { return saves.map(({ id, update, settled }) => ({ id, update: clone(update), settled })); }
 function resolveSave(id, response) {

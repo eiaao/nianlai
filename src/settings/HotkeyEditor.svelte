@@ -20,6 +20,8 @@
   let busy = $state(false);
   let runtime = $state<HotkeyStatus | null>(null);
   let runtimeError = $state("");
+  let guideRequest: string | null = null;
+  let operation = 0;
   let disposed = false;
   let statusRequest = 0;
 
@@ -66,17 +68,26 @@
     }
   }
 
-  async function start() {
-    if (disabled || recording || busy) return;
-    recording = true; held = []; error = ""; warning = null;
+  async function start(fromGuide = false, request?: string) {
+    if (disabled || (!fromGuide && (recording || busy))) return;
+    // 每个新深链都开启新代际；即使旧 validate/save 还在途，也立即允许本次独立录制。
+    ++operation;
+    guideRequest = fromGuide ? request ?? null : null;
+    recording = true; held = []; error = ""; warning = null; busy = false;
     try { await ipc.pauseHotkey(true); } catch { /* 暂停失败也能录，只是按到当前组合会呼出面板 */ }
   }
+  export async function startFromGuide(request?: string) { await start(true, request); }
 
-  async function stop() {
-    if (!recording) return;
-    recording = false; held = [];
-    try { await ipc.pauseHotkey(false); } catch { /* 后端 30 秒后会自动恢复 */ }
-    await refreshRuntime();
+  async function stop(): Promise<number> {
+    const stopped = ++operation;
+    const wasRecording = recording;
+    guideRequest = null;
+    recording = false; held = []; busy = false;
+    if (wasRecording) {
+      try { await ipc.pauseHotkey(false); } catch { /* 后端 30 秒后会自动恢复 */ }
+      await refreshRuntime();
+    }
+    return stopped;
   }
 
   async function capture(event: KeyboardEvent) {
@@ -91,20 +102,32 @@
     if (code === "Escape" && !modifiers.length) { error = ""; await stop(); return; }
     if (!modifiers.length) { error = "要带上 Ctrl、Alt、Shift 或 Win"; return; }
     const value = [...modifiers, code].join("+");
+    const generation = operation;
+    const request = guideRequest;
     busy = true;
     try {
       const checked = await ipc.validateHotkey(value);
-      if (disposed) return;
+      if (disposed || generation !== operation) return;
       error = "";
       warning = checked.warning ?? null;
-      if (checked.hotkey !== hotkey) await onsave({ hotkey: checked.hotkey }, `呼出键已改为 ${display(checked.hotkey)}`);
-      await stop();
+      if (checked.hotkey !== hotkey) {
+        const saved = await onsave({ hotkey: checked.hotkey }, `呼出键已改为 ${display(checked.hotkey)}`);
+        if (disposed || generation !== operation) return;
+        if (!saved) { error = "呼出键没保存上，再按一次重试"; return; }
+      }
+      const stopped = await stop();
+      // stop 之后的 pause/refresh 也可能与下一次深链交错；只有仍是本次停止代际才通知。
+      if (request && stopped === operation && !disposed) {
+        try { await ipc.notifyGuideHotkeySaved(request); }
+        catch { if (stopped === operation && !disposed) runtimeError = "呼出键已保存，但面板还开着，请手动收起"; }
+      }
     } catch (failure) {
+      if (disposed || generation !== operation) return;
       // 系统保留或无效：留在录制状态，直接再按一个。
       error = errorMessage(failure, "这个组合不能用，换一个试试");
       held = [];
     } finally {
-      busy = false;
+      if (generation === operation) busy = false;
     }
   }
 
@@ -123,7 +146,7 @@
     const onBlur = () => { void stop(); };
     window.addEventListener("blur", onBlur);
     return () => {
-      disposed = true; unlisten?.();
+      disposed = true; operation += 1; guideRequest = null; unlisten?.();
       window.removeEventListener("blur", onBlur);
       if (recording) void ipc.pauseHotkey(false).catch(() => {});
     };

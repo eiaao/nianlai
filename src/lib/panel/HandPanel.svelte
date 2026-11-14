@@ -203,6 +203,9 @@
         {#if panel.stack.length}
           {#if panel.heldModifier === "ctrl"}{@render keys(["Ctrl", "↵"], "按纯文本一起粘贴")}{@render keys(["Ctrl", "Shift", "↵"], "逐张放")}
           {:else}{@render keys(["↵"], "一起粘贴")}{@render keys(["Ctrl", "Shift", "↵"], "逐张放")}{#if !panel.searching}{@render keys(["Backspace"], "放回一张")}{/if}{/if}
+        {:else if panel.currentItem?.guide_id}
+          {#if spread}{@render keys(["↑", "↓"], "上一张 / 下一张")}{:else}{@render keys(["←", "→"], "换一张")}{/if}
+          {@render keys(["Delete"], "扔掉")}{@render keys(["Tab"], "看全")}{@render keys(["Esc"], panel.searching ? "清空搜索" : "收回")}
         {:else if panel.heldModifier === "shift"}
           {@render keys(["Shift", "↵"], "只复制这一张，不粘贴")}
         {:else if panel.heldModifier === "ctrl"}

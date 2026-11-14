@@ -652,6 +652,18 @@ fn note_files_skipped(result: &mut Outcome, files_skipped: usize) {
     }
 }
 
+fn notify_paste_finished_with(
+    session: u64,
+    id: usize,
+    result: Outcome,
+    guide: impl FnOnce(u64, usize, &Outcome) -> Result<(), String>,
+    finished: impl FnOnce(Outcome),
+) {
+    // guide 是纯只读旁路；即使发送失败，原 Outcome 仍按原顺序进入 PasteFinished。
+    let _ = guide(session, id, &result);
+    finished(result);
+}
+
 // 粘贴工作线程（线程名 paste-request）：读库、执行粘贴、补上证据，最后把结果发回主线程。
 fn run_paste(job: PasteJob) {
     let PasteJob {
@@ -837,7 +849,15 @@ fn run_paste(job: PasteJob) {
         .insert("store_read_ms".into(), json!(store_read_ms));
     // execute 已完成发键及内容证据收集，至此才终止前台监控。
     drop(hooks);
-    let _ = dispatch(&app, Action::PasteFinished { session, result });
+    notify_paste_finished_with(
+        session,
+        id,
+        result,
+        |session, id, result| crate::guide_window::paste_result(&app, session, id, result),
+        |result| {
+            let _ = dispatch(&app, Action::PasteFinished { session, result });
+        },
+    );
 }
 
 struct QueueJob {
@@ -1684,9 +1704,12 @@ impl Panel {
             // 历史随呼出事件一起发：前端不用再取一次，呼出后马上按键也拿到的是最新列表。
             let controller = app.state::<Controller>();
             let history = controller.history.snapshot();
+            // 挂起恢复不能依赖可能漏收的定向通知：每次真实 shown 都附当前已保存的完整 guide。
+            let guide = app.state::<crate::settings::Store>().get().guide;
             self.emit(
                 "panel:shown",
                 json!({"hotkeyToShowMs":shown.duration_since(started).as_secs_f64()*1000.0,"history":history,
+                    "guide":guide,
                     "interaction":self.interaction,
                     "terminal_feedback":self.interaction == Interaction::CloseOnly,
                     // 光标行在窗口客户区里的位置（CSS 像素，可能在窗口外）；前端可选用来避让。
@@ -1694,6 +1717,8 @@ impl Panel {
                     "placement":self.layout.as_ref().map(|layout| layout.fit.name()),
                     "foregroundRevision":self.monitor.as_ref().map_or(0, |monitor| monitor.revision())}),
             );
+            // 同一真实展示成功点只旁路现有 session；不新增历史读取或面板事件。
+            crate::guide_window::panel_shown(app, self.session);
             controller.history.check_visible_files();
         }
     }
@@ -3703,6 +3728,31 @@ mod tests {
         );
         assert_eq!(result, Err("webview failed".into()));
         assert_eq!(calls.into_inner(), ["webview", "native"]);
+    }
+
+    #[test]
+    fn task11_paste_finished_is_unchanged_and_follows_a_failed_guide_bypass() {
+        use std::cell::RefCell;
+
+        let result = outcome(Some(PasteResult::Confirmed), Some("confirmed"), true, false);
+        let before = result.clone();
+        let calls = RefCell::new(Vec::new());
+        notify_paste_finished_with(
+            41,
+            23,
+            result,
+            |session, id, seen| {
+                assert_eq!((session, id), (41, 23));
+                assert_eq!(seen, &before);
+                calls.borrow_mut().push("guide-send-failed");
+                Err("注入 guide sink 失败".to_owned())
+            },
+            |finished| {
+                assert_eq!(finished, before);
+                calls.borrow_mut().push("PasteFinished");
+            },
+        );
+        assert_eq!(calls.into_inner(), ["guide-send-failed", "PasteFinished"]);
     }
 
     #[test]

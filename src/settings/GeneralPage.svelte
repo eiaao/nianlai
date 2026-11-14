@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, onMount } from "svelte";
+  import { onDestroy, onMount, untrack } from "svelte";
   import * as ipc from "../lib/ipc";
   import type {
     AppSettings, InteractionSettings, Placement, SettingsUpdate,
@@ -8,7 +8,7 @@
   import HotkeyEditor from "./HotkeyEditor.svelte";
   import SaveMark, { type SaveMarkState } from "./SaveMark.svelte";
 
-  let { hotkey, interaction, preferences, systemReduced, disabled, onsave, saveState }: {
+  let { hotkey, interaction, preferences, systemReduced, disabled, onsave, saveState, recordHotkey = false, hotkeyRequest, onRecordHotkeyConsumed = () => {} }: {
     hotkey: string;
     interaction: InteractionSettings | null;
     preferences: Preferences;
@@ -16,7 +16,20 @@
     disabled: boolean;
     onsave: (key: string, update: SettingsUpdate, message: string) => Promise<AppSettings | null>;
     saveState: (key: string) => SaveMarkState;
+    recordHotkey?: boolean;
+    hotkeyRequest?: string;
+    onRecordHotkeyConsumed?: () => void;
   } = $props();
+
+  let hotkeyEditor = $state<ReturnType<typeof HotkeyEditor>>();
+  $effect(() => {
+    const editor = hotkeyEditor;
+    if (!recordHotkey || disabled || !editor) return;
+    untrack(() => {
+      void editor.startFromGuide(hotkeyRequest);
+      onRecordHotkeyConsumed();
+    });
+  });
 
   const places: { id: Placement; label: string; hint: string }[] = [
     { id: "caret", label: "光标旁", hint: "找不到光标时，出现在鼠标旁" },
@@ -176,7 +189,7 @@
   <div class="group">
     <span class="group-title">呼出与位置</span>
     <div data-setting="hotkey" data-save-row="general.hotkey">
-      <HotkeyEditor {hotkey} {disabled} onsave={saveHotkey} saveState={saveState("general.hotkey")} />
+      <HotkeyEditor bind:this={hotkeyEditor} {hotkey} {disabled} onsave={saveHotkey} saveState={saveState("general.hotkey")} />
     </div>
     <div class="card setting placement-row" data-save-row="general.placement">
       <span class="setting-copy"><strong>出现在哪</strong><small>找不到光标时，出现在鼠标旁。</small></span>

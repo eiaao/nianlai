@@ -2,7 +2,8 @@
 // 这些函数直接返回 Tauri 的 Promise，不吞错误、不碰界面状态；出错怎么提示由 state.svelte.ts 决定。
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { emitTo, listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
 export type { UnlistenFn };
 
@@ -15,6 +16,8 @@ export type HistoryItem = {
   // M2-6：常用的标题和备注（E04）；没有时不带。
   title?: string;
   note?: string;
+  /** 仅前端合成的新手牌；负数保留 ID 绝不送入内容、历史或队列 IPC。 */
+  guide_id?: GuideCardId;
 };
 export type FileMark = { state: "missing" | "partial" | "unknown"; missing: number; unknown: number; total: number; checked_ms: number };
 export type PathCheck = { path: string; state: "present" | "missing" | "unknown" };
@@ -34,6 +37,29 @@ export type StorageOverview = {
 export type ImageItem = { id: number; bytes: number; copied_ms: number; favorite: boolean };
 export type TrashItem = HistoryItem & { deleted_ms: number };
 export type HistorySnapshot = { items: HistoryItem[]; total: number; recording: boolean; last_recorded_ms: number | null; store_status: string | null };
+export type GuidePhase = "await_copy" | "await_show" | "await_paste" | "completed" | "skipped";
+export type GuideCardId = "t1" | "t2" | "t3" | "t4";
+export type GuideSettings = {
+  version: 1;
+  phase: GuidePhase;
+  baseline_ms: number | null;
+  baseline_total: number;
+  sample_id: number | null;
+  cards_dealt: boolean;
+  dismissed: GuideCardId[];
+};
+export type GuideSessionEvent = { session: number };
+export type GuideHealthSnapshot = {
+  store: "loading" | "ready" | "failed";
+  capture: "starting" | "recording" | "failed" | "stopping";
+  recorded_today: number;
+};
+export type GuidePasteResult = GuideSessionEvent & {
+  id: number;
+  result: PasteResult["paste_result"] | "native_not_submitted" | "generic_submission_unknown" | "generic_not_submitted" | null;
+};
+export type GuideCardsDealt = { cards_dealt: true };
+export type GuideHotkeySaved = { request: string };
 export type AppSettings = {
   hotkey?: string;
   theme?: "system" | "light" | "dark";
@@ -42,6 +68,7 @@ export type AppSettings = {
   snapshots?: { max_mb?: number };
   interaction?: Partial<InteractionSettings>;
   history?: { reuse_to_top?: boolean };
+  guide?: GuideSettings;
   [key: string]: unknown;
 };
 export type CaptureSettings = {
@@ -61,7 +88,7 @@ export type SnapshotState = {
   restored: { name: string; error: string | null; kind?: "snapshot" | "import" } | null;
   relaunch: boolean;
 };
-export type SettingsUpdate = AppSettings;
+export type SettingsUpdate = Omit<AppSettings, "guide"> & { guide?: Partial<GuideSettings> };
 export type HotkeyValidation = {
   hotkey: string; key: string; control: boolean; alt: boolean; shift: boolean; win: boolean;
   warning: string | null;
@@ -75,7 +102,7 @@ export type SessionEvent = { session: number };
 export type Timing = SessionEvent & { hotkeyToShowMs: number; showToPaintMs?: number };
 export type PanelInteraction = "quick" | "activation_pending" | "activation_failed" | "activated" | "passive" | "close_only";
 // panel:shown 还带 caret / placement（后端避让结果），前端不用，所以不声明。
-export type PanelShown = Timing & { history: HistorySnapshot; interaction: PanelInteraction; foregroundRevision: number; terminal_feedback?: boolean };
+export type PanelShown = Timing & { history: HistorySnapshot; interaction: PanelInteraction; foregroundRevision: number; terminal_feedback?: boolean; guide?: GuideSettings };
 export type PanelInteractionEvent = SessionEvent & { interaction: PanelInteraction };
 export type ForegroundRevision = SessionEvent & { revision: number };
 export type PanelKey = SessionEvent & { key: string };
@@ -148,6 +175,18 @@ export const getHotkeyStatus = () => invoke<HotkeyStatus>("get_hotkey_status");
 // 设置页录制新组合键期间暂时注销呼出键（后端 30 秒后自动恢复兜底）。
 export const pauseHotkey = (paused: boolean) => invoke<void>("pause_hotkey", { paused });
 export const openSettings = (page?: string) => invoke("open_settings", { page: page ?? null });
+// 首次启动使用独立窗口和定向事件；不向普通 panel 增加展示、粘贴或历史调用。
+export const openGuide = () => invoke<void>("open_guide");
+export const guideCopySample = () => invoke<void>("guide_copy_sample");
+export const guideOpenPanel = () => invoke<void>("guide_open_panel");
+export const getGuideHealth = () => invoke<GuideHealthSnapshot>("get_guide_health");
+export const setGuideHitRegions = (regions: HitRegion[], scale: number, armed = true) =>
+  invoke<void>("set_guide_hit_regions", { regions, scale, armed });
+export const closeGuide = () => getCurrentWindow().close();
+// Task 13 在 panel 消费这一定向通知；settings.json 的 cards_dealt 是重开后的持久事实。
+export const notifyGuideCardsDealt = () => emitTo("panel", "guide:cards-dealt", { cards_dealt: true } satisfies GuideCardsDealt);
+// 只有 t3 深链自动进入的录制成功后才向当前 panel 发绑定本次深链的信号。
+export const notifyGuideHotkeySaved = (request: string) => emitTo("panel", "guide:hotkey-saved", { request } satisfies GuideHotkeySaved);
 // 存储管理（M2-3）
 export const getFilePaths = (id: number) => invoke<PathCheck[] | null>("get_file_paths", { id });
 export const getStorage = () => invoke<StorageOverview>("get_storage");
@@ -207,6 +246,11 @@ export const onPanelInteraction = on<PanelInteractionEvent>("panel:interaction")
 export const onForegroundRevision = on<ForegroundRevision>("panel:foreground-revision");
 export const onPanelKey = on<PanelKey>("panel:key");
 export const onHistoryChanged = on<SessionEvent>("panel:history-changed");
+export const onGuideHistoryChanged = on<Record<string, never>>("history:changed");
+export const onGuidePanelShown = on<GuideSessionEvent>("guide:panel-shown");
+export const onGuidePasteResult = on<GuidePasteResult>("guide:paste-result");
+export const onGuideCardsDealt = on<GuideCardsDealt>("guide:cards-dealt");
+export const onGuideHotkeySaved = on<GuideHotkeySaved>("guide:hotkey-saved");
 export const onPanelMode = on<PanelMode>("panel:mode");
 export const onPanelHidden = on<SessionEvent & { queue?: boolean }>("panel:hidden");
 export const onQueueChanged = on<QueueState>("queue:changed");

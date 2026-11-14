@@ -23,11 +23,12 @@ export default defineConfig({
     target: process.env.TAURI_ENV_PLATFORM === "windows" ? "chrome120" : "safari17",
     minify: !process.env.TAURI_ENV_DEBUG,
     sourcemap: !!process.env.TAURI_ENV_DEBUG,
-    // 两个窗口两个页面：面板 index.html，设置窗口 settings.html（由 Rust 侧按需创建）。
+    // 三个独立页面：面板、设置与按需创建的首次启动窗口。
     rolldownOptions: {
       input: {
         main: resolve(root, "index.html"),
         settings: resolve(root, "settings.html"),
+        guide: resolve(root, "guide.html"),
       },
     },
   },
