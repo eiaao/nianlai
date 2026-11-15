@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "guide",
+  "description": "首次启动引导：监听定向通知、向面板发新手牌通知、关闭自己的窗口",
+  "windows": ["guide"],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "core:event:allow-emit-to",
+    "core:window:allow-close"
+  ]
+}

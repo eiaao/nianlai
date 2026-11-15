@@ -1,10 +1,12 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "settings",
-  "description": "设置窗口只监听后端保存成功的设置广播，不授予前端广播权限",
+  "description": "设置窗口监听后端保存成功的设置广播；只允许定向发送（重新发新手牌、t3 快捷键录制完成通知面板），不授予广播权限；“关于”页读版本号",
   "windows": ["settings"],
   "permissions": [
     "core:event:allow-listen",
-    "core:event:allow-unlisten"
+    "core:event:allow-unlisten",
+    "core:event:allow-emit-to",
+    "core:app:allow-version"
   ]
 }

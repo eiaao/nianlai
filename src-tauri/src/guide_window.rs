@@ -420,6 +420,49 @@ pub fn paste_result(
 }
 
 #[cfg(test)]
+mod capability_tests {
+    /// 前端测试用的是假 IPC，不经过 Tauri ACL；这里守住真实窗口需要的核心权限。
+    /// 缺了它们，真机上引导关不掉（plugin:window|close not allowed by ACL）、收不到定向通知。
+    fn permissions(json: &str) -> (Vec<String>, Vec<String>) {
+        let value: serde_json::Value = serde_json::from_str(json).unwrap();
+        let list = |key: &str| {
+            value[key]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|item| item.as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        (list("windows"), list("permissions"))
+    }
+
+    #[test]
+    fn guide_window_can_listen_notify_panel_and_close_itself() {
+        let (windows, permissions) = permissions(include_str!("../capabilities/guide.json"));
+        assert_eq!(windows, [super::LABEL]);
+        for needed in [
+            "core:event:allow-listen",
+            "core:event:allow-unlisten",
+            "core:event:allow-emit-to",
+            "core:window:allow-close",
+        ] {
+            assert!(permissions.iter().any(|p| p == needed), "guide 缺 {needed}");
+        }
+    }
+
+    #[test]
+    fn settings_window_can_send_targeted_guide_notices_but_not_broadcast() {
+        let (_, permissions) = permissions(include_str!("../capabilities/settings.json"));
+        assert!(permissions.iter().any(|p| p == "core:event:allow-emit-to"));
+        assert!(
+            permissions.iter().any(|p| p == "core:app:allow-version"),
+            "关于页读版本号"
+        );
+        assert!(!permissions.iter().any(|p| p == "core:event:allow-emit"));
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
