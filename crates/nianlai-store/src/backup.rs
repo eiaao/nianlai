@@ -891,14 +891,14 @@ pub(crate) fn merge_into(
                     )
                     .optional()?;
                 if existing.is_some_and(|(content, existing_origin)| {
-                    existing_origin != origin
-                        || content.is_some_and(|existing| existing != id)
-                        || (content.is_none() && origin == EVENT_ORIGIN_LEGACY)
+                    existing_origin != origin || content.is_some_and(|existing| existing != id)
                 }) {
-                    // 不同存活内容不能改绑；legacy 匿名事件无法证明身份，也不允许恢复关联。
+                    // 不同存活内容不能改绑。
                     return Err(Error::Invalid("event_content_conflict"));
                 }
-                // 同源同 content_id 是幂等冲突；NULL 只让 v4 随机事件从明确存活正文恢复。
+                // 同源同 content_id 是幂等冲突；NULL（内容已彻底删除）随同正文一起恢复关联。
+                // legacy 键由原库行号、毫秒时间、来源进程、所有者进程/PID 和剪贴板序号共同哈希，
+                // 无关库全同几乎不可能；同键就是同一次复制，导回自己的备份时必须能恢复。
                 let app = apps.local(&tx, row.get::<_, Option<i64>>(7)?)?;
                 tx.execute(
                     "INSERT INTO copy_events(content_id,event_key,event_origin,time_ms,source_process,owner_process,owner_pid,sequence,source_app_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) \
@@ -930,7 +930,7 @@ pub(crate) fn merge_into(
     }
 
     // 已彻底删除的内容只剩匿名计数事实；随机事件按 event_key 幂等合并。
-    // legacy 同键无法证明身份，即使两边都匿名也明确冲突，不能静默去重。
+    // legacy 同键视为同一次复制（键的构成见上），同源同键幂等去重；只有来源类型不同才冲突。
     {
         let mut events = source.prepare(
             "SELECT event_key,event_origin,time_ms FROM copy_events WHERE content_id IS NULL ORDER BY time_ms,id",
@@ -940,23 +940,23 @@ pub(crate) fn merge_into(
         while let Some(row) = rows.next()? {
             let event_key = row.get::<_, Vec<u8>>(0)?;
             let origin = row.get::<_, i64>(1)?;
-            let existing_origin = tx
-                .query_row(
+            let time_ms = row.get::<_, i64>(2)?;
+            let changed = tx.execute(
+                "INSERT INTO copy_events(content_id,event_key,event_origin,time_ms,source_process,owner_process,owner_pid,sequence,source_app_id) \
+                 VALUES(NULL,?1,?2,?3,'','',0,0,NULL) ON CONFLICT(event_key) DO NOTHING",
+                params![event_key, origin, time_ms],
+            )?;
+            if changed == 0 {
+                let existing_origin = tx.query_row(
                     "SELECT event_origin FROM copy_events WHERE event_key=?1",
                     [&event_key],
                     |row| row.get::<_, i64>(0),
-                )
-                .optional()?;
-            if existing_origin
-                .is_some_and(|existing| existing != origin || origin == EVENT_ORIGIN_LEGACY)
-            {
-                return Err(Error::Invalid("event_content_conflict"));
+                )?;
+                if existing_origin != origin {
+                    return Err(Error::Invalid("event_content_conflict"));
+                }
             }
-            inserted += tx.execute(
-                "INSERT INTO copy_events(content_id,event_key,event_origin,time_ms,source_process,owner_process,owner_pid,sequence,source_app_id) \
-                 VALUES(NULL,?1,?2,?3,'','',0,0,NULL) ON CONFLICT(event_key) DO NOTHING",
-                params![event_key, origin, row.get::<_, i64>(2)?],
-            )?;
+            inserted += changed;
         }
         events_changed |= inserted > 0;
     }

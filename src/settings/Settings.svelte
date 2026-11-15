@@ -8,7 +8,6 @@
   import InteractionPage from "./InteractionPage.svelte";
   import OrganizePage from "./OrganizePage.svelte";
   import AboutPage from "./AboutPage.svelte";
-  import SettingsNotes from "./SettingsNotes.svelte";
   import SaveMark, { type SaveMarkState } from "./SaveMark.svelte";
   import { navigate, type SettingsPageId, type StorageView } from "../lib/settingsNavigation";
   import type { AppSettings, CaptureSettings, GuideSettings, InteractionSettings, SettingsUpdate } from "../lib/ipc";
@@ -20,7 +19,7 @@
 
   const pages: { id: SettingsPageId; label: string; icon: string }[] = [
     { id: "general", label: "通用", icon: '<path d="M3.5 6h8M15.5 6h1M3.5 14h1M8.5 14h8"/><circle cx="13.5" cy="6" r="2"/><circle cx="6.5" cy="14" r="2"/>' },
-    { id: "fav", label: "常用牌", icon: '<rect x="4.75" y="2.75" width="10.5" height="14.5" rx="2"/><path d="M8 6.5h4v4H8z"/>' },
+    { id: "fav", label: "收藏", icon: '<rect x="4.75" y="2.75" width="10.5" height="14.5" rx="2"/><path d="M8 6.5h4v4H8z"/>' },
     { id: "privacy", label: "记录与隐私", icon: '<path d="M10 2.75l6 2.4v4.4c0 3.6-2.6 6.3-6 7.2-3.4-.9-6-3.6-6-7.2v-4.4z"/><path d="M7.5 10l1.8 1.8 3.2-3.4"/>' },
     { id: "data", label: "数据与备份", icon: '<path d="M2.75 7L10 3.25 17.25 7 10 10.75z"/><path d="M2.75 10.5L10 14.25l7.25-3.75M2.75 14L10 17.75 17.25 14"/>' },
     { id: "habits", label: "操作习惯", icon: '<rect x="5.75" y="2.75" width="8.5" height="14.5" rx="4.25"/><path d="M10 2.75V8"/>' },
@@ -28,7 +27,6 @@
   ];
   const IDLE_MARK: SaveMarkState = { phase: "idle", message: "", error: "" };
   let page = $state<SettingsPageId>("general");
-  let generalPage = $state<ReturnType<typeof GeneralPage>>();
   let recordHotkey = $state(false);
   let hotkeyRequest = $state<string>();
   // 面板里的回收站入口仍通过 #trash 和 settings:navigate 到达原组件。
@@ -266,9 +264,9 @@
     </header>
     {#if loading}<p class="load-status" role="status">正在读取设置…</p>{/if}
     {#if loadError}<p class="load-error" role="alert">{loadError}</p>{/if}
-    <div class="content">
+    <div class="content" data-settings-scroll>
       {#if page === "general"}
-        <GeneralPage bind:this={generalPage} {hotkey} {interaction} {preferences} {systemReduced} {recordHotkey} {hotkeyRequest} onRecordHotkeyConsumed={() => { recordHotkey = false; hotkeyRequest = undefined; }} disabled={loading} onsave={save} saveState={row} />
+        <GeneralPage {hotkey} {interaction} {preferences} {systemReduced} {recordHotkey} {hotkeyRequest} onRecordHotkeyConsumed={() => { recordHotkey = false; hotkeyRequest = undefined; }} disabled={loading} onsave={save} saveState={row} />
       {:else if page === "privacy"}
         <CapturePage {capture} disabled={loading} onsave={saveCapture} />
       {:else if page === "data"}
@@ -282,11 +280,10 @@
       {/if}
     </div>
   </main>
-  <SettingsNotes {page} ontry={() => generalPage?.demonstrate()} />
 </section>
 
 <style>
-  .settings { width: 100%; height: 100%; display: grid; grid-template-columns: 184px minmax(0, 1fr) 248px; overflow: hidden; border: 1px solid var(--hand-line-strong); border-radius: 8px; background: var(--hand-paper); color: var(--hand-ink); }
+  .settings { width: 100%; height: 100%; display: grid; grid-template-columns: 184px minmax(0, 1fr); overflow: hidden; border: 1px solid var(--hand-line-strong); border-radius: 8px; background: var(--hand-paper); color: var(--hand-ink); }
   .nav { min-height: 0; display: flex; flex-direction: column; padding: 20px 12px 16px; border-right: 1px solid var(--hand-line); background: var(--hand-card-back); }
   .nav-brand { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; padding: 0 8px 20px; border-bottom: 1px solid var(--hand-line); }
   .nav-mark { width: 32px; height: 32px; display: grid; place-items: center; flex: none; border-radius: 4px; background: var(--hand-seal); color: var(--hand-on-seal); font: 600 20px var(--font-display); }
@@ -308,7 +305,6 @@
   .load-error { background: var(--state-critical-bg); color: var(--state-critical); }
   @media (max-width: 1000px) {
     .settings { grid-template-columns: 168px minmax(0, 1fr); }
-    .settings > :global([data-settings-notes]) { display: none; }
     .content { padding: 20px; }
   }
   @media (max-width: 720px) {

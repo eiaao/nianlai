@@ -57,7 +57,6 @@ export type GuideEvent =
   | { type: "health_changed"; health: GuideHealth; paused: boolean }
   | { type: "copy_sample" }
   | { type: "open_settings"; page: GuideSettingsPage }
-  | { type: "dismiss_card"; id: GuideCardId };
 // persist_guide 必须由执行器按发出顺序串行 await setSettings(update)，再把结果连同 token 送回 reduce。
 // 新事件可以取代尚未完成的候选；旧 token 的回包不会推进状态，也不会触发发牌或关闭。
 export type GuideEffect =
@@ -418,13 +417,6 @@ function reduce(value: GuideState, event: GuideEvent): GuideTransition {
     case "open_settings":
       return event.page === "general" || event.page === "privacy" || event.page === "data"
         ? same(state, [{ type: "open_settings", page: event.page }]) : same(state);
-    case "dismiss_card": {
-      if (terminal(current) && !terminal(state.guide)) return same(state);
-      if (!cardIds.includes(event.id as GuideCardId) || current.dismissed.includes(event.id as GuideCardId)) {
-        return same(state);
-      }
-      return save(state, { ...current, dismissed: [...current.dismissed, event.id as GuideCardId] });
-    }
     default:
       return same(state);
   }

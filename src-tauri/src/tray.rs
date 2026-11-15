@@ -323,11 +323,20 @@ pub(crate) fn notify_hotkey_settings_saved(update_hotkey: bool) {
 }
 
 /// 从真实健康状态刷新图标、首行、暂停文字和 tooltip。
-pub fn refresh(app: &AppHandle) {
-    let Some(controller) = app.try_state::<Controller>() else {
-        return;
-    };
-    let health = controller.history.health();
+pub fn refresh(app: &AppHandle) -> Option<HealthSnapshot> {
+    let health = current_health(app)?;
+    apply(app, health);
+    Some(health)
+}
+
+/// 读健康快照（会排队等存储写入线程）；可在任意线程调用。
+pub fn current_health(app: &AppHandle) -> Option<HealthSnapshot> {
+    Some(app.try_state::<Controller>()?.history.health())
+}
+
+/// 把健康快照画到托盘图标、提示和菜单上。托盘句柄的调用会同步等主线程，
+/// 非主线程请用 `refresh_from_worker`。
+pub fn apply(app: &AppHandle, health: HealthSnapshot) {
     let paused = gate().paused();
     let ignore_next = gate().ignoring_next();
     let view = tray_view(&health, paused, ignore_next);
@@ -351,7 +360,16 @@ pub fn refresh(app: &AppHandle) {
         let _ = items.pause.set_text(view.pause_label);
         let _ = items.ignore.set_checked(view.ignore_next);
     }
-    let _ = controller;
+}
+
+/// 采集/读取线程上的刷新：在当前线程读健康（不让主线程等写入线程），
+/// 再把 UI 更新投递到主线程，不阻塞调用方（避免与退出时 join 监听线程互等）。
+pub fn refresh_from_worker(app: &AppHandle) {
+    let Some(health) = current_health(app) else {
+        return;
+    };
+    let target = app.clone();
+    let _ = app.run_on_main_thread(move || apply(&target, health));
 }
 
 /// 菜单项句柄，供 refresh 就地改字。
@@ -494,7 +512,7 @@ pub fn setup(app: &AppHandle, logger: &Logger) -> Result<(), Box<dyn std::error:
         gate().subscribe(std::sync::Arc::new(move || {
             let paused = gate().paused();
             let _ = ignore.set_checked(gate().ignoring_next());
-            refresh(&app);
+            let _ = refresh(&app);
             let _ = app.emit(
                 "capture:changed",
                 json!({"paused":paused,"ignore_next":gate().ignoring_next()}),
@@ -508,7 +526,9 @@ pub fn setup(app: &AppHandle, logger: &Logger) -> Result<(), Box<dyn std::error:
         Arc::new(move || {
             let app = app.clone();
             let callback_app = app.clone();
-            let _ = app.run_on_main_thread(move || refresh(&callback_app));
+            let _ = app.run_on_main_thread(move || {
+                let _ = refresh(&callback_app);
+            });
         })
     };
     on_settings_change(settings_callback);
@@ -600,7 +620,7 @@ pub fn setup(app: &AppHandle, logger: &Logger) -> Result<(), Box<dyn std::error:
             dispatch_tray_icon_event(
                 event,
                 || refresh(tray.app_handle()),
-                || handle_left_click(tray.app_handle()),
+                |health| handle_left_click(tray.app_handle(), health),
                 || {
                     let app = tray.app_handle();
                     apply_autostart_state(app, &autostart, &app.autolaunch().is_enabled());
@@ -608,14 +628,14 @@ pub fn setup(app: &AppHandle, logger: &Logger) -> Result<(), Box<dyn std::error:
             );
         })
         .build(app)?;
-    refresh(app);
+    let _ = refresh(app);
     Ok(())
 }
 
 fn dispatch_tray_icon_event(
     event: TrayIconEvent,
-    refresh: impl FnOnce(),
-    left_click: impl FnOnce(),
+    refresh: impl FnOnce() -> Option<HealthSnapshot>,
+    left_click: impl FnOnce(Option<HealthSnapshot>),
     sync_autostart: impl FnOnce(),
 ) {
     match event {
@@ -624,9 +644,9 @@ fn dispatch_tray_icon_event(
             button_state: MouseButtonState::Up,
             ..
         } => {
-            // 左键保持先读实时健康/rect/DPI，再执行既有路由。
-            refresh();
-            left_click();
+            // 左键刷新与路由共享同一份实时健康快照，不重复等待 writer 查询。
+            let health = refresh();
+            left_click(health);
         }
         TrayIconEvent::Enter { .. }
         | TrayIconEvent::Click {
@@ -636,7 +656,7 @@ fn dispatch_tray_icon_event(
         } => {
             // Enter/右键只查一次 autostart、刷新一次；Move/Leave 等事件完全无动作。
             sync_autostart();
-            refresh();
+            let _ = refresh();
         }
         _ => {}
     }
@@ -653,11 +673,9 @@ fn route_left_click(
     }
 }
 
-fn handle_left_click(app: &AppHandle) {
+fn handle_left_click(app: &AppHandle, health: Option<HealthSnapshot>) {
     // 出了问题：左键打开对应设置页（存储 → 数据与备份，记录 → 记录与隐私）。
-    let error_page = app.try_state::<Controller>().and_then(|controller| {
-        select_tray(&controller.history.health(), gate().paused()).settings_page
-    });
+    let error_page = health.and_then(|health| select_tray(&health, gate().paused()).settings_page);
     route_left_click(
         error_page,
         || open_panel(app),
@@ -731,21 +749,26 @@ impl OpenPanelContext for AppHandle {
 }
 
 fn open_panel_on_main(app: &impl OpenPanelContext) {
+    if let Err(message) = try_open_panel_on_main(app) {
+        app.record(message);
+    }
+}
+
+/// 同 open_panel_on_main，但把失败原因交回调用方（引导需要据此提示用户）。
+fn try_open_panel_on_main(app: &impl OpenPanelContext) -> Result<(), &'static str> {
     if !app.controller_ready() {
-        app.record("面板：尚未初始化，已跳过呼出");
-        return;
+        return Err("面板：尚未初始化，已跳过呼出");
     }
     // 可见性检查和既有 Toggle 派发在同一主线程执行，重复打开不会反向隐藏。
     match app.panel_visibility() {
-        PanelVisibility::Visible => {}
+        PanelVisibility::Visible => Ok(()),
         PanelVisibility::Hidden => {
             let action = toggle_action(app.capture_target());
-            if app.dispatch_panel(action).is_err() {
-                app.record("面板：呼出请求未完成");
-            }
+            app.dispatch_panel(action)
+                .map_err(|_| "面板：呼出请求未完成")
         }
-        PanelVisibility::Missing => app.record("面板：未找到既有显示入口"),
-        PanelVisibility::Unavailable => app.record("面板：可见状态查询失败，已跳过呼出"),
+        PanelVisibility::Missing => Err("面板：未找到既有显示入口"),
+        PanelVisibility::Unavailable => Err("面板：可见状态查询失败，已跳过呼出"),
     }
 }
 
@@ -759,36 +782,48 @@ fn open_panel(app: &impl OpenPanelContext) {
     }
 }
 
+/// 引导第二拍的“帮我打开面板”。必须在非主线程调用：要等主线程执行完才知道成败，
+/// 失败时把原因交回前端（Guide.svelte 据此显示“面板没打开…”）。
 fn guide_open_panel_entry(app: &impl OpenPanelContext) -> Result<(), String> {
     let handle = app.clone();
+    let (sender, receiver) = std::sync::mpsc::channel::<Result<(), &'static str>>();
     if app
         .run_on_main(Box::new(move || {
-            if handle.controller_ready() && handle.panel_visibility() == PanelVisibility::Visible {
+            let result = if handle.controller_ready()
+                && handle.panel_visibility() == PanelVisibility::Visible
+            {
                 // 仅 guide 的失败重试需要真正换 session：沿用生产 Toggle 先收再开。
-                // 普通托盘 / 单实例仍走下面的 open_panel_on_main，Visible 空分支不变。
+                // 普通托盘 / 单实例仍走 open_panel_on_main，Visible 空分支不变。
                 let hide = toggle_action(handle.capture_target());
-                if handle.dispatch_panel(hide).is_err() {
-                    handle.record("面板：呼出请求未完成");
-                    return;
-                }
-                let show = toggle_action(handle.capture_target());
-                if handle.dispatch_panel(show).is_err() {
-                    handle.record("面板：呼出请求未完成");
-                }
+                handle
+                    .dispatch_panel(hide)
+                    .and_then(|()| handle.dispatch_panel(toggle_action(handle.capture_target())))
+                    .map_err(|_| "面板：呼出请求未完成")
             } else {
-                open_panel_on_main(&handle);
+                try_open_panel_on_main(&handle)
+            };
+            if let Err(message) = result {
+                handle.record(message);
             }
+            let _ = sender.send(result);
         }))
         .is_err()
     {
         app.record("面板：主线程呼出请求未完成");
+        return Err("面板没打开，选好能打字的地方后再试一次".into());
     }
-    Ok(())
+    match receiver.recv_timeout(std::time::Duration::from_secs(3)) {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(_)) | Err(_) => Err("面板没打开，选好能打字的地方后再试一次".into()),
+    }
 }
 
 #[tauri::command]
-pub fn guide_open_panel(app: AppHandle) -> Result<(), String> {
-    guide_open_panel_entry(&app)
+pub async fn guide_open_panel(app: AppHandle) -> Result<(), String> {
+    // 异步命令不在主线程上跑，可以安全等主线程回结果。
+    tauri::async_runtime::spawn_blocking(move || guide_open_panel_entry(&app))
+        .await
+        .map_err(|_| "面板没打开，选好能打字的地方后再试一次".to_owned())?
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -964,10 +999,21 @@ mod tests {
         }
         fn trace(event: TrayIconEvent) -> Vec<&'static str> {
             let calls = std::cell::RefCell::new(Vec::new());
+            let health = HealthSnapshot {
+                store: StoreHealth::Ready,
+                capture: CaptureHealth::Recording,
+                recorded_today: 7,
+            };
             dispatch_tray_icon_event(
                 event,
-                || calls.borrow_mut().push("refresh"),
-                || calls.borrow_mut().push("left"),
+                || {
+                    calls.borrow_mut().push("refresh");
+                    Some(health)
+                },
+                |actual| {
+                    assert_eq!(actual, Some(health), "路由必须复用刷新时的健康快照");
+                    calls.borrow_mut().push("left");
+                },
                 || calls.borrow_mut().push("autostart"),
             );
             calls.into_inner()

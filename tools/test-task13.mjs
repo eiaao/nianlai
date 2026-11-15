@@ -157,7 +157,7 @@ async function assertGuideFooter(pose) {
   const hint = await text(".hint");
   for (const key of pose === "fan" ? ["←", "→"] : ["↑", "↓"]) assert.match(hint, new RegExp(key));
   for (const key of ["Delete", "Tab", "Esc"]) assert.match(hint, new RegExp(key));
-  assert.doesNotMatch(hint, /只复制|不粘贴|纯文本|设为常用|多选|一起粘贴|逐张放/);
+  assert.doesNotMatch(hint, /只复制|不粘贴|纯文本|设为收藏|多选|一起粘贴|逐张放/);
 }
 async function spreadT4ErrorVisibility() {
   const state = await cdp.evaluate(`(() => {
@@ -619,7 +619,7 @@ test("fan/spread × default/Shift/Ctrl 页脚只提示真实可用动作，sprea
   await panelKey("Mod:Ctrl", shown.session);
   await settleModifierHint();
   assert.match(await text(".hint"), /纯文本/);
-  assert.match(await text(".hint"), /设为常用/);
+  assert.match(await text(".hint"), /设为收藏/);
 
   shown = await openPanel();
   await panelKey("Space", shown.session);

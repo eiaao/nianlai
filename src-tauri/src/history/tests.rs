@@ -680,7 +680,7 @@ fn failed_integrity_check_switches_to_a_fresh_memory_store_and_leaves_the_file()
 fn reorder_mismatch_has_exact_plain_chinese_message() {
     assert_eq!(
         label_error(nianlai_store::Error::Invalid("reorder_mismatch")),
-        "常用牌刚变过，重新打开这页再排"
+        "收藏刚变过，重新打开这页再排"
     );
 }
 

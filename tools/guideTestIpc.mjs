@@ -1,24 +1,10 @@
 // tools/test-guide-component.mjs 的内存 Tauri 替身。
 // 只替换 core/event/window 边界；真实 Guide.svelte、GuideFlow.reduce 与 src/lib/ipc.ts 均按生产路径执行。
-const clone = (value) => value === undefined ? undefined : JSON.parse(JSON.stringify(value));
+import { clone, deferred, merge } from "./ipcTestUtils.mjs";
+
 const query = new URLSearchParams(location.search);
 const scenario = query.get("scenario") ?? "default";
 const STORAGE_KEY = `nianlai-guide-${scenario}`;
-
-function merge(base, update) {
-  if (base && update && typeof base === "object" && typeof update === "object" && !Array.isArray(base) && !Array.isArray(update)) {
-    const result = { ...base };
-    for (const [key, value] of Object.entries(update)) result[key] = merge(result[key], value);
-    return result;
-  }
-  return clone(update);
-}
-function deferred() {
-  let resolve;
-  let reject;
-  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
-  return { promise, resolve, reject };
-}
 function historyItem(id, copiedMs, preview = `记下的内容 ${id}`) {
   return {
     id, kind: "文本", preview, file_names: [], source: "Notepad.exe", copied_ms: copiedMs,

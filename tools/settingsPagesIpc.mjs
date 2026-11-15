@@ -1,17 +1,7 @@
 // tools/test-settings-pages.mjs 的内存 Tauri 替身：只替换 IPC，不替换任何生产组件。
 import nianlaiLicense from "../LICENSE?raw";
 import thirdPartyNotices from "../THIRD_PARTY_NOTICES.md?raw";
-
-const clone = (value) => value === undefined ? undefined : JSON.parse(JSON.stringify(value));
-
-function merge(base, update) {
-  if (base && update && typeof base === "object" && typeof update === "object" && !Array.isArray(base) && !Array.isArray(update)) {
-    const result = { ...base };
-    for (const [key, value] of Object.entries(update)) result[key] = merge(result[key], value);
-    return result;
-  }
-  return clone(update);
-}
+import { clone, deferred, merge } from "./ipcTestUtils.mjs";
 
 const DEFAULT_SETTINGS = {
   hotkey: "Ctrl+`",
@@ -32,7 +22,7 @@ const SETTINGS_READ_KEY = `${SETTINGS_KEY}-read-count`;
 const FAVORITES_KEY = `${SETTINGS_KEY}-favorites`;
 const DEFAULT_FAVORITES = [
   {
-    id: 101, kind: "文本", preview: "测试常用", file_names: [], source: "Example.exe", copied_ms: 0,
+    id: 101, kind: "文本", preview: "测试收藏", file_names: [], source: "Example.exe", copied_ms: 0,
     copy_count: 0, partial: false, favorite: true, favorite_position: 1, source_name: "示例程序", source_icon: null,
   },
   {
@@ -59,7 +49,7 @@ let favorites = (() => {
   try {
     const saved = sessionStorage.getItem(FAVORITES_KEY);
     if (saved) return JSON.parse(saved);
-  } catch { /* 新场景使用默认常用。 */ }
+  } catch { /* 新场景使用默认收藏。 */ }
   const query = new URLSearchParams(location.search);
   if (query.get("favEmpty") === "1") return [];
   if (query.get("favSingle") === "1") return clone(DEFAULT_FAVORITES.slice(0, 1));
@@ -97,18 +87,11 @@ let deferAutostartGet = false;
 const deferredAutostartSets = [];
 const deferredAutostartGets = [];
 
-function deferred() {
-  let resolve;
-  let reject;
-  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
-  return { promise, resolve, reject };
-}
-
 const truncate = (value, limit) => Array.from(String(value ?? "")).slice(0, limit).join("");
 function readFavoriteSnapshot() {
   if (favoriteReadErrors > 0) {
     favoriteReadErrors -= 1;
-    return { error: "模拟常用读取失败" };
+    return { error: "模拟收藏读取失败" };
   }
   // 必须在调用时取快照；Promise 晚到不能伪装成后端稍后才完成这次旧读。
   return { items: favoriteList() };
@@ -119,7 +102,7 @@ function writeFavoriteLabel(args) {
     throw new Error("模拟标题备注保存失败");
   }
   const item = favorites.find((entry) => entry.id === args.id && entry.favorite);
-  if (!item) throw new Error("只有常用的才能设置标题和备注");
+  if (!item) throw new Error("只有收藏的才能设置标题和备注");
   item.title = truncate(args.title.trim().replace(/[\r\n]/g, " "), 200);
   item.note = truncate(args.note.trim(), 2000);
   persistFavorites();
@@ -134,7 +117,7 @@ function writeFavoriteOrder(ids) {
   const requested = [...ids].sort((a, b) => a - b);
   const expected = [...current].sort((a, b) => a - b);
   if (requested.length !== expected.length || requested.some((id, index) => id !== expected[index])) {
-    throw new Error("常用牌刚变过，重新打开这页再排");
+    throw new Error("收藏刚变过，重新打开这页再排");
   }
   ids.forEach((id, index) => {
     const item = favorites.find((entry) => entry.id === id);
@@ -146,7 +129,7 @@ function writeFavoriteOrder(ids) {
 function writeFavorite(args) {
   if (favoriteWriteErrors > 0) {
     favoriteWriteErrors -= 1;
-    throw new Error("模拟常用状态保存失败");
+    throw new Error("模拟收藏状态保存失败");
   }
   const item = favorites.find((entry) => entry.id === args.id);
   if (!item) return null;
@@ -164,7 +147,7 @@ function writeFavorite(args) {
 }
 function takeDeferred(queue, id) {
   const index = queue.findIndex((entry) => entry.id === id);
-  if (index < 0) throw new Error(`没有等待中的常用写入 ${id}`);
+  if (index < 0) throw new Error(`没有等待中的收藏写入 ${id}`);
   return queue.splice(index, 1)[0];
 }
 
@@ -182,6 +165,13 @@ const storage = {
   images: { all: { ...EMPTY_FILES }, older_30: { ...EMPTY_FILES }, older_90: { ...EMPTY_FILES } },
 };
 const initialQuery = new URLSearchParams(location.search);
+// 仅显式 imageGrid=N 的场景提供长网格；默认 get_images 仍为空，不改变既有测试语义。
+const imageItems = Array.from({ length: Math.max(0, Number(initialQuery.get("imageGrid") ?? 0) || 0) }, (_, index) => ({
+  id: 900 + index,
+  bytes: 4096 + index * 512,
+  copied_ms: Date.now() - index * 1000,
+  favorite: false,
+}));
 if (initialQuery.get("storage") === "1") {
   Object.assign(storage, {
     database_bytes: 8192,
@@ -437,7 +427,7 @@ export async function invoke(command, args = {}) {
       return removed;
     }
     case "get_thumbnail": return null;
-    case "get_images": return [];
+    case "get_images": return clone(imageItems);
     case "get_storage":
       if (deferStorageReads) {
         const call = { ...deferred(), snapshot: clone(storage) };
@@ -621,13 +611,13 @@ export const testApi = {
   favoriteReadSnapshots: () => deferredFavoriteReads.map((call) => clone(call.snapshot)),
   resolveFavoriteRead: () => {
     const call = deferredFavoriteReads.shift();
-    if (!call) throw new Error("没有等待中的常用读取");
+    if (!call) throw new Error("没有等待中的收藏读取");
     if (call.snapshot.error) call.reject(new Error(call.snapshot.error));
     else call.resolve(clone(call.snapshot.items));
   },
-  rejectFavoriteRead: (reason = "模拟延迟常用读取失败") => {
+  rejectFavoriteRead: (reason = "模拟延迟收藏读取失败") => {
     const call = deferredFavoriteReads.shift();
-    if (!call) throw new Error("没有等待中的常用读取");
+    if (!call) throw new Error("没有等待中的收藏读取");
     call.reject(new Error(reason));
   },
   resolveFavoriteLabel: (id) => {
@@ -651,7 +641,7 @@ export const testApi = {
     const call = takeDeferred(deferredFavoriteWrites, id);
     try { call.resolve(writeFavorite(call.args)); } catch (error) { call.reject(error); }
   },
-  rejectFavoriteWrite: (id, reason = "模拟延迟常用状态失败") => {
+  rejectFavoriteWrite: (id, reason = "模拟延迟收藏状态失败") => {
     takeDeferred(deferredFavoriteWrites, id).reject(new Error(reason));
   },
   hotkeyScenario: ({ validationError = null } = {}) => { hotkeyValidationError = validationError; },

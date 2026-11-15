@@ -23,7 +23,7 @@
   const lines = $derived(text.split("\n").filter((line) => line.trim()));
   const taken = $derived(panel.isTaken(item.id));
   const favorite = $derived(item.favorite);
-  // 常用列表里每张都是常用，印记省掉；只在最近、搜索混排里出现。
+  // 收藏列表里每张都是收藏，印记省掉；只在最近、搜索混排里出现。
   const showSeal = $derived(favorite && !(panel.handList === "favorites" && !panel.searching));
   const holding = $derived(panel.holdDelete?.id === item.id && panel.holdDelete.phase === "holding" ? panel.holdDelete : null);
   const meta = $derived(item.title ? item.title : `${sourceName(item)}${item.copied_ms ? ` · ${relativeTime(item.copied_ms, panel.openedAt)}` : ""}`);
@@ -175,8 +175,8 @@
             <div class="number">{@render marked(text.trim())}</div>
           {/if}
         </div>
-        <div class="foot">{item.title ? "常用" : meta}</div>
-        {#if showSeal}<i class="seal" aria-label="常用">藏</i>{/if}
+        <div class="foot">{item.title ? "收藏" : meta}</div>
+        {#if showSeal}<i class="seal" aria-label="收藏">藏</i>{/if}
       {/if}
     </div>
 

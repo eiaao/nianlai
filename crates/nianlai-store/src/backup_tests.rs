@@ -830,9 +830,8 @@ fn task2_second_review_old_backup_keys_survive_independent_inspections() {
         key
     };
 
-    // 同一原始文件再次独立解压、独立迁移；键虽稳定，匿名 legacy 事件仍不能证明可恢复身份。
-    let before_legacy_conflicts = merge_database_state(&local);
-    let before_cache = cache_state(&local);
+    // 同一原始文件再次独立解压、独立迁移：键确定稳定，同键就是同一次复制。
+    // 导回自己的旧备份必须能把彻底删除的正文找回来，并且不重复计数。
     let second = inspect_backup(&target.0, &original);
     assert!(second.ok, "{:?}", second.steps);
     let second_key = {
@@ -843,29 +842,48 @@ fn task2_second_review_old_backup_keys_survive_independent_inspections() {
         })
         .unwrap()
     };
-    assert_eq!(
-        local.import_merge(&second.token).err(),
-        Some(Error::Invalid("event_content_conflict"))
-    );
+    local.import_merge(&second.token).unwrap();
     assert_eq!(first_key, second_key, "旧事件迁移键必须确定稳定");
-    assert_eq!(merge_database_state(&local), before_legacy_conflicts);
-    assert_eq!(cache_state(&local), before_cache);
-    assert_eq!(local.copied_since(0).unwrap(), 1);
-    assert_eq!(local.cache().total, 0, "匿名 legacy 冲突不得复活正文");
+    assert_eq!(
+        local.copied_since(0).unwrap(),
+        1,
+        "同一 legacy 事件不得重复计数"
+    );
+    assert_eq!(local.cache().total, 1, "导回自己的备份能恢复彻底删除的正文");
+    assert_eq!(local.cache().items[0].copy_count, 1);
+    {
+        let reader = local.reader().unwrap();
+        assert_eq!(
+            reader
+                .connection()
+                .query_row(
+                    "SELECT count(*) FROM copy_events WHERE content_id IS NULL",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0,
+            "匿名事件重新关联到恢复的正文"
+        );
+    }
+    let before_conflict = merge_database_state(&local);
+    let before_cache = cache_state(&local);
 
-    // 无关旧库同 rowid/time/source/owner/pid/sequence，即使内容不同也无法判别；同样冲突回滚。
+    // 无关旧库同 rowid/time/source/owner/pid/sequence 但内容不同：本地事件已关联存活正文，不能改绑，冲突回滚。
     let other = inspect_backup(&target.0, &unrelated);
     assert!(other.ok, "{:?}", other.steps);
     assert_eq!(
         local.import_merge(&other.token).err(),
         Some(Error::Invalid("event_content_conflict"))
     );
-    assert_eq!(merge_database_state(&local), before_legacy_conflicts);
+    assert_eq!(merge_database_state(&local), before_conflict);
     assert_eq!(cache_state(&local), before_cache);
     assert_eq!(local.copied_since(0).unwrap(), 1);
-    assert_eq!(local.cache().total, 0);
 
-    // 相同内容但时间不同，稳定事件字段不同，应当作为另一次复制保留。
+    // 再次彻底删除；相同内容但时间不同，稳定事件字段不同，应当作为另一次复制保留。
+    let alpha = local.cache().items[0].id;
+    assert!(local.delete(alpha).unwrap());
+    assert_eq!(local.purge(Some(vec![alpha]), u64::MAX).unwrap(), 1);
     let later = inspect_backup(&target.0, &later_same_content);
     assert!(later.ok, "{:?}", later.steps);
     local.import_merge(&later.token).unwrap();
@@ -895,7 +913,7 @@ fn task2_second_review_old_backup_keys_survive_independent_inspections() {
 }
 
 #[test]
-fn task2_fourth_review_legacy_anonymous_duplicate_conflicts() {
+fn task2_fourth_review_legacy_anonymous_duplicate_is_idempotent() {
     let archives = Temp::new();
     let original = old_v3_backup(&archives, "original.nianlai-backup", "old-alpha", 1_000);
     let target = Temp::new();
@@ -921,11 +939,8 @@ fn task2_fourth_review_legacy_anonymous_duplicate_conflicts() {
     let before = merge_database_state(&local);
     let before_cache = cache_state(&local);
 
-    // legacy 即使匿名对匿名也不能证明身份；origin 随备份保留，重复键必须冲突而非静默少计。
-    assert_eq!(
-        local.import_merge(&anonymous.token).err(),
-        Some(Error::Invalid("event_content_conflict"))
-    );
+    // 两边都是同一 legacy 事件的匿名计数：幂等去重，合并成功且不重复计数、不改动本地。
+    local.import_merge(&anonymous.token).unwrap();
     assert_eq!(merge_database_state(&local), before);
     assert_eq!(cache_state(&local), before_cache);
     assert_eq!(local.copied_since(0).unwrap(), 1);
@@ -1134,18 +1149,24 @@ fn assert_v3_late_format_conflict(purge_between: bool) {
     assert_eq!(second.upgraded_from, Some(3));
     let second_key = staged_event_key(&target.0, &second.token);
 
-    // 内容指纹在迟到格式前后可变；legacy 无论本地事件存活还是匿名，都不能安全改绑。
+    // 内容指纹在迟到格式前后可变。本地事件仍关联存活的 A：不能改绑到 B，冲突回滚。
+    // 本地 A 已彻底删除、只剩匿名事件：同键就是同一次复制，随 B 恢复关联，不重复计数。
     let result = local.import_merge(&second.token);
     let resulting_count = local.copied_since(0).unwrap();
     assert_eq!(first_key, second_key, "迟到格式不得改变旧事件键");
-    assert_eq!(
-        result.err(),
-        Some(Error::Invalid("event_content_conflict")),
-        "purge_between={purge_between}, resulting_count={resulting_count}"
-    );
-    assert_eq!(resulting_count, 1);
-    assert_eq!(merge_database_state(&local), before);
-    assert_eq!(cache_state(&local), before_cache);
+    assert_eq!(resulting_count, 1, "purge_between={purge_between}");
+    if purge_between {
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(local.cache().total, 1);
+        assert_eq!(
+            local.cache().items[0].fingerprint,
+            rich("v3 迟到格式").fingerprint
+        );
+    } else {
+        assert_eq!(result.err(), Some(Error::Invalid("event_content_conflict")));
+        assert_eq!(merge_database_state(&local), before);
+        assert_eq!(cache_state(&local), before_cache);
+    }
     let reader = local.reader().unwrap();
     let (events, anonymous): (i64, i64) = reader
         .connection()
@@ -1156,7 +1177,7 @@ fn assert_v3_late_format_conflict(purge_between: bool) {
         )
         .unwrap();
     assert_eq!(events, 1, "不得留下 K(A)+K(B) 两条事件");
-    assert_eq!(anonymous, i64::from(purge_between));
+    assert_eq!(anonymous, 0);
     drop(reader);
     check(&target.0).unwrap();
 }
@@ -1167,7 +1188,7 @@ fn task2_third_review_v3_late_format_merge_conflicts_without_double_count() {
 }
 
 #[test]
-fn task2_third_review_v3_late_format_merge_after_purge_conflicts_without_double_count() {
+fn task2_third_review_v3_late_format_merge_after_purge_restores_without_double_count() {
     assert_v3_late_format_conflict(true);
 }
 

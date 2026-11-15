@@ -155,13 +155,13 @@
       {#if panel.backItems.length}
         <button class="tag" type="button" tabindex="-1" data-hit style={`translate:${ORIGIN_X - 12}px ${HAND_TOP - 30}px`}
           onpointerdown={(event) => event.preventDefault()} onclick={() => panel.switchHandList(panel.handList === "favorites" ? "recent" : "favorites")}>
-          <kbd>{panel.handList === "favorites" ? "↓" : "↑"}</kbd>{panel.handList === "favorites" ? "最近" : "常用"}
+          <kbd>{panel.handList === "favorites" ? "↓" : "↑"}</kbd>{panel.handList === "favorites" ? "最近" : "收藏"}
         </button>
         {#each panel.backItems as item, index (item.id)}
           {@const box = backBox(index)}
           <button class="back-head" type="button" tabindex="-1" data-hit style={`translate:${box.x}px ${box.y}px;rotate:${box.r}deg;z-index:${index + 1}`}
             onpointerdown={(event) => event.preventDefault()} onclick={() => panel.switchHandList(panel.handList === "favorites" ? "recent" : "favorites")}>
-            {#if panel.handList === "recent"}<i>常</i>{/if}<span>{cardLabel(item)}</span>
+            {#if panel.handList === "recent"}<i>收藏</i>{/if}<span>{cardLabel(item)}</span>
           </button>
         {/each}
       {/if}
@@ -209,7 +209,7 @@
         {:else if panel.heldModifier === "shift"}
           {@render keys(["Shift", "↵"], "只复制这一张，不粘贴")}
         {:else if panel.heldModifier === "ctrl"}
-          {#if panel.searching}{@render keys(["Ctrl", "1–7"], "粘贴对应一张")}{/if}{@render keys(["Ctrl", "↵"], "按纯文本粘贴")}{@render keys(["Ctrl", "D"], panel.currentItem?.favorite ? "不再常用" : "设为常用")}{#if panel.undo}{@render keys(["Ctrl", "Z"], "撤销删除")}{/if}
+          {#if panel.searching}{@render keys(["Ctrl", "1–7"], "粘贴对应一张")}{/if}{@render keys(["Ctrl", "↵"], "按纯文本粘贴")}{@render keys(["Ctrl", "D"], panel.currentItem?.favorite ? "取消收藏" : "设为收藏")}{#if panel.undo}{@render keys(["Ctrl", "Z"], "撤销删除")}{/if}
         {:else if spread}
           {@render keys(["↑", "↓"], "上一张 / 下一张")}{@render keys(["↵"], "粘贴")}{#if panel.searching}{@render keys(["Ctrl"], "+数字 粘贴")}{:else}{@render keys(["1–7"], "粘贴")}{@render keys(["空格"], "多选")}{/if}{@render keys(["Tab"], "看全")}{@render keys(["Esc"], panel.searching ? "清空搜索" : "收回")}
         {:else}
@@ -221,7 +221,7 @@
     {#if !spread && !toast}
       <div class="position bottom" data-hit style={`left:${ORIGIN_X + HAND_W / 2}px;top:${HAND_TOP + 216}px`}>
         {#if !panel.handSource.length}还没复制过东西
-        {:else if panel.handList === "favorites"}<b>常用</b> {panel.fanItems.length} 张{#if rest} · 共 {panel.handSource.length} 张{/if} · 顺序固定
+        {:else if panel.handList === "favorites"}<b>收藏</b> {panel.fanItems.length} 张{#if rest} · 共 {panel.handSource.length} 张{/if} · 顺序固定
         {:else}<b>最近</b> {panel.fanItems.length} 张 · 共 {panel.handSource.length} 张{/if}{#if panel.arrivals} · 新来 {panel.arrivals} 张{/if}
       </div>
     {/if}

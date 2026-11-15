@@ -47,7 +47,7 @@
   <div class="group">
     <span class="group-title">旧内容顺序</span>
     <div class="card">
-      <label class="setting reuse-row" data-save-row="habits.reuse-to-top"><span class="setting-copy"><strong>贴过的旧内容挪到最前</strong><small>下次呼出时它是第 1 张。常用牌的顺序不受影响。</small><span class="reuse-figure" aria-hidden="true"><i>1</i><i>2</i><i class="changed">5</i><em>贴过之后 →</em><i class="changed">1</i><i>2</i><i>3</i></span></span><SaveMark state={saveState("habits.reuse-to-top")} />
+      <label class="setting reuse-row" data-save-row="habits.reuse-to-top"><span class="setting-copy"><strong>贴过的旧内容挪到最前</strong><small>下次呼出时它是第 1 张。收藏的顺序不受影响。</small><span class="reuse-figure" aria-hidden="true"><i>1</i><i>2</i><i class="changed">5</i><em>贴过之后 →</em><i class="changed">1</i><i>2</i><i>3</i></span></span><SaveMark state={saveState("habits.reuse-to-top")} />
         <input class="switch" data-setting="reuse-to-top" aria-label="贴过的旧内容挪到最前" type="checkbox" role="switch" checked={reuseToTop} disabled={disabled}
           onchange={(event) => onsave("habits.reuse-to-top", { history: { reuse_to_top: event.currentTarget.checked } }, event.currentTarget.checked ? "贴过的旧内容会挪到最前" : "贴过的旧内容保持原位置")} />
       </label>

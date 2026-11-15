@@ -219,7 +219,7 @@ export class PanelState {
     const known = new Set([...this.recentIds, ...this.pinnedIds]);
     return this.history.items.filter((item) => !known.has(item.id)).length;
   });
-  groupOf = (item: HistoryItem): string => this.searching && item.favorite ? "常用" : timeGroup(item.copied_ms, this.openedAt);
+  groupOf = (item: HistoryItem): string => this.searching && item.favorite ? "收藏" : timeGroup(item.copied_ms, this.openedAt);
   /**
    * 摊开的版面（行位置、分组标题、滚动、看得见的行）。滚动只由选中项推动，
    * 所以这里顺手记下新的滚动量；同样的输入重复计算结果不变。
@@ -314,6 +314,13 @@ export class PanelState {
     $effect(() => {
       const searching = this.searching;
       untrack(() => { if (wasSearching && !searching) this.leaveSearchResults(); wasSearching = searching; });
+    });
+
+    // t4 的开机启动开关：activated 模式下 domFocus 就绪、或从收藏/搜索切回最近列表时才满足读取条件，
+    // 呼出那一刻同步一次不够；跟着条件变化重新同步（key 去重，同一会话不会重复读）。
+    $effect(() => {
+      void [this.visible, this.interactive, this.searching, this.handList, this.guide, this.session];
+      untrack(() => this.syncGuideAutostart());
     });
   }
 
@@ -493,7 +500,7 @@ export class PanelState {
       const index = this.sourceIndex(selectedId);
       this.selected = Math.max(0, index);
     } catch {
-      if (session === this.session) this.message = "没设成常用，再试一次";
+      if (session === this.session) this.message = "没设成收藏，再试一次";
     } finally {
       if (session === this.session) this.favoritePending = null;
     }
@@ -582,6 +589,7 @@ export class PanelState {
   /** Ctrl+Z：恢复最近删除的一条。不限于这次呼出：后端记着本次运行里的删除顺序，可以连续撤销。 */
   undoDelete = async () => {
     if (!this.visible) return;
+    // 有意为之：选中新手牌时 Ctrl+Z 不撤销真实删除（刚删完新手牌按 Ctrl+Z，不能意外恢复别的真实牌）。
     const item = this.currentItem;
     if (item && this.guideNotice(item)) return;
     const session = this.session;

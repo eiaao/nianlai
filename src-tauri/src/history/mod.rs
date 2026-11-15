@@ -107,11 +107,9 @@ fn memory_store(hash: Hash) -> Store {
 // 把存储层的错误码翻成给用户看的话。
 fn label_error(error: nianlai_store::Error) -> String {
     match error {
-        nianlai_store::Error::Invalid("reorder_duplicate") => "常用顺序里有重复".into(),
-        nianlai_store::Error::Invalid("reorder_mismatch") => {
-            "常用牌刚变过，重新打开这页再排".into()
-        }
-        nianlai_store::Error::Invalid("not_favorite") => "只有常用的才能设置标题和备注".into(),
+        nianlai_store::Error::Invalid("reorder_duplicate") => "收藏顺序里有重复".into(),
+        nianlai_store::Error::Invalid("reorder_mismatch") => "收藏刚变过，重新打开这页再排".into(),
+        nianlai_store::Error::Invalid("not_favorite") => "只有收藏的才能设置标题和备注".into(),
         other => user_message(&other),
     }
 }
@@ -166,6 +164,8 @@ pub struct Inner {
     status: Mutex<Option<&'static str>>,
     // 类型化存储健康（v11）：0 Loading / 1 Ready / 2 Failed；不从界面文案反推。
     store_health: AtomicU8,
+    // 最近一次成功读到的“今天记下”计数（日起点, 次数）：只读计数暂时失败时沿用，不改健康状态。
+    pub(crate) recorded_today_cache: Mutex<Option<(u64, usize)>>,
     recording: AtomicBool,
     // 托盘记录健康：低两位 0 Starting / 1 Recording / 2 Failed / 3 Stopping；bit 2 为读取线程已终止。
     capture: AtomicU8,
@@ -206,6 +206,7 @@ impl History {
             retired: Mutex::new(Vec::new()),
             status: Mutex::new(Some("正在打开")),
             store_health: AtomicU8::new(0),
+            recorded_today_cache: Mutex::new(None),
             recording: AtomicBool::new(false),
             capture: AtomicU8::new(0),
             last_write: Mutex::new(None),
@@ -1371,7 +1372,7 @@ mod startup_tests {
             // 错误：重复、非收藏、缺项；不改变顺序，并给中文提示。
             for bad in [vec![c, c, b], vec![c, a, 9999], vec![c, a]] {
                 let error = shared.reorder_favorites(&bad).err().unwrap();
-                assert!(error.contains("常用"), "{error}");
+                assert!(error.contains("收藏"), "{error}");
                 assert_eq!(order(shared), vec![c, a, b]);
             }
             // 标题备注：清理、上限、非收藏报错。

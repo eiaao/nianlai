@@ -344,20 +344,6 @@ test("暂停、存储/记录故障不伪造复制，并提供对应设置入口"
   assert.equal(sample.state.guide.phase, "await_copy", "请求示例复制不等于已经记下");
 });
 
-test("dismissed 去重、保持顺序并忽略非法牌 ID", () => {
-  let state = initial();
-  state = advance(state, { type: "dismiss_card", id: "t2" });
-  state = advance(state, { type: "dismiss_card", id: "t1" });
-  const duplicate = reduce(state, { type: "dismiss_card", id: "t2" });
-  assert.equal(duplicate.state.pending, null);
-  assert.deepEqual(duplicate.state.guide.dismissed, ["t2", "t1"]);
-  for (const id of ["t5", "", 1, null]) {
-    const invalid = reduce(state, { type: "dismiss_card", id });
-    assert.equal(invalid.state.pending, null);
-    assert.deepEqual(invalid.state.guide.dismissed, ["t2", "t1"]);
-  }
-});
-
 test("损坏状态、非法数值和未知事件安全降级，不抛异常", () => {
   const broken = {
     guide: { version: -1, phase: "await_paste", baseline_ms: -1, baseline_total: -9,

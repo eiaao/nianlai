@@ -39,7 +39,7 @@ VECTOR: dict[int, str] = {
     32: "app-32.svg", 48: "app-48.svg",
 }
 TRAY = {
-    "recording": ("tray-recording-16.svg", "tray-recording-24.svg"),
+    "recording": ("app-16.svg", "app-24.svg"),
     "paused-light": ("tray-paused-16-light.svg", "tray-paused-24-light.svg"),
     "paused-dark": ("tray-paused-16-dark.svg", "tray-paused-24-dark.svg"),
     "error": ("tray-error-16.svg", "tray-error-24.svg"),

@@ -2,10 +2,11 @@
 // 只 alias Tauri core/event/window；所有复制、面板与粘贴结果均由测试显式注入，不触碰系统剪贴板或按键。
 import assert from "node:assert/strict";
 import { after, afterEach, before, test } from "node:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
+import { cleanupHeadlessEdge } from "./headlessEdgeCleanup.mjs";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { createServer } from "vite";
@@ -132,24 +133,13 @@ before(async () => {
   await cdp.send("Page.enable");
 });
 after(async () => {
-  cdp?.close();
+  writeFileSync(resolve(shotDirectory, "guide-manifest.json"), JSON.stringify(shotManifest, null, 2) + "\n", "utf8");
+  if (cdp) {
+    await Promise.race([cdp.send("Browser.close").catch(() => {}), new Promise((resolve) => setTimeout(resolve, 3000))]);
+    cdp.close();
+  }
   await vite?.close();
-  if (edge && edge.exitCode === null) {
-    const exited = new Promise((resolve) => edge.once("exit", resolve));
-    edge.kill();
-    await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 3000))]);
-  }
-  if (temporary) {
-    assert.equal(dirname(temporary), temporaryBase);
-    assert.ok(temporary.includes("nianlai-guide-component-"));
-    for (let attempt = 0; ; attempt += 1) {
-      try { rmSync(temporary, { recursive: true, force: true }); break; }
-      catch (error) {
-        if (attempt >= 5 || !["EPERM", "EBUSY"].includes(error.code)) throw error;
-        await new Promise((resolve) => setTimeout(resolve, 250));
-      }
-    }
-  }
+  await cleanupHeadlessEdge({ edge, temporary, temporaryBase, prefix: "nianlai-guide-component-", label: "GuideComponent" });
   const stderr = edgeStderr.join("").trimEnd();
   if (stderr) console.error(`\n[guide 无头 Edge 非阻断 stderr 原文]\n${stderr}\n[/guide 无头 Edge stderr]\n`);
 });
@@ -254,7 +244,6 @@ async function captureShot(name, metadata) {
   const filename = name.endsWith(".png") ? name : `${name}.png`;
   writeFileSync(resolve(shotDirectory, filename), bytes);
   shotManifest.push({ name: filename, file: `internal/design/v11-around/shots/implementation/${filename}`, width: 360, height: 360, ...metadata });
-  writeFileSync(resolve(shotDirectory, "guide-manifest.json"), JSON.stringify(shotManifest, null, 2) + "\n", "utf8");
 }
 
 test("组件：完整三拍只由真实历史、session/ID 与持久化成功推进", async () => {

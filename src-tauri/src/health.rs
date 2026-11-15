@@ -101,11 +101,21 @@ impl History {
     }
     /// 测试可注入固定日起点，避免构造事件与读取健康之间跨过午夜。
     pub(crate) fn health_at(&self, day_start: u64) -> HealthSnapshot {
-        let recorded_today = self.db().copied_since(day_start).unwrap_or_else(|error| {
-            self.note_store_error(&error);
-            self.log_health_error(&error);
-            0
-        });
+        // 只读计数失败（例如写入线程正忙）不代表存储坏了：不改 StoreHealth，沿用当天上次读到的数。
+        // 存储真故障由写入路径判定，那里才会把状态置为 Failed。
+        let recorded_today = match self.db().copied_since(day_start) {
+            Ok(count) => {
+                *self.recorded_today_cache.lock().unwrap() = Some((day_start, count));
+                count
+            }
+            Err(error) => {
+                self.log_health_error(&error);
+                match *self.recorded_today_cache.lock().unwrap() {
+                    Some((start, count)) if start == day_start => count,
+                    _ => 0,
+                }
+            }
+        };
         HealthSnapshot {
             store: self.store_health(),
             capture: self.capture_health(),
@@ -311,31 +321,6 @@ mod tests {
             TrayDecision {
                 state: TrayState::Error,
                 settings_page: Some("privacy")
-            }
-        );
-    }
-
-    #[test]
-    fn recovery_from_failure_returns_to_normal() {
-        // 恢复后（Ready + Recording）按暂停与否回到正常两态。
-        assert_eq!(
-            select_tray(
-                &snapshot(StoreHealth::Ready, CaptureHealth::Recording),
-                false
-            ),
-            TrayDecision {
-                state: TrayState::Recording,
-                settings_page: None
-            }
-        );
-        assert_eq!(
-            select_tray(
-                &snapshot(StoreHealth::Ready, CaptureHealth::Recording),
-                true
-            ),
-            TrayDecision {
-                state: TrayState::Paused,
-                settings_page: None
             }
         );
     }

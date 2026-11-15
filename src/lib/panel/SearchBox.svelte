@@ -5,12 +5,12 @@
 </script>
 
 <div class="search-box" class:active={panel.mode === "search"}>
-  <span class="label" aria-hidden="true">{panel.searching ? "搜索" : panel.handList === "favorites" ? "常用" : "最近"}</span>
+  <span class="label" aria-hidden="true">{panel.searching ? "搜索" : panel.handList === "favorites" ? "收藏" : "最近"}</span>
   <input
     bind:this={panel.input}
     bind:value={panel.query}
     type="search"
-    aria-label="搜索最近和常用"
+    aria-label="搜索最近和收藏"
     placeholder="搜文字和文件名"
     readonly={panel.locked}
     tabindex={panel.locked ? -1 : 0}

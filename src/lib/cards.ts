@@ -142,7 +142,7 @@ export function relativeTime(millis: number, now = Date.now()) {
   return `${date.getMonth() + 1}月${date.getDate()}日`;
 }
 
-export type TimeGroup = "常用" | "刚才" | "今天上午" | "今天下午" | "昨天" | "这周早些时候" | "更早";
+export type TimeGroup = "收藏" | "刚才" | "今天上午" | "今天下午" | "昨天" | "这周早些时候" | "更早";
 
 /** 时间分组：一小时内“刚才”，今天按上午 / 下午，昨天，本周（周一起）更早的几天，其余“更早”。 */
 export function timeGroup(millis: number, now = Date.now()): TimeGroup {

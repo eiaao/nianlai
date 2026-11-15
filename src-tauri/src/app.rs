@@ -36,7 +36,8 @@ impl HistoryChangedContext for AppHistoryChanged {
 
     fn refresh_tray(&self) {
         // 复制发生或健康变化时，托盘的“今天记下 n 条”和三态跟着刷新（v11）。
-        crate::tray::refresh(&self.0);
+        // 由监听/读取线程调用：不能同步等主线程（见 tray::refresh_from_worker）。
+        crate::tray::refresh_from_worker(&self.0);
     }
 }
 

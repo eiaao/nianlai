@@ -5,7 +5,7 @@ import { after, afterEach, before, test } from "node:test";
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { cleanupHeadlessEdge } from "./headlessEdgeCleanup.mjs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawn } from "node:child_process";
@@ -24,7 +24,7 @@ let scenarioId = 0;
 const executionContexts = [];
 const browserErrors = [];
 const edgeStderr = [];
-const shotDirectory = resolve(root, "internal/design/v11-around/shots/implementation");
+const shotDirectory = resolve(root, process.env.SETTINGS_SHOT_DIR ?? "internal/design/v11-around/shots/implementation");
 const shotManifest = [];
 mkdirSync(shotDirectory, { recursive: true });
 
@@ -149,6 +149,7 @@ before(async () => {
 });
 
 after(async () => {
+  writeFileSync(resolve(shotDirectory, "manifest.json"), JSON.stringify(shotManifest, null, 2) + "\n", "utf8");
   if (cdp) {
     await Promise.race([cdp.send("Browser.close").catch(() => {}), new Promise((resolve) => setTimeout(resolve, 3000))]);
     cdp.close();
@@ -336,7 +337,7 @@ async function nativeDrag(sourceSelector, targetSelector, release = true) {
 
 const PAGE_PROOFS = {
   general: { selector: `[data-setting="placement"] [role="radio"]`, count: 3 },
-  fav: { selector: `[data-favorite-card] [data-favorite-front]`, text: "测试常用" },
+  fav: { selector: `[data-favorite-card] [data-favorite-front]`, text: "测试收藏" },
   privacy: { selector: `form.add input[type="text"]` },
   data: { selector: `.usage .meter` },
   habits: { selector: `[data-setting="click"] option`, count: 4 },
@@ -367,11 +368,51 @@ const VISUAL_STATES = [
 ];
 const SYSTEM_REDUCED = { id: "system-reduced", theme: "light", motion: "spring", followSystem: true, systemDark: false, systemReduce: true };
 const SYSTEM_DARK = { id: "system-dark", theme: "system", motion: "spring", followSystem: false, systemDark: true, systemReduce: false };
-const BANNED_VISIBLE = ["收藏", "快照", "历史库", "数据库", "校验", "落盘", "焦点", "前台", "后端", "日志", "条目", "取用", "槽位", "令牌", "Token", "样机", "初始化", "监听", "采集", "注册 / 注销", "引用", "富文本"];
+const BANNED_VISIBLE = ["快照", "历史库", "数据库", "校验", "落盘", "焦点", "前台", "后端", "日志", "条目", "取用", "槽位", "令牌", "Token", "样机", "初始化", "监听", "采集", "注册 / 注销", "引用", "富文本"];
 
 async function setViewport(width, height) {
   await cdp.send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false });
   await settleDom();
+}
+
+async function assertSettingsLayout(label) {
+  const result = await cdp.evaluate(`(() => {
+    const settings = document.querySelector(".settings");
+    const nav = document.querySelector(".settings > .nav");
+    const main = document.querySelector(".settings > .main");
+    const content = document.querySelector(".settings > .main > .content");
+    if (!settings || !nav || !main || !content) return { missing: true };
+    const settingsStyle = getComputedStyle(settings);
+    const mainStyle = getComputedStyle(main);
+    const settingsRect = settings.getBoundingClientRect();
+    const navRect = nav.getBoundingClientRect();
+    const mainRect = main.getBoundingClientRect();
+    return {
+      missing: false,
+      notes: document.querySelectorAll("[data-settings-notes], aside[aria-label='本页说明']").length,
+      children: [...settings.children].map((node) => node.tagName),
+      display: settingsStyle.display,
+      columns: settingsStyle.gridTemplateColumns.split(/\\s+/).filter(Boolean),
+      mainWidth: mainRect.width,
+      navMainGap: Math.abs(navRect.right - mainRect.left),
+      mainRightDelta: Math.abs(mainRect.right - (settingsRect.right - parseFloat(settingsStyle.borderRightWidth))),
+      mainBorderRight: mainStyle.borderRightWidth,
+      overflow: document.documentElement.scrollWidth > innerWidth + 1
+        || settings.scrollWidth > settings.clientWidth + 1
+        || content.scrollWidth > content.clientWidth + 1,
+    };
+  })()`);
+  assert.equal(result.missing, false, `${label} 设置壳、导航、主内容与滚动区必须真实存在`);
+  assert.equal(result.notes, 0, `${label} 六页及深链都不能渲染右侧说明栏`);
+  assert.deepEqual(result.children, ["NAV", "MAIN"], `${label} 网格只能有左导航和主内容两个直接子项`);
+  assert.equal(result.display, "grid", `${label} 设置壳仍是网格`);
+  assert.equal(result.columns.length, 2, `${label} 计算后的网格只能有两列：${result.columns.join(", ")}`);
+  assert.ok(result.mainWidth > 0, `${label} 主内容必须实际占用第二列`);
+  assert.ok(result.navMainGap <= 1, `${label} 导航与主内容之间不能留下空轨道`);
+  assert.ok(result.mainRightDelta <= 1, `${label} 主内容必须占用原说明栏释放的右侧区域，右侧差=${result.mainRightDelta}`);
+  assert.equal(result.mainBorderRight, "0px", `${label} 主内容右侧不能残留说明栏边框`);
+  assert.equal(result.overflow, false, `${label} 页面、设置壳与主内容都不能横向溢出`);
+  return result;
 }
 
 async function configureVisualState(state) {
@@ -472,7 +513,6 @@ async function assertVisualAudit(label, { reduced = false } = {}) {
       }
     }
     if (content) content.scrollTop = 0;
-    document.querySelector("[data-settings-notes]")?.scrollTo({ top: 0 });
     document.querySelector(".license-scroll")?.scrollTo({ top: 0 });
     const motionViolations = [];
     if (${reduced ? "true" : "false"}) {
@@ -518,18 +558,109 @@ async function assertDarkSurfaces(label, required = []) {
   }
 }
 
-async function captureShot(name, metadata) {
+async function captureShot(name, metadata, expectedWidth = 1120, expectedHeight = 680) {
   await settleVisual();
+  const layout = await assertSettingsLayout(`截图 ${name}`);
   const { data } = await cdp.send("Page.captureScreenshot", { format: "png", fromSurface: true, captureBeyondViewport: false });
   const bytes = Buffer.from(data, "base64");
   assert.equal(bytes.subarray(1, 4).toString(), "PNG", `${name} 必须是真实 PNG`);
   const width = bytes.readUInt32BE(16);
   const height = bytes.readUInt32BE(20);
-  assert.deepEqual([width, height], [1120, 680], `${name} 固定窗口尺寸`);
+  assert.deepEqual([width, height], [expectedWidth, expectedHeight], `${name} 必须是请求的窗口尺寸`);
   const file = resolve(shotDirectory, name.endsWith(".png") ? name : `${name}.png`);
   writeFileSync(file, bytes);
-  shotManifest.push({ name, file: `internal/design/v11-around/shots/implementation/${name.endsWith(".png") ? name : `${name}.png`}`, width, height, ...metadata });
-  writeFileSync(resolve(shotDirectory, "manifest.json"), JSON.stringify(shotManifest, null, 2) + "\n", "utf8");
+  shotManifest.push({ name, file: relative(root, file).replace(/\\/g, "/"), width, height, ...metadata, layout });
+}
+
+async function readScrollbar(selector) {
+  return cdp.evaluate(`(() => {
+    const node = document.querySelector(${JSON.stringify(selector)});
+    if (!node) throw new Error("找不到滚动区 " + ${JSON.stringify(selector)});
+    const standard = getComputedStyle(node);
+    const bar = getComputedStyle(node, "::-webkit-scrollbar");
+    const track = getComputedStyle(node, "::-webkit-scrollbar-track");
+    const thumb = getComputedStyle(node, "::-webkit-scrollbar-thumb");
+    const button = getComputedStyle(node, "::-webkit-scrollbar-button");
+    return {
+      hooked: node.hasAttribute("data-settings-scroll"),
+      scrollbarWidth: standard.scrollbarWidth,
+      scrollbarColor: standard.scrollbarColor,
+      barWidth: bar.width, barHeight: bar.height,
+      trackBackground: track.backgroundColor,
+      thumbBackground: thumb.backgroundColor,
+      thumbRadius: thumb.borderTopLeftRadius,
+      thumbBorderWidth: thumb.borderTopWidth,
+      thumbBorderColor: thumb.borderTopColor,
+      buttonDisplay: button.display,
+      scrollHeight: node.scrollHeight, clientHeight: node.clientHeight,
+      scrollTop: node.scrollTop,
+    };
+  })()`);
+}
+
+function transparentColor(color) {
+  return color === "transparent" || color === "rgba(0, 0, 0, 0)";
+}
+
+function visibleColor(color, label) {
+  assert.ok(color && !transparentColor(color), `${label} 不能全透明：${color}`);
+  assert.doesNotMatch(color, /\/\s*0(?:\.0+)?\)/, `${label} alpha 不能为 0：${color}`);
+}
+
+async function assertScrollbar(selector, label, { forced = false } = {}) {
+  await cdp.evaluate(`(() => {
+    const node = document.querySelector(${JSON.stringify(selector)});
+    if (!node) throw new Error("找不到滚动区 " + ${JSON.stringify(selector)});
+    node.scrollTop = 0;
+  })()`);
+  await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: 0, y: 0 });
+  await settleDom();
+  const initial = await readScrollbar(selector);
+  assert.equal(initial.hooked, true, `${label} 使用共享滚动条钩子`);
+  assert.equal(initial.scrollbarWidth, "thin", `${label} 标准滚动条为 thin`);
+  assert.notEqual(initial.scrollbarWidth, "none", `${label} 不能隐藏标准滚动条`);
+  for (const [axis, value] of [["宽", initial.barWidth], ["高", initial.barHeight]]) {
+    const pixels = Number.parseFloat(value);
+    assert.ok(pixels > 0 && pixels <= 8, `${label} WebKit 轨道${axis}不超过 8px：${value}`);
+  }
+  assert.equal(initial.thumbRadius, "999px", `${label} 圆角滑块`);
+  assert.equal(initial.thumbBorderWidth, "2px", `${label} 透明内边距让可见滑块更细`);
+  assert.equal(initial.buttonDisplay, "none", `${label} 不显示粗重箭头`);
+  visibleColor(initial.thumbBackground, `${label} 默认滑块`);
+  visibleColor(initial.scrollbarColor, `${label} 默认标准颜色`);
+  if (forced) {
+    assert.notEqual(initial.trackBackground, initial.thumbBackground, `${label} forced-colors 滑块与轨道可辨`);
+    assert.notEqual(initial.thumbBorderColor, initial.thumbBackground, `${label} forced-colors 内边距与滑块可辨`);
+  } else {
+    assert.equal(transparentColor(initial.trackBackground), true, `${label} 轨道透明：${initial.trackBackground}`);
+    assert.equal(transparentColor(initial.thumbBorderColor), true, `${label} 滑块内边距透明：${initial.thumbBorderColor}`);
+  }
+  assert.ok(initial.scrollHeight > initial.clientHeight, `${label} 必须由真实长内容产生纵向滚动`);
+
+  const point = await mousePoint(selector);
+  await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", ...point });
+  await settleDom();
+  const hovered = await readScrollbar(selector);
+  visibleColor(hovered.thumbBackground, `${label} 悬停滑块`);
+  assert.notEqual(hovered.thumbBackground, initial.thumbBackground, `${label} 悬停滑块颜色确实加深`);
+  if (forced) {
+    // forced-colors 可把标准 scrollbar-color 的计算值统一报为 auto；以实际滑块/轨道系统色对比为准。
+    assert.notEqual(hovered.trackBackground, hovered.thumbBackground, `${label} 悬停后的滑块与轨道仍可辨`);
+    assert.notEqual(hovered.thumbBorderColor, hovered.thumbBackground, `${label} 悬停后的内边距与滑块仍可辨`);
+  } else {
+    assert.notEqual(hovered.scrollbarColor, initial.scrollbarColor, `${label} 标准滚动条悬停颜色同步变化`);
+  }
+
+  const scrolling = await cdp.evaluate(`(() => {
+    const node = document.querySelector(${JSON.stringify(selector)});
+    const target = Math.min(120, node.scrollHeight - node.clientHeight);
+    node.scrollTop = target;
+    return { target, actual: node.scrollTop };
+  })()`);
+  await settleDom();
+  assert.ok(scrolling.target > 0, `${label} 有可执行的滚动距离`);
+  assert.equal(scrolling.actual, scrolling.target, `${label} scrollTop 真实生效`);
+  return { selector, defaultStyle: initial, hoverStyle: hovered, scrolling };
 }
 
 const PROTO_KEYS = ["toString", "constructor", "__proto__", "hasOwnProperty"];
@@ -574,6 +705,7 @@ test("真实壳渲染六页、aria-current 与真实关于页", async () => {
     assert.equal(await cdp.evaluate(`document.querySelector("button[data-page='${page}']").getAttribute("aria-current")`), "page");
     assert.equal(await cdp.evaluate(`document.querySelectorAll("button[data-page][aria-current='page']").length`), 1);
     await assertPageProof(page);
+    await assertSettingsLayout(`1120x680/${page}`);
   }
   assert.doesNotMatch(await cdp.evaluate(`document.querySelector("[data-settings-page]").textContent`), /后续版本开放/);
 });
@@ -584,23 +716,28 @@ test("旧 settings:navigate 事件与五个数据子页仍挂载真实组件", a
     await openSettings(legacy);
     assert.equal(await cdp.evaluate(`document.querySelector("[data-settings-page]").dataset.page`), page);
     await assertPageProof(page);
+    await assertSettingsLayout(`旧深链 ${legacy}`);
   }
   for (const [view, proof] of Object.entries(DATA_PROOFS)) {
     await openSettings(view);
     assert.equal(await cdp.evaluate(`document.querySelector("[data-settings-page]").dataset.page`), "data");
     assert.equal(await cdp.evaluate(`document.querySelector("[data-settings-page]").dataset.storageView`), view);
     await assertComponentProof(proof, `数据子页 ${view}`);
+    await assertSettingsLayout(`数据深链 ${view}`);
   }
   await openSettings();
   await emitNavigate("record");
   assert.equal(await cdp.evaluate(`document.querySelector("[data-settings-page]").dataset.page`), "privacy");
   await assertPageProof("privacy");
+  await assertSettingsLayout("事件深链 record");
   await emitNavigate("trash");
   assert.equal(await cdp.evaluate(`document.querySelector("[data-settings-page]").dataset.storageView`), "trash");
   await assertComponentProof(DATA_PROOFS.trash, "事件导航回收站");
+  await assertSettingsLayout("事件深链 trash");
   await emitNavigate("general");
   assert.equal(await cdp.evaluate(`document.querySelector("[data-settings-page]").dataset.storageView`), "main");
   await assertPageProof("general");
+  await assertSettingsLayout("事件深链 general");
 });
 
 test("同一行连续改动不被 pending 丢弃，IPC 严格按调用顺序执行", async () => {
@@ -713,14 +850,17 @@ test("系统深色与显式深色的兼容令牌都解析到同一纸墨印体�
   }
 });
 
-test("窄窗口折叠右侧说明栏，六页导航与功能控件仍可用", async () => {
-  await openSettings();
-  await cdp.send("Emulation.setDeviceMetricsOverride", { width: 860, height: 560, deviceScaleFactor: 1, mobile: false });
-  assert.equal(await cdp.evaluate(`getComputedStyle(document.querySelector("[data-settings-notes]")).display`), "none");
-  assert.equal(await cdp.evaluate(`document.querySelectorAll("button[data-page]").length`), 6);
-  assert.ok(await cdp.evaluate(`document.querySelector('[data-setting="theme"]').getBoundingClientRect().width > 0`));
-  await cdp.send("Emulation.setDeviceMetricsOverride", { width: 1120, height: 680, deviceScaleFactor: 1, mobile: false });
-  assert.notEqual(await cdp.evaluate(`getComputedStyle(document.querySelector("[data-settings-notes]")).display`), "none");
+test("1120、860、720 宽度六页均无右侧说明栏，两列主内容无横向溢出且控件可用", async () => {
+  for (const [width, height] of [[1120, 680], [860, 560], [720, 560]]) {
+    await openSettings();
+    await setViewport(width, height);
+    for (const page of MAIN_PAGES) {
+      await clickPage(page);
+      await assertPageProof(page);
+      await assertSettingsLayout(`${width}x${height}/${page}`);
+      await assertVisualAudit(`${width}x${height}/${page}/无右栏`);
+    }
+  }
 });
 
 test("通用页真实六类控件保留 placement 三值，逐行保存并重读同一字段", async () => {
@@ -757,7 +897,7 @@ test("操作习惯承接单击、中键全部选项和 reuse_to_top，旧位置�
       ["paste", "copy", "text", "none"]);
   }
   assert.equal(await cdp.evaluate(`document.querySelectorAll('[data-setting="reuse-to-top"]').length`), 1);
-  assert.match(await cdp.evaluate(`document.querySelector("[data-settings-page]").textContent`), /常用牌的顺序不受影响/);
+  assert.match(await cdp.evaluate(`document.querySelector("[data-settings-page]").textContent`), /收藏的顺序不受影响/);
   await change('[data-setting="click"]', "copy");
   await change('[data-setting="middle-click"]', "none");
   await change('[data-setting="reuse-to-top"]', false);
@@ -774,7 +914,7 @@ test("操作习惯承接单击、中键全部选项和 reuse_to_top，旧位置�
   assert.equal(await cdp.evaluate(`document.querySelectorAll('[data-setting="placement"] [role="radio"]').length`), 3);
 });
 
-test("迷你预览读取真实设置，两个试试入口只演示预览且两类减少动画直接落位", async () => {
+test("迷你预览读取真实设置，主内容按钮与设置变化自动演示且两类减少动画直接落位", async () => {
   await openSettings();
   const preview = (expression) => cdp.evaluate(`(() => { const node = document.querySelector("[data-mini-preview]"); return ${expression}; })()`);
   const initialCards = await cdp.evaluate(`[...document.querySelectorAll("[data-mini-preview] .mini-card")].map((node) => {
@@ -790,9 +930,7 @@ test("迷你预览读取真实设置，两个试试入口只演示预览且两�
   }
   assert.doesNotMatch(await preview("node.textContent"), /按[\s\S]*试一下/, "不能引导用户按真实全局呼出键演示");
   assert.match(await preview("node.textContent"), /用按钮[\s\S]*不会打开真实面板/);
-  const notes = await cdp.evaluate(`document.querySelector("[data-settings-notes]").textContent`);
-  assert.doesNotMatch(notes, /迷你手牌|只有手牌一种布局/);
-  assert.match(notes, /预览里的面板/);
+  await assertSettingsLayout("通用页预览无右栏");
   assert.equal(await preview("node.dataset.placement"), "caret");
   assert.equal(await preview("node.dataset.theme"), "system");
   assert.equal(await preview("node.dataset.motion"), "spring");
@@ -803,13 +941,13 @@ test("迷你预览读取真实设置，两个试试入口只演示预览且两�
   await click('[data-action="demonstrate"]');
   await waitFor(() => preview("node.dataset.demoCount === '1'"), "预览内演示");
   assert.equal(await preview("node.dataset.demoState"), "spread");
-  await click('[data-try="preview"]');
-  await waitFor(() => preview("node.dataset.demoCount === '2'"), "右侧演示入口");
   assert.equal((await calls()).length, savesBefore, "演示不写设置");
   assert.equal((await ipcCalls()).filter((call) => ["hide_panel", "open_settings", "frontend_ready", "set_hit_regions", "pause_hotkey"].includes(call.command)).length,
     panelBefore, "演示不触真实面板 IPC，也不暂停既有呼出键");
 
   await click('[data-setting="placement"] [data-value="center"]');
+  await waitFor(() => preview("node.dataset.placement === 'center' && node.dataset.demoCount === '2'"), "设置变化自动演示");
+  assert.equal(await preview("node.dataset.demoState"), "spread");
   await change('[data-setting="theme"]', "dark");
   await change('[data-setting="motion"]', "none");
   await waitFor(() => preview("node.dataset.placement === 'center' && node.dataset.theme === 'dark' && node.dataset.motion === 'none' && node.dataset.reducedMotion === 'true'"), "预览跟随真实设置");
@@ -952,9 +1090,9 @@ test("呼出键沿用真实录制路径，保存刷新预览，占用失败与 E
   assert.equal(await cdp.evaluate("window.__settingsPagesTest.settings().hotkey"), "Ctrl+`");
 });
 
-test("常用牌真实牌阵呈现多种内容、藏印与只读正面，空状态不说收藏", async () => {
+test("收藏真实牌阵呈现多种内容、藏印与只读正面，空状态使用收藏文案", async () => {
   await openSettings("fav");
-  await waitFor(async () => (await favoriteIds()).length === 4, "四张真实常用牌");
+  await waitFor(async () => (await favoriteIds()).length === 4, "四张真实收藏");
   assert.deepEqual(await favoriteIds(), [101, 102, 103, 104]);
   assert.deepEqual(await cdp.evaluate(`[...document.querySelectorAll("[data-favorite-card]")].map((node) => node.dataset.kind)`),
     ["short", "link", "image", "file"]);
@@ -973,10 +1111,14 @@ test("常用牌真实牌阵呈现多种内容、藏印与只读正面，空状�
   assert.match(copy, /呼出后按 ↑ 就是这一手。排好顺序，手就能记住。/);
   assert.match(copy, /拖动换位置，数字跟着位置走/);
   assert.match(copy, /点一张翻到背面，写标题和备注/);
-  assert.doesNotMatch(copy, /收藏/);
+  assert.match(copy, /收藏/);
+  assert.match(copy, /复制、粘贴不会改变收藏顺序/);
+  assert.doesNotMatch(copy, /常用牌|常用/);
+  assert.equal(await cdp.evaluate(`document.querySelector("[data-favorite-grid]").getAttribute("aria-label")`), "收藏");
 
   await openSettings("fav", "favEmpty=1");
-  await waitFor(() => cdp.evaluate(`document.querySelector("[data-favorite-empty]")?.textContent.includes("还没有常用的。呼出后选一张，按 Ctrl+D")`), "真实空状态");
+  await waitFor(() => cdp.evaluate(`document.querySelector("[data-favorite-empty]")?.textContent.includes("还没有收藏的。呼出后选一张，按 Ctrl+D")`), "真实空状态");
+  assert.doesNotMatch(await cdp.evaluate(`document.querySelector("[data-settings-page]").textContent`), /常用牌|常用/);
   assert.equal(await cdp.evaluate(`document.querySelectorAll("[data-favorite-card]").length`), 0);
 });
 
@@ -1227,7 +1369,7 @@ test("Task14 常用牌排队后的读取错误属于实际执行顺序，后续 
   await waitFor(() => cdp.evaluate("window.__settingsPagesTest.pendingFavorites().read === 1"), "实际执行到 focus 读取");
   await cdp.evaluate("window.__settingsPagesTest.resolveFavoriteRead()");
   await settleDom();
-  assert.match(await cdp.evaluate(`document.querySelector(".load-error")?.textContent ?? ""`), /模拟常用读取失败/);
+  assert.match(await cdp.evaluate(`document.querySelector(".load-error")?.textContent ?? ""`), /模拟收藏读取失败/);
   assert.deepEqual(await favoriteIds(), [102, 101], "读取失败不能把已保存顺序回滚");
   assert.deepEqual(await cdp.evaluate("window.__settingsPagesTest.favorites().map((item) => item.id)"), [102, 101]);
 
@@ -1286,7 +1428,7 @@ test("常用牌移出先存草稿和完整顺序，撤销严格先恢复常用�
   await waitFor(() => cdp.evaluate("window.__settingsPagesTest.pendingFavorites().favorite === 1"), "最后取消常用");
   assert.deepEqual((await ipcCalls("set_favorite"))[0].args, { id: 101, favorite: false });
   await cdp.evaluate("window.__settingsPagesTest.resolveFavoriteWrite(101)");
-  await waitFor(async () => (await favoriteIds()).length === 3 && await cdp.evaluate(`document.querySelector("[data-favorite-undo]")?.textContent.includes("已移出常用")`), "就地移出与撤销");
+  await waitFor(async () => (await favoriteIds()).length === 3 && await cdp.evaluate(`document.querySelector("[data-favorite-undo]")?.textContent.includes("已移出收藏")`), "就地移出与撤销");
   assert.deepEqual(await favoriteIds(), [102, 103, 104]);
   assert.equal((await ipcCalls("set_favorite_label"))[0].args.title, "移出前标题");
   assert.equal((await ipcCalls("set_favorite_label"))[0].args.note, "移出前备注");
@@ -1306,7 +1448,7 @@ test("常用牌移出先存草稿和完整顺序，撤销严格先恢复常用�
   assert.deepEqual((await ipcCalls()).filter((call) => ["delete_item", "trash_items", "purge_items"].includes(call.command)), [], "移出撤销不能碰删除语义");
   await openSettings("fav", "", scene.id);
   assert.deepEqual(await favoriteIds(), [101, 102, 103, 104]);
-  assert.match(await cdp.evaluate(`document.querySelector('[data-favorite-card][data-id="101"] [data-favorite-front]').textContent`), /测试常用/, "历史正文不被编辑或删除");
+  assert.match(await cdp.evaluate(`document.querySelector('[data-favorite-card][data-id="101"] [data-favorite-front]').textContent`), /测试收藏/, "历史正文不被编辑或删除");
 });
 
 test("常用牌撤销失败保留重试和真实状态，不伪造成原顺序或已恢复", async () => {
@@ -1475,7 +1617,7 @@ test("常用牌修复 最后一张移出后焦点落在撤销", async () => {
   await click('[data-favorite-card][data-id="101"] [data-action="remove-favorite"]');
   await waitFor(() => cdp.evaluate(`!!document.querySelector("[data-favorite-empty]")`), "最后一张后的空状态");
   assert.equal(await cdp.evaluate(`document.activeElement?.dataset.action`), "undo-favorite");
-  assert.match(await cdp.evaluate(`document.querySelector("[data-favorite-empty]").textContent`), /还没有常用的/);
+  assert.match(await cdp.evaluate(`document.querySelector("[data-favorite-empty]").textContent`), /还没有收藏的/);
 });
 
 test("常用牌修复 mock 标题清理只折 CR/LF 并保留连续普通空格", async () => {
@@ -2025,13 +2167,20 @@ test("关于显示真实版本和目录，离线许可完整可读，首次启�
   assert.match(await cdp.evaluate(`document.activeElement?.textContent`), /查看许可/);
 });
 
-test("Task14 关于页说明区直接区分重看、重发与只重试开窗", async () => {
+test("Task14 关于页主内容保留重看、重发的用途说明和真实操作入口", async () => {
   await openSettings("about");
-  const notes = await cdp.evaluate(`document.querySelector("[data-settings-notes]").textContent`);
-  assert.doesNotMatch(notes, /两个首次启动入口还没接入|当前只留位置/);
-  assert.match(notes, /“再看一次”从第一拍重新保存引导/);
-  assert.match(notes, /“再发一遍”只把四张新手牌放回最近/);
-  assert.match(notes, /只重试开窗，不会重复保存引导进度/);
+  await cdp.evaluate(`window.__settingsPagesTest.save("test.guide", { guide: { phase: "completed", cards_dealt: true, dismissed: [] } }, "测试首次启动已完成")`);
+  await waitFor(() => cdp.evaluate(`document.querySelectorAll(".about-page button[data-guide-action]:not(:disabled)").length === 2`), "首次启动完成后的两个真实入口");
+  await assertSettingsLayout("关于页无右栏");
+  const copy = await cdp.evaluate(`document.querySelector(".about-page").textContent`);
+  assert.match(copy, /再看一次首次启动[\s\S]*从复制一句话开始，重新走一遍首次启动/);
+  assert.match(copy, /再发一遍新手牌[\s\S]*保留当前首次启动状态，把四张新手牌重新放进最近/);
+  assert.match(copy, /开源许可[\s\S]*都在本机查看/);
+  assert.deepEqual(await cdp.evaluate(`[...document.querySelectorAll(".about-page button[data-guide-action]")].map((node) => ({ action: node.dataset.guideAction, text: node.textContent.trim() }))`), [
+    { action: "replay", text: "再看一次" },
+    { action: "deal", text: "再发一遍" },
+  ]);
+  assert.doesNotMatch(copy, /两个首次启动入口还没接入|当前只留位置/);
 });
 
 test("Task14 隐私页排除程序使用直白功能文案", async () => {
@@ -2250,6 +2399,7 @@ test("Task9 默认、最小与窄窗口的六页三态导航、保存与主要�
         await settleVisual();
         assert.equal(await cdp.evaluate(`document.querySelectorAll("button[data-page]").length`), 6);
         assert.equal(await cdp.evaluate(`document.querySelector("button[data-page='${page}']").getAttribute("aria-current")`), "page");
+        await assertSettingsLayout(`${width}x${height}/${state.id}/${page}`);
         await assertVisualAudit(`${width}x${height}/${state.id}/${page}`, { reduced: state.motion === "none" });
       }
     }
@@ -2407,8 +2557,84 @@ test("Task9 真实六页三态截图、常用牌翻背、回收站八张摊开�
   await cdp.evaluate(`document.querySelector('[data-favorite-card][data-id="101"]').scrollIntoView({ block: "center", inline: "center" })`);
   await captureShot("fav-flip-system-reduced.png", { page: "fav", state: "system-reduced-flip", themeSource: "真实设置 theme=light", motionSource: "follow_system=true + Edge prefers-reduced-motion=reduce" });
 
-  assert.equal(shotManifest.length, 21, "18 张六页三态 + 常用翻背 + 回收站摊开 + 跟随系统翻背");
+  for (const [width, height] of [[860, 560], [720, 560]]) {
+    for (const page of MAIN_PAGES) {
+      await openVisualScene(page, VISUAL_STATES[0]);
+      await setViewport(width, height);
+      await assertVisualAudit(`${width}x${height}/截图/${page}/无右栏`);
+      await captureShot(`${page}-light-${width}x${height}.png`, {
+        page, state: "light",
+        themeSource: "真实设置 theme=light",
+        motionSource: "真实设置 motion=spring; follow_system=false; prefers-reduced-motion=false",
+      }, width, height);
+    }
+  }
+
+  assert.equal(shotManifest.length, 33, "18 张六页三态 + 12 张六页窄窗口浅色 + 常用翻背 + 回收站摊开 + 跟随系统翻背");
   assert.equal(new Set(shotManifest.map((shot) => shot.name)).size, shotManifest.length, "截图文件名不重复");
+});
+
+test("设置轻量滚动条：四类真实滚动区的浅深色、悬停、滚动、forced-colors 与长内容截图", async () => {
+  const screenshotBaseline = shotManifest.length;
+  await openSettings("images");
+  await waitFor(() => cdp.evaluate(`document.querySelector(".picker .foot")?.textContent.includes("共 0 张")`), "默认图片数据仍为空");
+  assert.equal(await cdp.evaluate(`document.querySelectorAll(".picker .grid").length`), 0, "无 imageGrid 参数时不伪造长网格");
+
+  for (const state of VISUAL_STATES.slice(0, 2)) {
+    await openSettings("trash", "trash=24");
+    await configureVisualState(state);
+    await waitFor(() => cdp.evaluate(`document.querySelectorAll('ul[aria-label="回收站"] > li:not(.empty)').length === 24`), `${state.id} 回收站真实长列表`);
+    await setViewport(720, 480);
+    const content = await assertScrollbar(".content", `${state.id} 主内容`);
+    const trash = await assertScrollbar('ul[aria-label="回收站"]', `${state.id} 回收站完整列表`);
+    await captureShot(`scrollbar-trash-${state.id}.png`, {
+      page: "trash", state: state.id, evidence: "24 条真实内存回收站；主内容与完整列表均已实际滚动",
+      content, trash,
+    }, 720, 480);
+
+    await openSettings("images", "imageGrid=48");
+    await configureVisualState(state);
+    await waitFor(() => cdp.evaluate(`document.querySelectorAll('.picker .grid [role="option"]').length === 48`), `${state.id} 图片真实长网格`);
+    const images = await assertScrollbar(".picker .grid", `${state.id} 图片选择网格`);
+    if (state.id === "light") {
+      await captureShot("scrollbar-images-light.png", {
+        page: "images", state: state.id, evidence: "imageGrid=48 真实内存图片；网格已实际滚动", images,
+      });
+    }
+
+    await openVisualScene("about", state);
+    await clickButton("查看许可");
+    await waitFor(() => cdp.evaluate(`document.querySelector("[data-license-dialog]")?.open === true && document.querySelectorAll(".license-scroll pre").length === 2`), `${state.id} 许可真实长文`);
+    const license = await assertScrollbar(".license-scroll", `${state.id} 许可长文`);
+    await captureShot(`scrollbar-license-${state.id}.png`, {
+      page: "about", state: state.id, evidence: "真实本机 MIT 与第三方许可；许可正文已实际滚动", license,
+    });
+  }
+
+  await openSettings("trash", "trash=24");
+  await configureVisualState(VISUAL_STATES[0]);
+  await waitFor(() => cdp.evaluate(`document.querySelectorAll('ul[aria-label="回收站"] > li:not(.empty)').length === 24`), "forced-colors 回收站长列表");
+  await setViewport(720, 480);
+  await cdp.send("Emulation.setEmulatedMedia", { features: [{ name: "forced-colors", value: "active" }] });
+  assert.equal(await cdp.evaluate(`matchMedia("(forced-colors: active)").matches`), true);
+  await assertScrollbar(".content", "forced-colors 主内容", { forced: true });
+  await assertScrollbar('ul[aria-label="回收站"]', "forced-colors 回收站完整列表", { forced: true });
+
+  await openSettings("images", "imageGrid=48");
+  await configureVisualState(VISUAL_STATES[0]);
+  await waitFor(() => cdp.evaluate(`document.querySelectorAll('.picker .grid [role="option"]').length === 48`), "forced-colors 图片长网格");
+  await cdp.send("Emulation.setEmulatedMedia", { features: [{ name: "forced-colors", value: "active" }] });
+  await assertScrollbar(".picker .grid", "forced-colors 图片选择网格", { forced: true });
+
+  await openVisualScene("about", VISUAL_STATES[0]);
+  await clickButton("查看许可");
+  await waitFor(() => cdp.evaluate(`document.querySelector("[data-license-dialog]")?.open === true && document.querySelectorAll(".license-scroll pre").length === 2`), "forced-colors 许可长文");
+  await cdp.send("Emulation.setEmulatedMedia", { features: [{ name: "forced-colors", value: "active" }] });
+  await assertScrollbar(".license-scroll", "forced-colors 许可长文", { forced: true });
+
+  assert.equal(shotManifest.length, screenshotBaseline + 5, "新增浅深回收站、浅色图片网格、浅深许可共五张长内容截图");
+  assert.equal(new Set(shotManifest.map((shot) => shot.name)).size, shotManifest.length, "新增截图文件名仍不重复");
+  console.log("轻量滚动条：forced-colors 仅为无头 Edge 媒体仿真；所有截图均不是实际 WebView2。");
 });
 
 test("组件运行没有未捕获浏览器异常", async () => {

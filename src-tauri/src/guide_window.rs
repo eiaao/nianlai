@@ -44,22 +44,6 @@ const GUIDE_RESIZABLE: bool = false;
 const GUIDE_DECORATIONS: bool = false;
 const GUIDE_MARGIN: f64 = 16.0;
 
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum OpenAction {
-    Create,
-    Reuse,
-}
-
-#[cfg(test)]
-fn open_action(exists: bool) -> OpenAction {
-    if exists {
-        OpenAction::Reuse
-    } else {
-        OpenAction::Create
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CloseAction {
     DestroySelf,
@@ -659,18 +643,11 @@ mod tests {
     }
 
     #[test]
-    fn task11_repeated_open_reuses_and_close_destroys_only_self() {
-        assert_eq!(open_action(true), OpenAction::Reuse);
-        assert_eq!(open_action(false), OpenAction::Create);
+    fn task11_close_destroys_only_guide_and_settings_windows() {
         for label in [LABEL, settings_window::LABEL] {
             assert_eq!(close_action(label), CloseAction::DestroySelf);
         }
         assert_eq!(close_action("panel"), CloseAction::Quit);
-        assert_eq!(
-            open_action(false),
-            OpenAction::Create,
-            "销毁后下次是全新状态"
-        );
     }
 
     #[test]

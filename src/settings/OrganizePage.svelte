@@ -1,6 +1,6 @@
 <script lang="ts">
-  // 常用牌：真实收藏顺序（E03）、标题和备注（E04）。读取与结构操作共用一个队列，
-  // 每张牌的草稿由 FavoriteCard 各自串行保存；移出与撤销只调用既有常用 IPC。
+  // 收藏：真实收藏顺序（E03）、标题和备注（E04）。读取与结构操作共用一个队列，
+  // 每张牌的草稿由 FavoriteCard 各自串行保存；移出与撤销只调用既有收藏 IPC。
   import { onMount, tick } from "svelte";
   import { flip } from "svelte/animate";
   import * as ipc from "../lib/ipc";
@@ -57,7 +57,7 @@
       items = await ipc.getFavorites();
       loadError = "";
     } catch (value) {
-      loadError = `没读到常用，关掉窗口再开试试 · ${message(value)}`;
+      loadError = `没读到收藏，关掉窗口再开试试 · ${message(value)}`;
     }
   }
 
@@ -209,7 +209,7 @@
     if (disabled || memberBusy || busyCards[id] || !items?.some((item) => item.id === id)) return;
     if (drag) {
       orderPhase = "failed";
-      orderError = "先结束拖动，再移出常用或撤销";
+      orderError = "先结束拖动，再移出收藏或撤销";
       return;
     }
     // 从点击同步锁牌，之后 flush、reorder、setFavorite 的任何在途窗口都不接受晚到编辑。
@@ -225,7 +225,7 @@
         if (!(await commitOrder(before, before, true))) return;
         await ipc.setFavorite(id, false);
         const item = items.find((entry) => entry.id === id);
-        if (!item) throw new Error("没有找到要移出的常用");
+        if (!item) throw new Error("没有找到要移出的收藏");
         openCards[id] = false;
         items = items.filter((entry) => entry.id !== id);
         undo = { item, ids, error: "", busy: false };
@@ -240,7 +240,7 @@
         else emptyState?.focus();
       } catch (value) {
         orderPhase = "failed";
-        orderError = `没能移出常用，再试一次 · ${message(value)}`;
+        orderError = `没能移出收藏，再试一次 · ${message(value)}`;
       } finally {
         memberBusy = false;
         if (!removed) busyCards[id] = false;
@@ -253,7 +253,7 @@
     if (!snapshot || snapshot.busy || memberBusy) return;
     if (drag) {
       orderPhase = "failed";
-      orderError = "先结束拖动，再移出常用或撤销";
+      orderError = "先结束拖动，再移出收藏或撤销";
       return;
     }
     memberBusy = true;
@@ -261,7 +261,7 @@
     void serialize(async () => {
       try {
         try {
-          // 顺序不能反：先让 ID 回到常用集合，再提交包含它的原完整列表。
+          // 顺序不能反：先让 ID 回到收藏集合，再提交包含它的原完整列表。
           await ipc.setFavorite(snapshot.item.id, true);
         } catch (value) {
           undo = { ...snapshot, busy: false, error: `撤销没完成，再试一次 · ${message(value)}` };
@@ -274,7 +274,7 @@
           await tick();
           grid?.querySelector<HTMLElement>(`[data-id="${snapshot.item.id}"] [data-favorite-front]`)?.focus();
         } catch (value) {
-          // 常用可能已经恢复、顺序可能仍在末尾；重读真实状态，不能把快照当成事实。
+          // 收藏可能已经恢复、顺序可能仍在末尾；重读真实状态，不能把快照当成事实。
           await reloadMembers(items ?? []);
           undo = { ...snapshot, busy: false, error: `撤销没完成，再试一次 · ${message(value)}` };
         }
@@ -290,7 +290,7 @@
 
 <section class="page favorite-page">
   <div class="favorite-heading">
-    <div><h2>常用牌</h2><p class="page-intro">呼出后按 ↑ 就是这一手。排好顺序，手就能记住。</p></div>
+    <div><h2>收藏</h2><p class="page-intro">呼出后按 ↑ 就是这一手。排好顺序，手就能记住。</p></div>
     <span class="order-status" data-order-status data-phase={orderPhase} role={orderPhase === "failed" ? "alert" : "status"}>
       {#if orderPhase === "saving"}正在保存…{:else if orderPhase === "saved"}✓ 已保存{:else if orderPhase === "failed"}{orderError}{/if}
     </span>
@@ -300,7 +300,7 @@
 
   {#if undo}
     <div class="undo" class:failed={!!undo.error} data-favorite-undo role={undo.error ? "alert" : "status"}>
-      <span>{undo.error || "已移出常用 ·"}</span>
+      <span>{undo.error || "已移出收藏 ·"}</span>
       <button type="button" bind:this={undoButton} data-action="undo-favorite" disabled={undo.busy || memberBusy || !!drag} onclick={restore}>撤销</button>
     </div>
   {/if}
@@ -310,9 +310,9 @@
   {#if items === null}
     {#if !loadError}<p class="empty">正在读取…</p>{/if}
   {:else if !items.length}
-    <p class="empty" data-favorite-empty bind:this={emptyState} tabindex="-1">还没有常用的。呼出后选一张，按 Ctrl+D</p>
+    <p class="empty" data-favorite-empty bind:this={emptyState} tabindex="-1">还没有收藏的。呼出后选一张，按 Ctrl+D</p>
   {:else}
-    <ol class="favorite-grid" data-favorite-grid bind:this={grid} aria-label="常用牌" aria-busy={memberBusy} class:dragging={!!drag?.moved}>
+    <ol class="favorite-grid" data-favorite-grid bind:this={grid} aria-label="收藏" aria-busy={memberBusy} class:dragging={!!drag?.moved}>
       {#each items as item, index (item.id)}
         <li
           data-favorite-card
@@ -340,7 +340,7 @@
       {/each}
     </ol>
   {/if}
-  <p class="favorite-rule">数字对应当前位置。复制、粘贴不会改变常用顺序，原内容也不能在这里改。</p>
+  <p class="favorite-rule">数字对应当前位置。复制、粘贴不会改变收藏顺序，原内容也不能在这里改。</p>
 </section>
 
 {#if drag?.moved}

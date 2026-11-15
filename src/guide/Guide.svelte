@@ -8,7 +8,7 @@
     type GuideSettingsPage,
     type GuideState,
   } from "../lib/guide";
-  import { normalizePreferences, type Preferences } from "../lib/preferences";
+  import { applyPreferences, normalizePreferences, type Preferences } from "../lib/preferences";
   import type { AppSettings, HistorySnapshot, UnlistenFn } from "../lib/ipc";
 
   let flow: GuideState = $state(GuideFlow.createState());
@@ -46,9 +46,7 @@
   function applySettings(value: AppSettings) {
     preferences = normalizePreferences(value);
     hotkey = value.hotkey ?? "Ctrl+`";
-    document.documentElement.dataset.theme = preferences.theme;
-    document.documentElement.dataset.motion = preferences.motion;
-    document.documentElement.dataset.reduceMotion = preferences.followSystemMotion && systemReduced ? "true" : "false";
+    applyPreferences(preferences);
     if (reduced) flyVisible = false;
   }
 
@@ -238,7 +236,6 @@
     systemReduced = media.matches;
     const onMedia = () => {
       systemReduced = media.matches;
-      document.documentElement.dataset.reduceMotion = preferences.followSystemMotion && systemReduced ? "true" : "false";
       if (reduced) flyVisible = false;
     };
     media.addEventListener("change", onMedia);

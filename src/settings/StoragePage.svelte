@@ -156,7 +156,7 @@
       {/if}
     </div></div>
 
-    <div class="group"><span class="group-title split">整理空间<em>清掉的先进回收站，7 天内能拿回来；常用牌不会被清</em></span><div class="card">
+    <div class="group"><span class="group-title split">整理空间<em>清掉的先进回收站，7 天内能拿回来；收藏不会被清</em></span><div class="card">
       <div class="setting">
         <span class="setting-copy"><strong>原文件已经不在的</strong><small>文件被挪走或删了，这些贴不出去。{overview?.files.checked_ms ? `上次检查：${shortTime(overview.files.checked_ms)}` : "还没检查过"}{overview?.files.partial ? `；另有 ${overview.files.partial} 张部分失效，其余文件还能用，不清` : ""}</small>
           {#if notices.missing}<small class="ok">{notices.missing}</small>{/if}{#if errors.missing}<small class="error">{errors.missing}</small>{/if}</span>

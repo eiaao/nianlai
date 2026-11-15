@@ -57,10 +57,10 @@
   {#if items === null}
     {#if !error}<p class="note">正在读取…</p>{/if}
   {:else}
-    <ul class="list" aria-label="回收站">
+    <ul class="list" aria-label="回收站" data-settings-scroll>
       {#each items as item (item.id)}
         <li>
-          <span class="text" title={label(item)}>{#if item.favorite}<span class="star" aria-label="常用">藏</span>{/if}{label(item)}</span>
+          <span class="text" title={label(item)}>{#if item.favorite}<span class="star" aria-label="收藏">藏</span>{/if}{label(item)}</span>
           <span class="meta">{item.kind} · {when(item.deleted_ms)} 删掉 · {left(item.deleted_ms)}</span>
           <span class="actions">
             <button type="button" disabled={busy || disabled} onclick={() => run(() => ipc.restoreItem(item.id), "拿回来了")}>拿回来</button>

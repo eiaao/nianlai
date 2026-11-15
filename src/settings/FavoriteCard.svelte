@@ -168,7 +168,7 @@
       data-kind={kind}
       bind:this={frontButton}
       disabled={disabled || busy}
-      aria-label={`${item.title || original}，第 ${index + 1} 个常用，${KIND_NAME[kind]}，点一下编辑标题和备注`}
+      aria-label={`${item.title || original}，第 ${index + 1} 个收藏，${KIND_NAME[kind]}，点一下编辑标题和备注`}
       aria-grabbed={dragging ? "true" : "false"}
       inert={flipped}
       onpointerdown={(event) => onstartdrag(event, item.id)}
@@ -177,7 +177,7 @@
     >
       <span class="favorite-position" aria-hidden="true">{index + 1}</span>
       <span class="favorite-type">{KIND_NAME[kind]}</span>
-      <span class="favorite-seal" aria-label="常用">藏</span>
+      <span class="favorite-seal" aria-label="收藏">藏</span>
       <span class="favorite-title" class:untitled={!item.title}>{item.title || "没起标题"}</span>
       <span class="favorite-content" data-kind={kind}>
         {#if kind === "image"}
@@ -207,7 +207,7 @@
         onfocusout={() => { void queueSave(); }}></textarea></label>
       <p class="original" title={original}><span>原内容不能改</span><b>{original}</b></p>
       <div class="back-actions">
-        <button type="button" class="remove" data-action="remove-favorite" disabled={disabled || busy || structureDisabled} onclick={() => onremove(item.id)}>移出常用</button>
+        <button type="button" class="remove" data-action="remove-favorite" disabled={disabled || busy || structureDisabled} onclick={() => onremove(item.id)}>移出收藏</button>
         {#if saveState.phase === "failed"}
           <button type="button" class="retry" data-action="retry-label" disabled={disabled || busy} onclick={() => void queueSave()}>再试一次</button>
         {/if}

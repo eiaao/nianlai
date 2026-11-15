@@ -59,12 +59,19 @@
   });
 
   $effect(() => {
+    const visible = new Set(recent.map((item) => item.id));
+    for (const key of Object.keys(thumbnails)) {
+      const id = Number(key);
+      if (!visible.has(id)) delete thumbnails[id];
+    }
     for (const item of recent) {
-      if (!item.kind.includes("图片") || item.id in thumbnails) continue;
-      thumbnails[item.id] = null;
-      void ipc.getThumbnail(item.id)
-        .then((url) => { thumbnails[item.id] = url; })
-        .catch(() => { thumbnails[item.id] = null; });
+      const id = item.id;
+      if (!item.kind.includes("图片") || id in thumbnails) continue;
+      thumbnails[id] = null;
+      const commit = (url: string | null) => {
+        if (!disposed && (items ?? []).slice(0, 8).some((entry) => entry.id === id)) thumbnails[id] = url;
+      };
+      void ipc.getThumbnail(id).then(commit).catch(() => commit(null));
     }
   });
 
@@ -149,7 +156,7 @@
       <div class="trash-cards">
         {#each recent as item, index (item.id)}
           <article class="trash-card" data-trash-card data-id={item.id} style={`--turn:${(index % 4 - 1.5) * 1.2}deg`}>
-            <span class="kind">{kindLabel(item)}{#if item.favorite}<span aria-label="常用"> · 藏</span>{/if}</span>
+            <span class="kind">{kindLabel(item)}{#if item.favorite}<span aria-label="收藏"> · 藏</span>{/if}</span>
             {#if item.kind.includes("图片") && thumbnails[item.id]}
               <img src={thumbnails[item.id]} alt={label(item)} />
             {:else}

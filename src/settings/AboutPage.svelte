@@ -28,7 +28,6 @@
   let licenseDialog = $state<HTMLDialogElement>();
   let licenseButton = $state<HTMLButtonElement>();
   let actionPending = $state<"replay" | "deal" | "open" | null>(null);
-  let actionError = $state("");
   let actionNotice = $state("");
   const inFirstRun = $derived(guide.phase === "await_copy" || guide.phase === "await_show" || guide.phase === "await_paste");
   const actionDisabled = $derived(disabled || inFirstRun || dealPending || actionPending !== null || saveState("about.guide").phase === "saving");
@@ -67,7 +66,6 @@
   async function guideAction(action: "replay" | "deal") {
     if (actionDisabled) return;
     actionPending = action;
-    actionError = "";
     actionNotice = "";
     try {
       if (action === "deal") {
@@ -87,7 +85,6 @@
   async function retryGuideOpen() {
     if (disabled || actionPending || openRecovery?.pending) return;
     actionPending = "open";
-    actionError = "";
     actionNotice = "";
     try {
       if (await onopenguide()) actionNotice = "首次启动已重新打开";
@@ -142,7 +139,6 @@
     {/if}
     <div class="guide-feedback" data-save-row="about.guide">
       <SaveMark state={saveState("about.guide")} />
-      {#if actionError}<p class="error" role="alert">{actionError}</p>{/if}
       {#if actionNotice}<p class="notice" role="status">{actionNotice}</p>{/if}
     </div>
     <div class="setting">
@@ -159,7 +155,7 @@
     onkeydown={(event) => { if (event.key === "Escape") { event.preventDefault(); closeLicenses(); } }}>
     <div class="license-head"><h2 id="license-title">开源许可</h2><button type="button" onclick={closeLicenses}>关闭</button></div>
     <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-    <div class="license-scroll" role="region" aria-label="许可正文" tabindex="0">
+    <div class="license-scroll" role="region" aria-label="许可正文" tabindex="0" data-settings-scroll>
       {#if noticesError}
         <p class="error" role="alert">{noticesError}</p>
         <button type="button" onclick={() => { void loadNotices(); }}>重新读取</button>

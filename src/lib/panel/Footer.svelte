@@ -20,7 +20,7 @@
   {:else if panel.message}
     <p class="line message" role="status">{panel.message}</p>
   {:else if panel.holdDelete?.phase === "hint"}
-    <span class="line" role="status">常用的要按住 {panel.holdDelete.keys} 才删</span>
+    <span class="line" role="status">收藏的要按住 {panel.holdDelete.keys} 才删</span>
   {:else if panel.notice}
     <span class="line" role="status" aria-live="polite">{panel.notice}</span>
   {:else if panel.undo}

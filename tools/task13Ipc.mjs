@@ -1,21 +1,8 @@
 // Task 13 真实组件测试的内存 Tauri 边界；不触碰系统剪贴板、按键、注册表或真实窗口。
-const clone = (value) => value === undefined ? undefined : JSON.parse(JSON.stringify(value));
+import { clone, deferred, merge } from "./ipcTestUtils.mjs";
+
 const query = new URLSearchParams(location.search);
 const view = query.get("view") ?? "panel";
-function merge(base, update) {
-  if (base && update && typeof base === "object" && typeof update === "object" && !Array.isArray(base) && !Array.isArray(update)) {
-    const result = { ...base };
-    for (const [key, value] of Object.entries(update)) result[key] = merge(result[key], value);
-    return result;
-  }
-  return clone(update);
-}
-function deferred() {
-  let resolve;
-  let reject;
-  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
-  return { promise, resolve, reject };
-}
 const realItem = {
   id: 101, kind: "文本", preview: "真实第一张", file_names: [], source: "Notepad.exe", copied_ms: 100,
   copy_count: 1, partial: false, favorite: query.get("favorite") === "1", favorite_position: query.get("favorite") === "1" ? 1 : null, source_name: "记事本", source_icon: null,

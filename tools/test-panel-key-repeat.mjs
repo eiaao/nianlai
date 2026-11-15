@@ -88,7 +88,7 @@ export async function getHistory() { if (rejectHistoryRead) { rejectHistoryRead 
 export async function getFavorites() { return store.favorites; }
 export async function setFavorite(id, favorite) {
   calls.push({ command: "setFavorite", id, favorite });
-  if (rejectMutation) { rejectMutation = false; throw new Error("模拟常用保存失败"); }
+  if (rejectMutation) { rejectMutation = false; throw new Error("模拟收藏保存失败"); }
   if (store.favoriteMissing) return null;
   return { id, kind: "文本", preview: "合成条目", file_names: [], source: "合成来源", copied_ms: 0, copy_count: 1, partial: false,
     favorite, favorite_position: favorite ? 9 : null };
@@ -2271,7 +2271,7 @@ test("九种牌面判定与网址拆分（纯函数）", async (suite) => {
 
 test("v11 HandCard 两处藏印与普通点击接线", () => {
   const source = readFileSync(join(root, "src/lib/panel/HandCard.svelte"), "utf8");
-  assert.match(source, /<i class="seal" aria-label="常用">藏<\/i>/);
+  assert.match(source, /<i class="seal" aria-label="收藏">藏<\/i>/);
   assert.match(source, /<i class="sl">藏<\/i>/);
   assert.doesNotMatch(source, /<i class="seal"[^>]*>常<\/i>|<i class="sl">常<\/i>/);
   for (const name of ["seal", "sl"]) {
@@ -2355,7 +2355,7 @@ test("v11 D PanelState 用户提示与粘贴结果分支", async (suite) => {
     ipc.store.favoriteMissing = false;
     ipc.rejectNextMutation();
     await panel.toggleFavorite(panel.currentItem.id);
-    assert.equal(panel.message, "没设成常用，再试一次");
+    assert.equal(panel.message, "没设成收藏，再试一次");
 
     ipc.store.deletable = false;
     panel.pressDelete();
@@ -2429,10 +2429,10 @@ const v11CopySources = {
   "src/lib/panel/HandPanel.svelte": [
     '没找到“${panel.query}”', '找到 <b>{panel.handSource.length}</b> 张 · 第 {panel.selected + 1} 张',
     '第 <b>{panel.selected + 1}</b> 张，共 {panel.handSource.length} 张', '{head.count} 张',
-    '换个短点的词试试。按 Esc 回到全部。', '还没复制过东西', '粘贴对应一张', '上一张 / 下一张', '<b>＋</b>', '设为常用', '不再常用',
+    '换个短点的词试试。按 Esc 回到全部。', '还没复制过东西', '粘贴对应一张', '上一张 / 下一张', '<b>＋</b>', '设为收藏', '取消收藏',
   ],
   "src/lib/panel/Footer.svelte": [
-    '>知道了</button>', '常用的要按住 {panel.holdDelete.keys} 才删',
+    '>知道了</button>', '收藏的要按住 {panel.holdDelete.keys} 才删',
     '<span class="undo-text">已放进回收站 ·</span>',
   ],
   "src/lib/panel/Panel.svelte": [
@@ -2454,7 +2454,7 @@ const v11CopySources = {
   ],
   "src/lib/state.svelte.ts": [
     '已复制。点一下要贴的地方，再按 Ctrl+V', '没读到，稍后再试', '这张已经不在了',
-    '没设成常用，再试一次', '没删掉，再试一次', '没有能撤销的', '没撤销成，再试一次',
+    '没设成收藏，再试一次', '没删掉，再试一次', '没有能撤销的', '没撤销成，再试一次',
     '先选中要复制的字', '没复制成，再试一次', 'title: "没贴上"', '没搜成，再试一次',
     '没做成，再试一次', '松开就贴', '松开就收起', '松开就开始逐张放',
     '窗口变了，请重选一张', '出了点岔子，收起再呼出一次', '正在复制…',

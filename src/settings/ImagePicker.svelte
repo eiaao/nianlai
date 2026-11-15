@@ -1,5 +1,5 @@
 <script lang="ts">
-  // 手动挑选截图（M2-3）：存在历史库里的图片，缩略图网格，选中的移进回收站。常用的不能选。
+  // 手动挑选截图（M2-3）：存在历史库里的图片，缩略图网格，选中的移进回收站。收藏的不能选。
   import { onMount } from "svelte";
   import * as ipc from "../lib/ipc";
   import type { ImageItem } from "../lib/ipc";
@@ -99,7 +99,7 @@
   }
 </script>
 
-<div><p class="page-intro">截图、浏览器里复制的图片没有原文件，存在拈来里。选中的移到回收站，7 天内能拿回来；常用牌不能选。</p></div>
+<div><p class="page-intro">截图、浏览器里复制的图片没有原文件，存在拈来里。选中的移到回收站，7 天内能拿回来；收藏不能选。</p></div>
 
 <div class="card picker">
   <div class="toolbar">
@@ -115,14 +115,14 @@
   {:else if !shown.length}
     <p class="note">{items.length ? "这个范围里没有图片。" : "还没有存在拈来里的图片。"}</p>
   {:else}
-    <div class="grid" role="listbox" aria-multiselectable="true" aria-label="图片">
+    <div class="grid" role="listbox" aria-multiselectable="true" aria-label="图片" data-settings-scroll>
       {#each shown as item (item.id)}
         <button type="button" class="thumb" class:on={selected.has(item.id)} class:fav={item.favorite} role="option" aria-selected={selected.has(item.id)}
-          disabled={busy || disabled || item.favorite} title={item.favorite ? "常用的图片不能清理" : `${size(item.bytes)} · ${shortTime(item.copied_ms)}`}
+          disabled={busy || disabled || item.favorite} title={item.favorite ? "收藏的图片不能清理" : `${size(item.bytes)} · ${shortTime(item.copied_ms)}`}
           use:lazy={item.id} onclick={(event) => toggle(item, event)}>
           {#if thumbs[item.id]}<img src={thumbs[item.id]} alt="" />{:else if thumbs[item.id] === null}<span class="broken">无法预览</span>{/if}
           {#if !item.favorite}<b>{selected.has(item.id) ? "✓" : ""}</b>{/if}
-          <span class="label">{item.favorite ? "★ 常用" : `${size(item.bytes)} · ${shortTime(item.copied_ms)}`}</span>
+          <span class="label">{item.favorite ? "★ 收藏" : `${size(item.bytes)} · ${shortTime(item.copied_ms)}`}</span>
         </button>
       {/each}
     </div>
