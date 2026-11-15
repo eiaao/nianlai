@@ -1,61 +1,99 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onDestroy, onMount } from "svelte";
   import { listen } from "@tauri-apps/api/event";
   import * as ipc from "../lib/ipc";
-  import HotkeyEditor from "./HotkeyEditor.svelte";
+  import GeneralPage from "./GeneralPage.svelte";
   import CapturePage from "./CapturePage.svelte";
   import StoragePage from "./StoragePage.svelte";
   import InteractionPage from "./InteractionPage.svelte";
   import OrganizePage from "./OrganizePage.svelte";
-  import type { AppSettings, CaptureSettings, InteractionSettings, SettingsUpdate } from "../lib/ipc";
+  import AboutPage from "./AboutPage.svelte";
+  import SaveMark, { type SaveMarkState } from "./SaveMark.svelte";
+  import { navigate, type SettingsPageId, type StorageView } from "../lib/settingsNavigation";
+  import type { AppSettings, CaptureSettings, GuideSettings, InteractionSettings, SettingsUpdate } from "../lib/ipc";
+  import { defaultGuideSettings } from "../lib/guideCards";
   import {
     applyPreferences, DEFAULT_PREFERENCES, normalizePreferences,
-    type MotionPreference, type Preferences, type ThemePreference,
+    type Preferences,
   } from "../lib/preferences";
 
-  const pages = [
-    { id: "general", label: "通用" },
-    { id: "record", label: "隐私与记录" },
-    { id: "storage", label: "数据与备份" },
-    { id: "organize", label: "整理" },
-    { id: "interaction", label: "交互" },
-    { id: "about", label: "关于" },
+  const pages: { id: SettingsPageId; label: string; icon: string }[] = [
+    { id: "general", label: "通用", icon: '<path d="M3.5 6h8M15.5 6h1M3.5 14h1M8.5 14h8"/><circle cx="13.5" cy="6" r="2"/><circle cx="6.5" cy="14" r="2"/>' },
+    { id: "fav", label: "收藏", icon: '<rect x="4.75" y="2.75" width="10.5" height="14.5" rx="2"/><path d="M8 6.5h4v4H8z"/>' },
+    { id: "privacy", label: "记录与隐私", icon: '<path d="M10 2.75l6 2.4v4.4c0 3.6-2.6 6.3-6 7.2-3.4-.9-6-3.6-6-7.2v-4.4z"/><path d="M7.5 10l1.8 1.8 3.2-3.4"/>' },
+    { id: "data", label: "数据与备份", icon: '<path d="M2.75 7L10 3.25 17.25 7 10 10.75z"/><path d="M2.75 10.5L10 14.25l7.25-3.75M2.75 14L10 17.75 17.25 14"/>' },
+    { id: "habits", label: "操作习惯", icon: '<rect x="5.75" y="2.75" width="8.5" height="14.5" rx="4.25"/><path d="M10 2.75V8"/>' },
+    { id: "about", label: "关于", icon: '<circle cx="10" cy="10" r="7.25"/><path d="M10 9v5M10 6.3v.2"/>' },
   ];
-  let page = $state("general");
-  // “数据与备份”的子页面；面板里的回收站入口打开设置时带 #trash 直接跳过来。
-  let storageView = $state<"main" | "trash" | "snapshots" | "images" | "export" | "import">("main");
+  const IDLE_MARK: SaveMarkState = { phase: "idle", message: "", error: "" };
+  let page = $state<SettingsPageId>("general");
+  let recordHotkey = $state(false);
+  let hotkeyRequest = $state<string>();
+  // 面板里的回收站入口仍通过 #trash 和 settings:navigate 到达原组件。
+  let storageView = $state<StorageView>("main");
 
-  function navigate(target: string) {
-    if (target === "trash" || target === "snapshots" || target === "images" || target === "export" || target === "import") {
-      page = "storage";
-      storageView = target;
-    } else if (pages.some((entry) => entry.id === target)) {
-      page = target;
-      storageView = "main";
-    }
+  function show(target: string) {
+    const next = navigate(target);
+    page = next.page;
+    storageView = next.storageView;
+    recordHotkey = next.recordHotkey === true;
+    hotkeyRequest = next.hotkeyRequest;
   }
 
   onMount(() => {
-    navigate(decodeURIComponent(location.hash.slice(1)));
+    show(location.hash.slice(1));
     let stop: (() => void) | undefined;
     let disposed = false;
-    void listen<string>("settings:navigate", (event) => navigate(event.payload)).then((unlisten) => {
+    void listen<string>("settings:navigate", (event) => show(event.payload)).then((unlisten) => {
       if (disposed) unlisten(); else stop = unlisten;
     });
     return () => { disposed = true; stop?.(); };
   });
+
   let preferences = $state<Preferences>({ ...DEFAULT_PREFERENCES });
   let hotkey = $state("Ctrl+`");
   let capture = $state<CaptureSettings | null>(null);
   let snapshotMaxMb = $state(1024);
   let interaction = $state<InteractionSettings | null>(null);
+  let guide = $state<GuideSettings>(defaultGuideSettings());
+  // open 已成功保存 await_copy 后的失败恢复属于设置窗口，而不是会被页面切换销毁的 About 局部状态。
+  let aboutGuideOpen = $state<{ pending: boolean } | null>(null);
+  async function openAboutGuide(): Promise<boolean> {
+    if (aboutGuideOpen?.pending) return false;
+    aboutGuideOpen = { pending: true };
+    try {
+      await ipc.openGuide();
+      aboutGuideOpen = null;
+      return true;
+    } catch {
+      aboutGuideOpen = { pending: false };
+      return false;
+    }
+  }
+  // deal 从保存到定向通知完成只有这一把父层锁；About 重挂不会释放它，旧操作结束前也不能启动新操作。
+  let aboutGuideDealPending = $state(false);
+  async function dealAboutGuide(): Promise<string | null> {
+    if (aboutGuideDealPending) return null;
+    aboutGuideDealPending = true;
+    try {
+      const saved = await save("about.guide", { guide: { cards_dealt: true, dismissed: [] } }, "新手牌设置已保存");
+      if (!saved) return null;
+      try {
+        await ipc.notifyGuideCardsDealt();
+        return "新手牌已重新发出";
+      } catch {
+        // 设置确已保存；通知失败只影响当前可见面板，下一次 shown 会从持久 guide 恢复。
+        return "新手牌已保存，下次呼出会看到";
+      }
+    } finally {
+      aboutGuideDealPending = false;
+    }
+  }
   let reuseToTop = $state(true);
   let loading = $state(true);
-  let saving = $state(false);
-  let status = $state("正在读取设置…");
-  let failed = $state(false);
-  // 系统当前是否开了“减少动画效果”：只用来在“跟随系统”开关旁说明现在的状态。
+  let loadError = $state("");
   let systemReduced = $state(false);
+  let saveStates = $state<Record<string, SaveMarkState>>({});
 
   onMount(() => {
     const media = matchMedia("(prefers-reduced-motion: reduce)");
@@ -70,112 +108,210 @@
     capture = (settingsValue.capture as CaptureSettings | undefined) ?? null;
     snapshotMaxMb = settingsValue.snapshots?.max_mb ?? 1024;
     interaction = (settingsValue.interaction as InteractionSettings | undefined) ?? null;
+    if (settingsValue.guide) guide = settingsValue.guide;
     reuseToTop = settingsValue.history?.reuse_to_top !== false;
     preferences = normalizePreferences(settingsValue);
     applyPreferences(preferences);
   }
 
-  async function save(update: SettingsUpdate, message: string): Promise<AppSettings | null> {
-    if (saving || loading) return null;
-    saving = true; failed = false; status = "正在保存…";
+  type SaveOperation = {
+    id: number;
+    key: string;
+    update: SettingsUpdate;
+    message: string;
+    status: "pending" | "success" | "failed";
+  };
+  type UnknownRecord = Record<string, unknown>;
+  const isRecord = (value: unknown): value is UnknownRecord => !!value && typeof value === "object" && !Array.isArray(value);
+
+  // 与 Rust settings::merge 一致：对象逐字段合并，数组和标量整体替换。
+  function mergeValue(base: unknown, update: unknown): unknown {
+    if (isRecord(base) && isRecord(update)) {
+      const merged = { ...base };
+      for (const [key, value] of Object.entries(update)) merged[key] = mergeValue(merged[key], value);
+      return merged;
+    }
+    return update;
+  }
+  const mergeSettings = (base: AppSettings, update: SettingsUpdate) => mergeValue(base, update) as AppSettings;
+
+  // 跨行响应可能乱序：最新响应只是基底，本轮所有成功/等待中的局部更新按调用顺序叠回。
+  // 全部结束后把最终视图压成一个快照，操作历史不会随窗口打开时间无限增长。
+  let baseSettings: AppSettings = {};
+  let operations: SaveOperation[] = [];
+  let nextOperation = 0;
+  const latestByKey = new Map<string, number>();
+  const queues = new Map<string, Promise<void>>();
+  const markTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  function recomputeSettings() {
+    let view = baseSettings;
+    for (const operation of operations) {
+      if (operation.status !== "failed") view = mergeSettings(view, operation.update);
+    }
+    if (!operations.some((operation) => operation.status === "pending")) {
+      baseSettings = view;
+      operations = [];
+    }
+    apply(view);
+  }
+
+  function row(key: string): SaveMarkState { return saveStates[key] ?? IDLE_MARK; }
+  function clearMarkTimer(key: string) {
+    const timer = markTimers.get(key);
+    if (timer !== undefined) clearTimeout(timer);
+    markTimers.delete(key);
+  }
+  function showSaved(operation: SaveOperation) {
+    clearMarkTimer(operation.key);
+    saveStates[operation.key] = { phase: "saved", message: operation.message, error: "" };
+    markTimers.set(operation.key, setTimeout(() => {
+      // 新调用会先清旧计时器；再核对标记，避免旧回调清掉新一轮状态。
+      if (latestByKey.get(operation.key) === operation.id && saveStates[operation.key]?.phase === "saved") {
+        saveStates[operation.key] = IDLE_MARK;
+      }
+      markTimers.delete(operation.key);
+    }, 1500));
+  }
+  const errorMessage = (error: unknown) => error instanceof Error ? error.message : typeof error === "string" ? error : "没保存上，还是原来的设置";
+
+  async function performSave(operation: SaveOperation): Promise<AppSettings | null> {
     try {
-      const saved = await ipc.setSettings(update);
-      apply(saved);
-      status = message;
+      const saved = await ipc.setSettings(operation.update);
+      operation.status = "success";
+      baseSettings = saved;
+      recomputeSettings();
+      if (latestByKey.get(operation.key) === operation.id) showSaved(operation);
       return saved;
     } catch (error) {
-      failed = true;
-      status = error instanceof Error ? error.message : typeof error === "string" ? error : "设置未保存，原设置已保留";
+      operation.status = "failed";
+      recomputeSettings();
+      if (latestByKey.get(operation.key) === operation.id) {
+        clearMarkTimer(operation.key);
+        saveStates[operation.key] = { phase: "failed", message: operation.message, error: errorMessage(error) };
+      }
       return null;
-    } finally {
-      saving = false;
     }
   }
 
+  export function save(key: string, update: SettingsUpdate, message: string): Promise<AppSettings | null> {
+    if (loading) return Promise.resolve(null);
+    const operation: SaveOperation = { id: ++nextOperation, key, update, message, status: "pending" };
+    operations.push(operation);
+    latestByKey.set(key, operation.id);
+    clearMarkTimer(key);
+    saveStates[key] = { phase: "saving", message, error: "" };
+    recomputeSettings();
+
+    // 同一行按调用顺序串行；不同 key 不共享 saving 锁，可以独立进行。
+    const previous = queues.get(key) ?? Promise.resolve();
+    const result = previous.then(() => performSave(operation));
+    const queued = result.then(() => undefined);
+    queues.set(key, queued);
+    void queued.then(() => { if (queues.get(key) === queued) queues.delete(key); });
+    return result;
+  }
+
+  const saveCapture = (update: SettingsUpdate, message: string) => save("privacy", update, message);
+  const saveStorage = (update: SettingsUpdate, message: string) => save("data", update, message);
+  const saveInteraction = (key: string, update: SettingsUpdate, message: string) => save(key, update, message);
+
   onMount(async () => {
     try {
-      apply(await ipc.getSettings());
-      status = "改动自动保存，即时生效";
+      baseSettings = await ipc.getSettings();
+      recomputeSettings();
+      loadError = "";
     } catch {
-      failed = true;
-      status = "设置读取失败，当前显示默认值；请关闭窗口后重试";
+      loadError = "没读到你的设置，先按默认的显示。关掉窗口再开试试";
     } finally {
       loading = false;
     }
   });
+  onMount(() => {
+    let disposed = false;
+    let stop: ipc.UnlistenFn | undefined;
+    void ipc.onSettingsChanged((settings) => {
+      if (disposed) return;
+      baseSettings = settings;
+      recomputeSettings();
+    }).then((unlisten) => {
+      if (disposed) unlisten(); else stop = unlisten;
+    }).catch(() => {});
+    return () => { disposed = true; stop?.(); };
+  });
+  onDestroy(() => { for (const key of markTimers.keys()) clearMarkTimer(key); });
 </script>
 
 <svelte:head><title>拈来 · 设置</title></svelte:head>
 
 <section class="settings" aria-label="拈来设置">
   <nav class="nav" aria-label="设置分区">
-    <div class="nav-brand"><span class="nav-mark">N</span><span><strong>拈来</strong><small>取历史之一缕，付当前之一键</small><em>本机设置</em></span></div>
-    {#each pages as entry}
-      <button type="button" class:active={page === entry.id} aria-current={page === entry.id ? "page" : undefined} onclick={() => navigate(entry.id)}>{entry.label}</button>
-    {/each}
-    <div class="nav-foot">本地设置<br>外观自动保存 · 快捷键确认保存</div>
+    <div class="nav-brand"><span class="nav-mark">拈</span><span><strong>拈来</strong><small>复制过的，信手拈来</small></span></div>
+    <div class="nav-pages">
+      {#each pages as entry}
+        <button type="button" data-page={entry.id} class:active={page === entry.id} aria-current={page === entry.id ? "page" : undefined} onclick={() => show(entry.id)}>
+          <svg viewBox="0 0 20 20" aria-hidden="true">{@html entry.icon}</svg><span>{entry.label}</span>
+        </button>
+      {/each}
+    </div>
+    <div class="nav-foot">设置只存在这台电脑上</div>
   </nav>
 
-  <main class="main">
-    <header class="main-head"><h1>{pages.find((entry) => entry.id === page)?.label}</h1><span>本地记录 · 仅此设备</span></header>
-    <div class="content">
+  <main class="main" data-settings-page data-page={page} data-storage-view={storageView} data-settings-loading={loading ? "true" : "false"}>
+    <header class="main-head">
+      <h1>{pages.find((entry) => entry.id === page)?.label}</h1>
+      {#if page === "privacy" || page === "data" || page === "fav"}<div data-save-row={page}><SaveMark state={row(page)} /></div>{/if}
+    </header>
+    {#if loading}<p class="load-status" role="status">正在读取设置…</p>{/if}
+    {#if loadError}<p class="load-error" role="alert">{loadError}</p>{/if}
+    <div class="content" data-settings-scroll>
       {#if page === "general"}
-        <section class="page">
-          <div><h2>面板与呼出</h2><p class="page-intro">面板使用手牌布局；主题和动效独立保存。</p></div>
-          <HotkeyEditor {hotkey} disabled={loading || saving} onsave={save} />
-
-          <div class="group"><span class="group-title">外观与反馈</span><div class="card">
-            <label class="setting"><span class="setting-copy"><strong>主题</strong><small>跟随系统，或独立固定为浅色 / 深色；只改变配色，不改变手牌操作。</small></span><select value={preferences.theme} disabled={loading || saving} onchange={(event) => save({ theme: event.currentTarget.value as ThemePreference }, "主题已保存并应用")}><option value="system">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></label>
-            <label class="setting"><span class="setting-copy"><strong>动效强度</strong><small>默认“弹簧”，动画最完整；“关闭”后直接落位。</small></span><select value={preferences.motion} disabled={loading || saving} onchange={(event) => save({ feedback: { motion: event.currentTarget.value as MotionPreference } }, "动效强度已保存并应用")}><option value="spring">弹簧</option><option value="soft">柔和</option><option value="none">关闭</option></select></label>
-            <label class="setting"><span class="setting-copy"><strong>跟随系统的“减少动画效果”</strong><small>打开后，Windows 关掉动画效果时（例如远程桌面连接）拈来也只做简单淡出。{systemReduced ? "系统现在关着动画效果。" : ""}</small></span><input class="switch" type="checkbox" role="switch" checked={preferences.followSystemMotion} disabled={loading || saving} onchange={(event) => save({ feedback: { follow_system: event.currentTarget.checked } }, event.currentTarget.checked ? "已改为跟随系统的动画设置" : "已改为始终播放动画")}></label>
-          </div></div>
-        </section>
-      {:else if page === "record"}
-        <CapturePage {capture} disabled={loading || saving} onsave={save} />
-      {:else if page === "storage"}
-        <StoragePage maxMb={snapshotMaxMb} disabled={loading || saving} onsave={save} bind:view={storageView} />
-      {:else if page === "organize"}
-        <OrganizePage {reuseToTop} disabled={loading || saving} onsave={save} />
-      {:else if page === "interaction"}
-        <InteractionPage {interaction} disabled={loading || saving} onsave={save} />
+        <GeneralPage {hotkey} {interaction} {preferences} {systemReduced} {recordHotkey} {hotkeyRequest} onRecordHotkeyConsumed={() => { recordHotkey = false; hotkeyRequest = undefined; }} disabled={loading} onsave={save} saveState={row} />
+      {:else if page === "privacy"}
+        <CapturePage {capture} disabled={loading} onsave={saveCapture} />
+      {:else if page === "data"}
+        <StoragePage maxMb={snapshotMaxMb} disabled={loading} onsave={saveStorage} bind:view={storageView} />
+      {:else if page === "fav"}
+        <OrganizePage disabled={loading} />
+      {:else if page === "habits"}
+        <InteractionPage {interaction} {reuseToTop} disabled={loading} onsave={saveInteraction} saveState={row} />
       {:else}
-        <section class="page placeholder">
-          <h2>{pages.find((entry) => entry.id === page)?.label}</h2>
-          <p>此分区将在后续版本开放。</p>
-        </section>
+        <AboutPage {guide} disabled={loading} onsave={save} saveState={row} openRecovery={aboutGuideOpen} onopenguide={openAboutGuide} dealPending={aboutGuideDealPending} ondeal={dealAboutGuide} />
       {/if}
     </div>
-    <footer class:failed role="status" aria-live="polite">{status}{saving ? " · 请稍候" : ""}</footer>
   </main>
 </section>
 
 <style>
-  .settings { width: 100%; height: 100%; display: grid; grid-template-columns: 190px minmax(0, 1fr); overflow: hidden; border: 1px solid var(--settings-line); border-radius: var(--radius-md); background: var(--settings-bg); color: var(--settings-text); }
-  .nav { display: flex; flex-direction: column; padding: 18px 10px 14px; border-right: 1px solid var(--settings-line); background: var(--settings-nav); }
-  .nav-brand { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 12px; padding: 0 9px 20px; border-bottom: 1px solid var(--settings-line); }
-  .nav-mark { width: 30px; height: 30px; display: grid; place-items: center; flex: none; border: 1px solid var(--settings-accent); color: var(--settings-accent); font: 600 14px var(--font-mono); }
-  .nav-brand > span:last-child { min-width: 0; display: grid; gap: 3px; }
-  .nav-brand strong { font: 600 15px var(--font-display); letter-spacing: .08em; }
-  .nav-brand small { color: var(--settings-muted); font-size: 8px; white-space: nowrap; }
-  .nav-brand em { color: var(--settings-muted); font: 8px var(--font-mono); letter-spacing: .06em; }
-  .nav > button { height: 42px; flex: none; padding: 0 12px; border: 0; border-left: 3px solid transparent; background: transparent; color: var(--settings-muted); text-align: left; font-size: 12px; }
-  .nav > button:hover { background: var(--settings-selected); }
-  .nav > button.active { border-left-color: var(--settings-accent); background: var(--settings-selected); color: var(--settings-text); font-weight: 600; }
-  .nav-foot { margin-top: auto; padding: 13px 12px 0; border-top: 1px solid var(--settings-line); color: var(--settings-muted); font-size: 10px; line-height: 1.6; }
-  .main { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
-  .main-head { height: 70px; flex: none; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 0 28px; border-bottom: 1px solid var(--settings-line); }
-  .main-head h1 { margin: 0; font: 600 20px var(--font-ui); }
-  .main-head > span { color: var(--settings-muted); font: 9px var(--font-mono); letter-spacing: .08em; }
-  .content { flex: 1; min-height: 0; overflow: auto; padding: 24px 28px 30px; }
-  footer { min-height: 34px; flex: none; padding: 9px 28px; border-top: 1px solid var(--settings-line); color: var(--settings-muted); font-size: 10px; }
-  footer.failed { color: var(--state-critical); }
-  .placeholder { color: var(--settings-muted); font-size: 12px; line-height: 1.8; }
-  .placeholder h2 { color: var(--settings-text); }
-  .placeholder p { max-width: 480px; margin: 0; }
+  .settings { width: 100%; height: 100%; display: grid; grid-template-columns: 184px minmax(0, 1fr); overflow: hidden; border: 1px solid var(--hand-line-strong); border-radius: 8px; background: var(--hand-paper); color: var(--hand-ink); }
+  .nav { min-height: 0; display: flex; flex-direction: column; padding: 20px 12px 16px; border-right: 1px solid var(--hand-line); background: var(--hand-card-back); }
+  .nav-brand { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; padding: 0 8px 20px; border-bottom: 1px solid var(--hand-line); }
+  .nav-mark { width: 32px; height: 32px; display: grid; place-items: center; flex: none; border-radius: 4px; background: var(--hand-seal); color: var(--hand-on-seal); font: 600 20px var(--font-display); }
+  .nav-brand > span:last-child { min-width: 0; display: grid; gap: 4px; }
+  .nav-brand strong { font: 600 20px var(--font-display); letter-spacing: .08em; }
+  .nav-brand small { color: var(--hand-ink-2); font-size: 12px; white-space: nowrap; }
+  .nav-pages { display: grid; gap: 8px; }
+  .nav-pages > button { min-height: 44px; display: flex; align-items: center; gap: 12px; padding: 8px 12px; border: 1px solid transparent; border-radius: 4px; background: transparent; color: var(--hand-ink-2); text-align: left; font-size: 13px; box-shadow: none; }
+  .nav-pages > button:hover { border-color: var(--hand-line); background: var(--hand-paper); }
+  .nav-pages > button.active { border-color: var(--hand-line-strong); border-left: 4px solid var(--hand-seal); background: var(--hand-card); color: var(--hand-ink); font-weight: 600; box-shadow: var(--hand-row-shadow); }
+  .nav-pages svg { width: 20px; height: 20px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
+  .nav-foot { margin-top: auto; padding: 16px 8px 0; border-top: 1px solid var(--hand-line); color: var(--hand-ink-2); font-size: 12px; line-height: 1.6; }
+  .main { min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--hand-paper); }
+  .main-head { min-height: 64px; flex: none; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 0 24px; border-bottom: 1px solid var(--hand-line); }
+  .main-head h1 { margin: 0; color: var(--hand-ink); font: 600 20px var(--font-ui); }
+  .content { flex: 1; min-height: 0; overflow: auto; padding: 24px; }
+  .load-status, .load-error { flex: none; margin: 0; padding: 12px 24px; border-bottom: 1px solid var(--hand-line); font-size: 13px; line-height: 1.6; }
+  .load-status { color: var(--hand-ink-2); }
+  .load-error { background: var(--state-critical-bg); color: var(--state-critical); }
+  @media (max-width: 1000px) {
+    .settings { grid-template-columns: 168px minmax(0, 1fr); }
+    .content { padding: 20px; }
+  }
   @media (max-width: 720px) {
-    .settings { grid-template-columns: 150px minmax(0, 1fr); }
-    .main-head, .content, footer { padding-left: 18px; padding-right: 18px; }
-    .setting { align-items: flex-start; flex-direction: column; gap: 9px; }
-    select { width: 100%; }
+    .main-head, .content, .load-status, .load-error { padding-left: 16px; padding-right: 16px; }
+  }
+  @media (forced-colors: active) {
+    .nav-pages > button.active { outline: 2px solid Highlight; outline-offset: -2px; }
+    .settings, .nav-pages > button { border-color: CanvasText; }
   }
 </style>

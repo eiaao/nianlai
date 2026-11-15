@@ -2,6 +2,8 @@ mod app;
 mod autocycle;
 mod capture;
 mod directories;
+mod guide_window;
+mod health;
 mod history;
 mod hotkey;
 mod log;
@@ -23,6 +25,63 @@ use serde_json::json;
 use std::time::Instant;
 use tauri::{AppHandle, Emitter, Manager, State};
 
+#[derive(serde::Serialize)]
+struct LicenseNotices {
+    nianlai: &'static str,
+    third_party: &'static str,
+}
+
+fn license_notices() -> LicenseNotices {
+    LicenseNotices {
+        nianlai: include_str!("../../LICENSE"),
+        third_party: include_str!("../../THIRD_PARTY_NOTICES.md"),
+    }
+}
+
+#[tauri::command]
+fn get_license_notices() -> LicenseNotices {
+    license_notices()
+}
+
+#[tauri::command]
+fn get_data_dir(app: AppHandle) -> String {
+    app.state::<Controller>()
+        .logger
+        .directories
+        .data
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn open_data_directory_with(
+    path: &std::path::Path,
+    open: impl FnOnce(&std::path::Path) -> Result<(), String>,
+) -> Result<(), String> {
+    if path.as_os_str().is_empty() {
+        return Err("没读到存东西的目录".to_owned());
+    }
+    if !path.is_dir() {
+        return Err("存东西的文件夹不存在，没法打开".to_owned());
+    }
+    open(path)
+}
+
+fn open_directory(path: &std::path::Path) -> Result<(), String> {
+    std::process::Command::new("explorer.exe")
+        .arg(path)
+        .spawn()
+        .map(drop)
+        .map_err(|_| "文件夹没打开，再试一次".to_owned())
+}
+
+#[tauri::command]
+async fn open_data_dir(app: AppHandle) -> Result<(), String> {
+    let path = app.state::<Controller>().logger.directories.data.clone();
+    tauri::async_runtime::spawn_blocking(move || open_data_directory_with(&path, open_directory))
+        .await
+        .map_err(|_| "文件夹没打开，再试一次".to_owned())?
+}
+
 #[tauri::command]
 fn get_settings(app: AppHandle) -> settings::Settings {
     app.state::<settings::Store>().get()
@@ -36,7 +95,7 @@ async fn set_settings(
     // 注册/注销由插件派回主线程；不能在主线程持锁等待它们完成。
     tauri::async_runtime::spawn_blocking(move || save_settings(&app, settings))
         .await
-        .map_err(|_| "设置保存任务未完成，请重试".to_owned())?
+        .map_err(|_| "设置没保存上，再试一次".to_owned())?
 }
 
 // 保存设置的编排：写盘 → 换呼出键 → 广播 → 即时生效 → 记日志。
@@ -67,6 +126,8 @@ fn save_settings(app: &AppHandle, update: serde_json::Value) -> Result<settings:
     if update_hotkey {
         hotkey.record(&controller.logger);
     }
+    // 只刷新托盘既有菜单文字；不注册 accelerator，也不新增面板事件。
+    tray::notify_hotkey_settings_saved(update_hotkey);
     controller.logger.event(
         "settings_saved",
         json!({"reason":"设置已保存；呼出键即时应用，其他设置按各自策略生效"}),
@@ -118,7 +179,7 @@ struct SnapshotState {
 fn store_directory(history: &History) -> Result<std::path::PathBuf, String> {
     history
         .store_directory()
-        .ok_or_else(|| "历史库未打开，暂时不能使用存档".to_owned())
+        .ok_or_else(|| "存东西的文件没打开，暂时不能使用存档".to_owned())
 }
 
 #[tauri::command]
@@ -139,7 +200,7 @@ async fn create_snapshot(history: State<'_, History>, app: AppHandle) -> Result<
         history::snapshots::manual(&directory, &app.state::<Controller>().logger)
     })
     .await
-    .map_err(|_| "存档任务未完成，请重试".to_owned())?
+    .map_err(|_| "存档没生成，再试一次".to_owned())?
 }
 
 #[tauri::command]
@@ -159,7 +220,7 @@ async fn restore_snapshot(
         )
     })
     .await
-    .map_err(|_| "恢复任务未完成，请重试".to_owned())??;
+    .map_err(|_| "恢复没完成，再试一次".to_owned())??;
     app.state::<Controller>()
         .logger
         .event("quit_source", json!({"source":"snapshot_restore"}));
@@ -202,7 +263,7 @@ async fn choose_backup(
         platform::dialog::choose_backup(owner, save, &name)
     })
     .await
-    .map_err(|_| "文件对话框没有完成，请重试".to_owned())?
+    .map_err(|_| "文件对话框没完成，再试一次".to_owned())?
 }
 #[tauri::command]
 async fn export_backup(
@@ -215,7 +276,7 @@ async fn export_backup(
 async fn reveal_in_explorer(path: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || history::backup::reveal(&path))
         .await
-        .map_err(|_| "操作没有完成，请重试".to_owned())?
+        .map_err(|_| "没做成，再试一次".to_owned())?
 }
 #[tauri::command]
 async fn inspect_backup(
@@ -253,6 +314,10 @@ async fn discard_import(history: State<'_, History>, token: String) -> Result<()
 #[tauri::command]
 fn get_history(history: State<'_, History>) -> history::Snapshot {
     history.snapshot()
+}
+#[tauri::command]
+fn get_guide_health(history: State<'_, History>) -> health::HealthSnapshot {
+    history.health()
 }
 #[tauri::command]
 async fn search_history(
@@ -331,7 +396,7 @@ async fn blocking<T: Send + 'static>(
     let history = history.inner().clone();
     tauri::async_runtime::spawn_blocking(move || job(history))
         .await
-        .map_err(|_| "操作没有完成，请重试".to_owned())?
+        .map_err(|_| "没做成，再试一次".to_owned())?
 }
 /// 文件条目的每个路径现在还在不在（预览用）；不是文件条目返回 None。
 #[tauri::command]
@@ -419,7 +484,7 @@ async fn copy_selection(app: AppHandle, id: usize, text: String) -> Result<(), S
         app.state::<Controller>().copy_selection(id, &text)
     })
     .await
-    .map_err(|_| "复制没有完成，请重试".to_owned())?
+    .map_err(|_| "没复制成，再试一次".to_owned())?
 }
 /// 完整预览开着时让钩子把 Z、Ctrl+C 交给面板。
 #[tauri::command]
@@ -586,6 +651,11 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_settings,
             set_settings,
+            get_license_notices,
+            get_data_dir,
+            open_data_dir,
+            tray::get_autostart,
+            tray::set_autostart,
             get_capture_state,
             set_capture_paused,
             set_ignore_next,
@@ -604,6 +674,7 @@ pub fn run() {
             import_backup,
             discard_import,
             get_history,
+            get_guide_health,
             search_history,
             get_favorites,
             set_favorite,
@@ -640,7 +711,11 @@ pub fn run() {
             set_hit_regions,
             report_painted,
             report_search_input,
-            settings_window::open_settings
+            settings_window::open_settings,
+            tray::guide_open_panel,
+            guide_window::guide_copy_sample,
+            guide_window::open_guide,
+            guide_window::set_guide_hit_regions
         ])
         .setup(|app| {
             let settings_file = settings::settings_path();
@@ -713,12 +788,32 @@ pub fn run() {
                 &resolved.settings.hotkey,
                 resolved.hotkey_overridden,
             );
+            if guide_window::should_open(resolved.settings.guide.phase) {
+                let guide_app = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(error) = guide_window::open_guide(guide_app.clone()).await
+                        && let Some(controller) = guide_app.try_state::<Controller>()
+                    {
+                        controller
+                            .logger
+                            .event("guide_open_failed", json!({"error":error}));
+                    }
+                });
+            }
             Ok(())
         })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                // 设置窗口关掉就销毁，下次再按需创建；只有面板窗口的关闭请求才走退出。
-                if window.label() == settings_window::LABEL {
+                // guide / settings 只销毁自己；只有 panel 等其他窗口维持原退出分支。
+                if guide_window::close_action(window.label())
+                    == guide_window::CloseAction::DestroySelf
+                {
+                    if window.label() == guide_window::LABEL
+                        && let Some(guide) =
+                            window.app_handle().get_webview_window(guide_window::LABEL)
+                    {
+                        platform::window::clear_hit_regions(&guide);
+                    }
                     return;
                 }
                 api.prevent_close();
@@ -733,10 +828,67 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("G0 样机初始化失败");
     app.run(|app, event| {
-        if matches!(event, tauri::RunEvent::Exit)
-            && let Some(controller) = app.try_state::<Controller>()
-        {
-            controller.shutdown();
+        if matches!(event, tauri::RunEvent::Exit) {
+            // 先释放托盘消息回调里的 AppHandle，再走原有退出清理；不改变退出动作。
+            tray::shutdown();
+            if let Some(controller) = app.try_state::<Controller>() {
+                controller.shutdown();
+            }
         }
     });
+}
+
+#[cfg(test)]
+mod task8_tests {
+    use super::*;
+
+    #[test]
+    fn task8_data_directory_opener_uses_real_path_and_preserves_errors() {
+        let root =
+            std::env::temp_dir().join(format!("nianlai-task8-open-data-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut opened = None;
+        open_data_directory_with(&root, |path| {
+            opened = Some(path.to_path_buf());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(opened, Some(root.clone()));
+
+        let error =
+            open_data_directory_with(&root, |_| Err("模拟打开失败".to_owned())).unwrap_err();
+        assert_eq!(error, "模拟打开失败");
+        let missing = root.join("not-here");
+        let mut called = false;
+        let error = open_data_directory_with(&missing, |_| {
+            called = true;
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(error.contains("不存在"));
+        assert!(!called, "目录不存在时不能调用资源管理器");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn task8_license_notices_embed_real_offline_text() {
+        let notices = license_notices();
+        assert!(notices.nianlai.starts_with("MIT License\n"));
+        assert!(
+            notices
+                .nianlai
+                .contains("Copyright (c) 2026 Nianlai contributors")
+        );
+        assert!(
+            notices
+                .nianlai
+                .contains("THE SOFTWARE IS PROVIDED \"AS IS\"")
+        );
+        assert!(notices.third_party.contains("rusqlite 0.41.1"));
+        assert!(notices.third_party.contains("完整性限制"));
+        assert!(notices.third_party.contains("Apache License"));
+        assert!(notices.third_party.len() > 5000);
+        assert!(!notices.third_party.contains("TODO"));
+    }
 }

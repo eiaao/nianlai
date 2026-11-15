@@ -5,6 +5,7 @@
   import type { HistoryItem, ImageView } from "../ipc";
   import type { PanelState } from "../state.svelte";
   import { type Box, type CardKind, colorValue, fileExt, firstLine, imageSize, KIND_NAME, linkParts, mailParts, relativeTime, sourceName } from "../cards";
+  import { displayHotkey, GUIDE_CARD_COPY } from "../guideCards";
 
   let { panel, item, index, kind, box, flat, selected, keycap, clip, delay, duration, inside }: {
     panel: PanelState; item: HistoryItem; index: number; kind: CardKind; box: Box; flat: boolean; selected: boolean;
@@ -15,13 +16,14 @@
   } = $props();
 
   const text = $derived(item.preview ?? "");
+  const guide = $derived(item.guide_id ? { id: item.guide_id, ...GUIDE_CARD_COPY[item.guide_id] } : null);
   const link = $derived(kind === "link" ? linkParts(text) : null);
   const color = $derived(kind === "color" ? colorValue(text) : null);
   const mail = $derived(kind === "mail" ? mailParts(text) : null);
   const lines = $derived(text.split("\n").filter((line) => line.trim()));
   const taken = $derived(panel.isTaken(item.id));
   const favorite = $derived(item.favorite);
-  // 常用列表里每张都是常用，印记省掉；只在最近、搜索混排里出现。
+  // 收藏列表里每张都是收藏，印记省掉；只在最近、搜索混排里出现。
   const showSeal = $derived(favorite && !(panel.handList === "favorites" && !panel.searching));
   const holding = $derived(panel.holdDelete?.id === item.id && panel.holdDelete.phase === "holding" ? panel.holdDelete : null);
   const meta = $derived(item.title ? item.title : `${sourceName(item)}${item.copied_ms ? ` · ${relativeTime(item.copied_ms, panel.openedAt)}` : ""}`);
@@ -102,7 +104,9 @@
 
 <div
   class="card k-{kind}"
-  class:flat class:on={selected} class:taken class:dragging={!!drag} class:favorite
+  class:flat class:on={selected} class:taken class:dragging={!!drag} class:favorite class:guide={guide !== null}
+  data-card-id={item.id}
+  data-guide-id={item.guide_id}
   {style}
   data-hit
   data-hit-target={target}
@@ -117,43 +121,63 @@
   onpointercancel={reset}
   onlostpointercapture={() => { if (press) { dragged = !!drag; reset(); } }}
   onclick={click}
-  onkeydown={(event) => { if (event.key === "Enter" && !taken) { event.stopPropagation(); void panel.choose(index, "paste", event); } }}
+  onkeydown={(event) => { if (event.key === "Enter" && !taken && (!guide || event.target === event.currentTarget)) { event.stopPropagation(); void panel.choose(index, "paste", event); } }}
   onauxclick={(event) => { if (event.button === 1 && !taken) { event.preventDefault(); panel.chooseByMouse(index, event); } }}
 >
   <div class="face">
     <!-- 扇面牌面 -->
     <div class="fan">
-      {#if kind === "image"}
-        <div class="img">{#if image}<img src={image.url} alt="" draggable="false" />{/if}</div>
-      {/if}
-      <span class="kind">{#if item.title}{@render marked(item.title)}{:else}{KIND_NAME[kind]}{/if}</span>
-      <div class="bd">
-        {#if kind === "short"}
-          <div class="short" class:big={[...text.trim()].length <= 10}>{@render marked(text.trim() || "（空文本）")}</div>
-        {:else if kind === "long"}
-          <div class="long">{@render marked(text.trim())}</div>
-        {:else if kind === "code"}
-          <pre>{@render marked(text)}</pre>
-        {:else if kind === "link" && link}
-          <div class="host">{@render marked(link.host)}</div>
-          <div class="path">{@render marked(link.prefix)}<b>{@render marked(link.tail)}</b></div>
-        {:else if kind === "color" && color}
-          <div class="cv"><i class="chip" style={`background:${color.hex}`}></i>
-            <div class="vals"><span class="hex">{@render marked(color.value)}</span><span class="sub">{color.format === "HEX" ? `RGB ${color.rgb.join(", ")}` : color.hex}</span>
-              <span class="sub hsl">HSL {color.hsl[0]}°, {color.hsl[1]}%, {color.hsl[2]}%</span></div></div>
-        {:else if kind === "file"}
-          <div class="files">
-            {#each item.file_names.slice(0, 5) as name}<div><i class="ext">{fileExt(name)}</i><span>{@render marked(name)}</span></div>{/each}
-            {#if item.file_names.length > 5}<div class="dim">还有 {item.file_names.length - 5} 个</div>{/if}
-          </div>
-        {:else if kind === "mail" && mail}
-          <div class="user">{@render marked(mail.user)}</div><div class="domain">@{@render marked(mail.domain)}</div>
-        {:else if kind === "number"}
-          <div class="number">{@render marked(text.trim())}</div>
+      {#if guide}
+        <span class="kind">新手牌</span>
+        <div class="bd guide-body">
+          <strong>{guide.title}</strong>
+          {#if guide.id === "t1" || guide.id === "t2"}<p>{guide.body}</p>
+          {:else if guide.id === "t3"}
+            <div class="guide-key"><kbd>{displayHotkey(panel.hotkey)}</kbd></div>
+            <p><button type="button" data-guide-hotkey onpointerdown={(event) => event.stopPropagation()} onclick={(event) => { event.preventDefault(); event.stopPropagation(); void panel.openGuideHotkeySettings(item); }}>换一个</button></p>
+          {:else}
+            <div class="guide-switch"><input type="checkbox" role="switch" aria-label="开机时启动" data-guide-autostart checked={panel.autostart} disabled={!panel.autostartReady || panel.autostartBusy}
+              onpointerdown={(event) => event.stopPropagation()} onclick={(event) => event.stopPropagation()}
+              onchange={(event) => { event.stopPropagation(); const control = event.currentTarget; const requested = control.checked; control.checked = panel.autostart; void panel.setGuideAutostart(requested, item); }} />
+              <span>{panel.autostart ? "开着" : "关着"}</span></div>
+            <p>{panel.autostart ? "电脑开机后，拈来就在托盘里等着。" : "要用时从开始菜单打开拈来。"}</p>
+            {#if panel.autostartError}<p class="guide-error" role="alert">{panel.autostartError}</p>{/if}
+          {/if}
+        </div>
+        <div class="foot">Delete 扔掉</div>
+      {:else}
+        {#if kind === "image"}
+          <div class="img">{#if image}<img src={image.url} alt="" draggable="false" />{/if}</div>
         {/if}
-      </div>
-      <div class="foot">{item.title ? "常用" : meta}</div>
-      {#if showSeal}<i class="seal" aria-label="常用">常</i>{/if}
+        <span class="kind">{#if item.title}{@render marked(item.title)}{:else}{KIND_NAME[kind]}{/if}</span>
+        <div class="bd">
+          {#if kind === "short"}
+            <div class="short" class:big={[...text.trim()].length <= 10}>{@render marked(text.trim() || "（空白）")}</div>
+          {:else if kind === "long"}
+            <div class="long">{@render marked(text.trim())}</div>
+          {:else if kind === "code"}
+            <pre>{@render marked(text)}</pre>
+          {:else if kind === "link" && link}
+            <div class="host">{@render marked(link.host)}</div>
+            <div class="path">{@render marked(link.prefix)}<b>{@render marked(link.tail)}</b></div>
+          {:else if kind === "color" && color}
+            <div class="cv"><i class="chip" style={`background:${color.hex}`}></i>
+              <div class="vals"><span class="hex">{@render marked(color.value)}</span><span class="sub">{color.format === "HEX" ? `RGB ${color.rgb.join(", ")}` : color.hex}</span>
+                <span class="sub hsl">HSL {color.hsl[0]}°, {color.hsl[1]}%, {color.hsl[2]}%</span></div></div>
+          {:else if kind === "file"}
+            <div class="files">
+              {#each item.file_names.slice(0, 5) as name}<div><i class="ext">{fileExt(name)}</i><span>{@render marked(name)}</span></div>{/each}
+              {#if item.file_names.length > 5}<div class="dim">还有 {item.file_names.length - 5} 个</div>{/if}
+            </div>
+          {:else if kind === "mail" && mail}
+            <div class="user">{@render marked(mail.user)}</div><div class="domain">@{@render marked(mail.domain)}</div>
+          {:else if kind === "number"}
+            <div class="number">{@render marked(text.trim())}</div>
+          {/if}
+        </div>
+        <div class="foot">{item.title ? "收藏" : meta}</div>
+        {#if showSeal}<i class="seal" aria-label="收藏">藏</i>{/if}
+      {/if}
     </div>
 
     <!-- 摊开的行面：单行；选中时展开 3–4 行 -->
@@ -175,6 +199,17 @@
         <span class="tm t-{kind}">{kind === "short" ? "Aa" : kind === "code" ? "{ }" : "#"}</span>
       {/if}
       <div class="rb">
+        {#if guide}
+          <div class="guide-row" class:has-error={guide.id === "t4" && !!panel.autostartError}><b>{guide.title}</b><span>{guide.id === "t3" ? displayHotkey(panel.hotkey) : guide.id === "t4" ? (panel.autostart ? "电脑开机后，拈来就在托盘里等着。" : "要用时从开始菜单打开拈来。") : guide.body}</span>
+            {#if selected && flat}
+              {#if guide.id === "t3"}<button type="button" data-guide-hotkey onpointerdown={(event) => event.stopPropagation()} onclick={(event) => { event.preventDefault(); event.stopPropagation(); void panel.openGuideHotkeySettings(item); }}>换一个</button>{/if}
+              {#if guide.id === "t4"}<input type="checkbox" role="switch" aria-label="开机时启动" data-guide-autostart checked={panel.autostart} disabled={!panel.autostartReady || panel.autostartBusy}
+                onpointerdown={(event) => event.stopPropagation()} onclick={(event) => event.stopPropagation()}
+                onchange={(event) => { event.stopPropagation(); const control = event.currentTarget; const requested = control.checked; control.checked = panel.autostart; void panel.setGuideAutostart(requested, item); }} />
+                {#if panel.autostartError}<span class="guide-row-error" role="alert">{panel.autostartError}</span>{/if}{/if}
+            {/if}
+          </div>
+        {:else}
         {#if !(selected && flat)}
           <div class="r1">
             {#if kind === "long"}<b>{@render marked(lines[0] ?? "")}</b>　<span class="dim">{@render marked(lines.slice(1).join("　"))}</span>
@@ -185,7 +220,7 @@
             {:else if kind === "file"}{@render marked(item.file_names[0] ?? "文件")}{#if item.file_names.length > 1}　<span class="dim">等 {item.file_names.length} 个文件</span>{/if}
             {:else if kind === "mail" && mail}<b>{@render marked(mail.user)}</b><span class="dim">@{@render marked(mail.domain)}</span>
             {:else if kind === "number"}<span class="mono">{@render marked(text.trim())}</span>
-            {:else}{@render marked(text.trim() || "（空文本）")}{/if}
+            {:else}{@render marked(text.trim() || "（空白）")}{/if}
           </div>
         {:else}
           <div class="r4">
@@ -198,18 +233,19 @@
             {:else if kind === "file"}{#each item.file_names.slice(0, 4) as name}<div>{@render marked(name)}</div>{/each}
             {:else if kind === "mail" && mail}<b>{@render marked(mail.user)}</b><span class="dim">@{@render marked(mail.domain)}</span>
             {:else if kind === "number"}<span class="mono">{@render marked(text.trim())}</span>
-            {:else}{@render marked(text.trim() || "（空文本）")}{/if}
+            {:else}{@render marked(text.trim() || "（空白）")}{/if}
           </div>
         {/if}
+        {/if}
       </div>
-      <span class="mt">{#if showSeal}<i class="sl">常</i>{/if}<span class="src">{meta}</span></span>
+      <span class="mt">{#if guide}<span class="src">新手牌 · Delete 扔掉</span>{:else}{#if showSeal}<i class="sl">藏</i>{/if}<span class="src">{meta}</span>{/if}</span>
     </div>
 
     {#if holding}<i class="hold" style={`animation-duration:${holding.duration}ms`}></i>{/if}
   </div>
   <span class="kc" class:wide={keycap.startsWith("Ctrl")}>{#if keycap.startsWith("Ctrl")}<small>Ctrl</small>{keycap.slice(5)}{:else}{keycap}{/if}</span>
   {#if taken}<span class="tk">已选</span>{/if}
-  {#if item.file_state?.state === "missing"}<span class="missing">原文件不在</span>{/if}
+  {#if item.file_state?.state === "missing"}<span class="missing">不在了</span>{/if}
   {#if drag}<span class="drop">{drag.out ? "松手：粘贴到原光标处" : "松手：放回"}</span>{/if}
 </div>
 
@@ -243,7 +279,7 @@
   .favorite .kind { color: var(--hand-ink-2); font-weight: 600; }
   .bd { position: absolute; left: 12px; right: 12px; top: 46px; bottom: 32px; overflow: hidden; color: var(--hand-ink); font-size: 13px; line-height: 20px; overflow-wrap: anywhere; }
   .foot { position: absolute; z-index: 2; left: 12px; right: 12px; bottom: 8px; overflow: hidden; color: var(--hand-ink-3); font-size: 12px; line-height: 16px; text-overflow: ellipsis; white-space: nowrap; }
-  .seal { position: absolute; z-index: 3; right: 10px; top: 10px; width: 18px; height: 18px; border-radius: 3px; background: var(--hand-seal); color: var(--hand-on-seal); font: 600 12px/18px var(--font-display); font-style: normal; text-align: center; }
+  .seal { position: absolute; z-index: 3; right: 10px; top: 10px; width: 18px; height: 18px; border-radius: 4px; background: var(--hand-seal); color: var(--hand-on-seal); font: 600 12px/18px var(--font-display); font-style: normal; text-align: center; }
   .short { height: 100%; display: flex; align-items: center; justify-content: center; text-align: center; font-size: 15px; line-height: 22px; }
   .short.big { font-size: 20px; font-weight: 500; line-height: 28px; }
   .long { white-space: pre-wrap; mask-image: linear-gradient(#000 70%, transparent); }
@@ -270,6 +306,26 @@
   .user { font-size: 15px; font-weight: 700; line-height: 22px; }
   .domain { color: var(--hand-ink-3); font-size: 13px; line-height: 20px; }
   .number { height: 100%; display: flex; align-items: center; font: 500 15px/24px var(--font-mono); overflow-wrap: normal; word-break: keep-all; }
+
+  .guide-body { top: 44px; bottom: 29px; }
+  .guide-body > strong { display: block; margin-bottom: 8px; color: var(--hand-ink); font-size: 15px; line-height: 20px; }
+  .guide-body p { margin: 0; color: var(--hand-ink-2); font-size: 12px; line-height: 18px; }
+  .guide-body button, .guide-row button { min-height: 26px; padding: 2px 9px; border: 1px solid var(--hand-line-strong); border-radius: 4px; background: var(--hand-card-back); color: var(--hand-ink); font-size: 12px; }
+  .guide-key { margin: 4px 0 10px; overflow: hidden; }
+  .guide-key kbd { display: inline-flex; max-width: 100%; padding: 4px 7px; overflow: hidden; border-radius: 4px; background: var(--hand-key); box-shadow: inset 0 0 0 1px var(--hand-key-line); font: 600 12px/18px var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+  .guide-switch { display: flex; align-items: center; gap: 7px; margin: 2px 0 8px; color: var(--hand-ink-2); font-size: 12px; }
+  .guide-switch input, .guide-row input { width: 30px; height: 18px; flex: none; appearance: none; margin: 0; border: 1px solid var(--hand-line-strong); border-radius: 9px; background: var(--hand-card-back); cursor: pointer; }
+  .guide-switch input::after, .guide-row input::after { content: ""; display: block; width: 12px; height: 12px; margin: 2px; border-radius: 50%; background: var(--hand-ink-3); transition: translate 120ms; }
+  .guide-switch input:checked, .guide-row input:checked { border-color: var(--hand-seal); background: var(--hand-seal); }
+  .guide-switch input:checked::after, .guide-row input:checked::after { background: var(--hand-on-seal); translate: 12px 0; }
+  .guide-switch input:disabled, .guide-row input:disabled { cursor: default; opacity: .55; }
+  .guide-body .guide-error { margin-top: 5px; color: var(--state-critical); line-height: 15px; }
+  .guide-row { display: flex; align-items: center; gap: 10px; min-width: 0; line-height: 26px; }
+  .guide-row.has-error { flex-wrap: wrap; }
+  .guide-row b { flex: none; }
+  .guide-row span { min-width: 0; overflow: hidden; color: var(--hand-ink-2); text-overflow: ellipsis; white-space: nowrap; }
+  .guide-row .guide-row-error { flex-basis: 100%; color: var(--state-critical); line-height: 18px; text-overflow: clip; white-space: normal; }
+  .guide-row button, .guide-row input { flex: none; }
 
   .ks { flex: none; width: 26px; height: 26px; }
   :global(.searching) .ks { width: 52px; }
@@ -308,7 +364,7 @@
   .k-code .r1 .mono { font-size: 12px; }
   .mt { flex: none; max-width: 160px; display: flex; align-items: center; gap: 6px; color: var(--hand-ink-3); font-size: 12px; line-height: 26px; white-space: nowrap; }
   .src { overflow: hidden; text-overflow: ellipsis; }
-  .sl { width: 18px; height: 18px; flex: none; border-radius: 3px; background: var(--hand-seal); color: var(--hand-on-seal); font: 600 12px/18px var(--font-display); font-style: normal; text-align: center; }
+  .sl { width: 18px; height: 18px; flex: none; border-radius: 4px; background: var(--hand-seal); color: var(--hand-on-seal); font: 600 12px/18px var(--font-display); font-style: normal; text-align: center; }
 
   .taken { cursor: default; }
   .taken .face { background: var(--hand-card-back); box-shadow: none; outline: 1.5px dashed var(--hand-line-strong); outline-offset: -1.5px; }

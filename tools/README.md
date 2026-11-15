@@ -9,6 +9,11 @@
 - `check_ps1_encoding.py`：已跟踪的 `*.ps1` 只要含非 ASCII 字符（如中文）就必须带 UTF-8 BOM，否则 Windows PowerShell 5.1 会按系统代码页读成乱码；新增脚本带中文时先加 BOM。
 - `test-panel-key-repeat.mjs`：面板状态机回归（键位、收藏、删除撤销、修饰键提示等），`node tools/test-panel-key-repeat.mjs`。
 
+## 图标
+
+- `build_icons.py`：从 `src-tauri/icons/source/` 的 SVG 源重新生成全部程序图标（ico、png、Square*、StoreLogo、icns）和 `src-tauri/icons/tray/` 的托盘三态资源。只用 Python 标准库和本机 Edge（矢量档的光栅化）；16/24 手绘档逐像素转换，不经缩放；托盘 32 由 16 最近邻放大；ICO 固定为 16/24/32/48/256 五档。`python -X utf8 -I tools/build_icons.py [--output <目录>]`，默认输出 `src-tauri/icons`，自定义输出目录时仍只读取生产 `source/`，重复运行输出逐字节一致。
+- `test_build_icons.py`：核对产物齐全、PNG/ICO/ICNS 结构、ICO 16/24 与手绘源逐像素一致、托盘 32 为 16 的 2 倍最近邻。`python -X utf8 -I tools/test_build_icons.py [目录]`。
+
 ## 焦点与粘贴
 
 - `focus-probe`：焦点诊断小工具，实时显示前台窗口、焦点控件和插入符，并在屏幕上框出焦点控件。运行 `cargo run -p focus-probe`，加 `--once` 只看一次，加 `--json` 输出 JSON。

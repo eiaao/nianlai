@@ -34,6 +34,9 @@ use std::{
 };
 
 pub const CACHE_LIMIT: usize = 300;
+// v4 起显式区分旧库派生事件与新随机事件；备份合并在匿名冲突时依赖这个持久标记。
+pub(crate) const EVENT_ORIGIN_LEGACY: i64 = 0;
+pub(crate) const EVENT_ORIGIN_RANDOM: i64 = 1;
 pub type Result<T> = std::result::Result<T, Error>;
 
 pub fn application_guard(directory: &Path) -> Result<std::fs::File> {

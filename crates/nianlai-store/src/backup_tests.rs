@@ -1,9 +1,26 @@
 use super::*;
-use crate::{content::Content, hash::sha256, tests::Temp};
-use std::{fs, io::Read, io::Write, path::PathBuf, sync::Arc};
+use crate::{
+    content::{Content, Data, HTML, TEXT},
+    hash::sha256,
+    tests::Temp,
+};
+use rusqlite::params;
+use std::{collections::BTreeMap, fs, io::Read, io::Write, path::PathBuf, sync::Arc};
 
 fn text(value: &str) -> Arc<Content> {
     Content::text(value, sha256).unwrap()
+}
+fn rich(value: &str) -> Arc<Content> {
+    text(value)
+        .merge(
+            &Content::new(
+                BTreeMap::from([(HTML.into(), Data::Bytes(b"<b>late</b>".as_slice().into()))]),
+                sha256,
+            )
+            .unwrap(),
+            sha256,
+        )
+        .unwrap()
 }
 fn event(sequence: u32, process: &str) -> CopyEvent {
     CopyEvent {
@@ -100,6 +117,115 @@ fn rewrite_manifest(list: &mut [(String, Vec<u8>)]) {
     let mut value: serde_json::Value = serde_json::from_slice(&manifest.1).unwrap();
     value["files"] = files.into();
     manifest.1 = serde_json::to_vec(&value).unwrap();
+}
+
+// 构造只有一条文本和一次复制的 v3 原备份；不同文件可以复用 rowid，用来核对迁移键的身份边界。
+fn old_v3_backup(out: &Temp, name: &str, value: &str, time_ms: i64) -> PathBuf {
+    let old = Temp::new();
+    let database = old.0.join("history.db");
+    let mut c = writable(&database).unwrap();
+    migrations::migrate(&mut c, &migrations::STEPS[..3], &mut |_, _| Ok(())).unwrap();
+    let item = text(value);
+    let format = &item.formats[TEXT];
+    let data: Vec<u8> = value.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    c.execute(
+        "INSERT INTO contents(fingerprint,kind,preview,file_names,bytes,partial,sort_ms,source,copy_count,sort_order,search_text) \
+         VALUES(?1,?2,?3,'[]',?4,0,?5,'old-source.exe',1,1,?6)",
+        params![
+            item.fingerprint.as_slice(),
+            item.kind,
+            item.preview,
+            item.bytes as i64,
+            time_ms,
+            value
+        ],
+    )
+    .unwrap();
+    let id = c.last_insert_rowid();
+    c.execute(
+        "INSERT INTO formats(content_id,name,fingerprint,bytes,encoding,data) VALUES(?1,?2,?3,?4,0,?5)",
+        params![id, TEXT, format.fingerprint.as_slice(), data.len() as i64, data],
+    )
+    .unwrap();
+    c.execute(
+        "INSERT INTO copy_events(content_id,time_ms,source_process,owner_process,owner_pid,sequence,source_app_id) \
+         VALUES(?1,?2,'old-source.exe','old-owner.exe',7,9,NULL)",
+        params![id, time_ms],
+    )
+    .unwrap();
+    drop(c);
+
+    let file = out.0.join(name);
+    let mut list = vec![
+        ("history.db".to_owned(), fs::read(&database).unwrap()),
+        (
+            "manifest.json".to_owned(),
+            serde_json::to_vec(&serde_json::json!({
+                "format":1,"app":"nianlai","app_version":"0.0.3","schema_version":3,"exported_ms":5,
+                "counts":{"items":1,"favorites":0,"icons":0},"files":[]
+            }))
+            .unwrap(),
+        ),
+    ];
+    rewrite_manifest(&mut list);
+    write_zip(&file, &list);
+    file
+}
+
+// 从真实写入路径的当前库复制持久状态，再只在测试副本中移除 v4 新增的键、索引和触发器，
+// 得到等价的 v3 备份；源库不变，迟到格式仍由生产 Store::ingest 产生。
+fn v3_backup_from_current(store: &Store, out: &Temp, name: &str) -> PathBuf {
+    let old = Temp::new();
+    let database = old.0.join("history.db");
+    let source = schema::readonly(&store.directory().join("history.db")).unwrap();
+    snapshot::copy_database(&source, &database).unwrap();
+    drop(source);
+    let c = writable(&database).unwrap();
+    c.execute_batch(
+        "PRAGMA foreign_keys=OFF;
+         BEGIN IMMEDIATE;
+         DROP TRIGGER content_anonymize_events;
+         DROP INDEX event_time;
+         CREATE TABLE copy_events_v3 (
+             id INTEGER PRIMARY KEY AUTOINCREMENT,
+             content_id INTEGER NOT NULL REFERENCES contents(id) ON DELETE CASCADE,
+             time_ms INTEGER NOT NULL, source_process TEXT NOT NULL, owner_process TEXT NOT NULL,
+             owner_pid INTEGER NOT NULL, sequence INTEGER NOT NULL,
+             source_app_id INTEGER REFERENCES source_apps(id));
+         INSERT INTO copy_events_v3(id,content_id,time_ms,source_process,owner_process,owner_pid,sequence,source_app_id)
+             SELECT id,content_id,time_ms,source_process,owner_process,owner_pid,sequence,source_app_id FROM copy_events;
+         DROP TABLE copy_events;
+         ALTER TABLE copy_events_v3 RENAME TO copy_events;
+         CREATE INDEX event_content ON copy_events(content_id,time_ms,id);
+         PRAGMA user_version=3;
+         COMMIT;
+         PRAGMA foreign_keys=ON;
+         PRAGMA journal_mode=DELETE;",
+    )
+    .unwrap();
+    let items = c.query_row("SELECT count(*) FROM contents", [], |r| {
+        schema::number(r, 0)
+    });
+    let favorites = c.query_row("SELECT count(*) FROM favorites", [], |r| {
+        schema::number(r, 0)
+    });
+    drop(c);
+
+    let file = out.0.join(name);
+    let mut list = vec![
+        ("history.db".to_owned(), fs::read(&database).unwrap()),
+        (
+            "manifest.json".to_owned(),
+            serde_json::to_vec(&serde_json::json!({
+                "format":1,"app":"nianlai","app_version":"0.0.3","schema_version":3,"exported_ms":5,
+                "counts":{"items":items.unwrap(),"favorites":favorites.unwrap(),"icons":0},"files":[]
+            }))
+            .unwrap(),
+        ),
+    ];
+    rewrite_manifest(&mut list);
+    write_zip(&file, &list);
+    file
 }
 
 fn exported(store: &Store) -> (Temp, PathBuf) {
@@ -275,6 +401,108 @@ fn export_inspect_merge_into_fresh_database_reproduces_the_live_contents() {
     discard_import(&target.0, &inspection.token);
     assert!(backup::staging(&target.0, &inspection.token).is_none());
     assert!(fresh.import_merge(&inspection.token).is_err());
+}
+
+#[test]
+fn backup_round_trip_preserves_only_anonymous_counts_for_deleted_content() {
+    let (_temp, store) = source();
+    assert_eq!(store.copied_since(0).unwrap(), 4);
+    let (_out, file) = exported(&store);
+    let inspection = inspect_backup(store.directory(), &file);
+    assert!(inspection.ok, "{:?}", inspection.steps);
+    let staged = backup::staging(store.directory(), &inspection.token).unwrap();
+    let staged_db = schema::readonly(&staged.join("history.db")).unwrap();
+    assert_eq!(
+        staged_db
+            .query_row("SELECT count(*) FROM copy_events", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        4,
+        "导出必须保留四条计数事实"
+    );
+    assert_eq!(
+        staged_db.query_row(
+            "SELECT count(*) FROM copy_events WHERE content_id IS NULL AND source_process='' AND owner_process='' AND owner_pid=0 AND sequence=0 AND source_app_id IS NULL",
+            [],
+            |r| r.get::<_, i64>(0),
+        ).unwrap(),
+        1,
+        "回收站内容只留下匿名时间事实"
+    );
+    assert_eq!(
+        staged_db
+            .query_row(
+                "SELECT count(*) FROM contents WHERE preview='delta-trash'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        staged_db
+            .query_row(
+                "SELECT count(*) FROM source_apps WHERE process_name='gone.exe'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0,
+        "被删内容的来源程序不得随匿名事实带回"
+    );
+
+    let target = Temp::new();
+    let fresh = target.store();
+    let inspection = inspect_backup(&target.0, &file);
+    assert!(inspection.ok);
+    fresh.import_merge(&inspection.token).unwrap();
+    assert_eq!(fresh.copied_since(0).unwrap(), 4);
+    assert_eq!(fresh.reader().unwrap().counts().unwrap().contents, 3);
+    assert!(
+        apps(&fresh)
+            .iter()
+            .all(|(process, ..)| process != "gone.exe")
+    );
+    fresh.import_merge(&inspection.token).unwrap();
+    assert_eq!(fresh.copied_since(0).unwrap(), 4, "重复合并不得重复计数");
+    let alpha = fresh
+        .cache()
+        .items
+        .iter()
+        .find(|item| item.preview == "alpha")
+        .unwrap()
+        .id;
+    assert!(fresh.delete(alpha).unwrap());
+    assert_eq!(fresh.purge(Some(vec![alpha]), u64::MAX).unwrap(), 1);
+    assert_eq!(fresh.copied_since(0).unwrap(), 4);
+    check(&target.0).unwrap();
+    drop(fresh);
+    assert_eq!(target.store().copied_since(0).unwrap(), 4);
+
+    let overwrite_target = Temp::new();
+    let local = overwrite_target.store();
+    let inspection = inspect_backup(&overwrite_target.0, &file);
+    assert!(inspection.ok);
+    prepare_overwrite(&overwrite_target.0, &inspection.token).unwrap();
+    drop(local);
+    apply_overwrite(&overwrite_target.0, &inspection.token).unwrap();
+    let restored = overwrite_target.store();
+    assert_eq!(restored.copied_since(0).unwrap(), 4);
+    assert_eq!(restored.reader().unwrap().counts().unwrap().contents, 3);
+    assert!(
+        restored
+            .reader()
+            .unwrap()
+            .search("delta-trash")
+            .unwrap()
+            .items
+            .is_empty()
+    );
+    assert!(
+        apps(&restored)
+            .iter()
+            .all(|(process, ..)| process != "gone.exe")
+    );
 }
 
 #[test]
@@ -562,6 +790,406 @@ fn old_version_backup_is_upgraded_in_the_staging_area_only() {
     assert_eq!(report.added_favorites, favorites_expected);
     assert_eq!(local.cache().total, expected);
     check(&target.0).unwrap();
+}
+
+#[test]
+fn task2_second_review_old_backup_keys_survive_independent_inspections() {
+    let archives = Temp::new();
+    let original = old_v3_backup(&archives, "original.nianlai-backup", "old-alpha", 1_000);
+    let unrelated = old_v3_backup(&archives, "unrelated.nianlai-backup", "old-beta", 1_000);
+    let later_same_content = old_v3_backup(&archives, "later.nianlai-backup", "old-alpha", 2_000);
+    let target = Temp::new();
+    let local = target.store();
+
+    let first = inspect_backup(&target.0, &original);
+    assert!(first.ok, "{:?}", first.steps);
+    assert_eq!(first.upgraded_from, Some(3));
+    local.import_merge(&first.token).unwrap();
+    assert_eq!(local.copied_since(0).unwrap(), 1);
+    let alpha = local.cache().items[0].id;
+    assert!(local.delete(alpha).unwrap());
+    assert_eq!(local.purge(Some(vec![alpha]), u64::MAX).unwrap(), 1);
+    let first_key = {
+        let reader = local.reader().unwrap();
+        let key: Vec<u8> = reader
+            .connection()
+            .query_row("SELECT event_key FROM copy_events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            reader
+                .connection()
+                .query_row(
+                    "SELECT count(*) FROM copy_events WHERE content_id IS NULL AND event_origin=0 AND source_process='' AND owner_process='' AND owner_pid=0 AND sequence=0 AND source_app_id IS NULL",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1,
+            "purge 后只能留下匿名计数事实"
+        );
+        key
+    };
+
+    // 同一原始文件再次独立解压、独立迁移：键确定稳定，同键就是同一次复制。
+    // 导回自己的旧备份必须能把彻底删除的正文找回来，并且不重复计数。
+    let second = inspect_backup(&target.0, &original);
+    assert!(second.ok, "{:?}", second.steps);
+    let second_key = {
+        let staged = backup::staging(&target.0, &second.token).unwrap();
+        let c = schema::readonly(&staged.join("history.db")).unwrap();
+        c.query_row("SELECT event_key FROM copy_events", [], |r| {
+            r.get::<_, Vec<u8>>(0)
+        })
+        .unwrap()
+    };
+    local.import_merge(&second.token).unwrap();
+    assert_eq!(first_key, second_key, "旧事件迁移键必须确定稳定");
+    assert_eq!(
+        local.copied_since(0).unwrap(),
+        1,
+        "同一 legacy 事件不得重复计数"
+    );
+    assert_eq!(local.cache().total, 1, "导回自己的备份能恢复彻底删除的正文");
+    assert_eq!(local.cache().items[0].copy_count, 1);
+    {
+        let reader = local.reader().unwrap();
+        assert_eq!(
+            reader
+                .connection()
+                .query_row(
+                    "SELECT count(*) FROM copy_events WHERE content_id IS NULL",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0,
+            "匿名事件重新关联到恢复的正文"
+        );
+    }
+    let before_conflict = merge_database_state(&local);
+    let before_cache = cache_state(&local);
+
+    // 无关旧库同 rowid/time/source/owner/pid/sequence 但内容不同：本地事件已关联存活正文，不能改绑，冲突回滚。
+    let other = inspect_backup(&target.0, &unrelated);
+    assert!(other.ok, "{:?}", other.steps);
+    assert_eq!(
+        local.import_merge(&other.token).err(),
+        Some(Error::Invalid("event_content_conflict"))
+    );
+    assert_eq!(merge_database_state(&local), before_conflict);
+    assert_eq!(cache_state(&local), before_cache);
+    assert_eq!(local.copied_since(0).unwrap(), 1);
+
+    // 再次彻底删除；相同内容但时间不同，稳定事件字段不同，应当作为另一次复制保留。
+    let alpha = local.cache().items[0].id;
+    assert!(local.delete(alpha).unwrap());
+    assert_eq!(local.purge(Some(vec![alpha]), u64::MAX).unwrap(), 1);
+    let later = inspect_backup(&target.0, &later_same_content);
+    assert!(later.ok, "{:?}", later.steps);
+    local.import_merge(&later.token).unwrap();
+    assert_eq!(local.copied_since(0).unwrap(), 2);
+    let cache = local.cache();
+    let alpha = cache
+        .items
+        .iter()
+        .find(|item| item.preview == "old-alpha")
+        .unwrap();
+    assert_eq!(alpha.copy_count, 1);
+    let reader = local.reader().unwrap();
+    assert_eq!(
+        reader
+            .connection()
+            .query_row(
+                "SELECT count(*) FROM copy_events WHERE content_id IS NULL",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1,
+        "原复制事实仍在，新事件不得与它错误去重"
+    );
+    drop(reader);
+    check(&target.0).unwrap();
+}
+
+#[test]
+fn task2_fourth_review_legacy_anonymous_duplicate_is_idempotent() {
+    let archives = Temp::new();
+    let original = old_v3_backup(&archives, "original.nianlai-backup", "old-alpha", 1_000);
+    let target = Temp::new();
+    let local = target.store();
+    let first = inspect_backup(&target.0, &original);
+    local.import_merge(&first.token).unwrap();
+    let id = local.cache().items[0].id;
+    assert!(local.delete(id).unwrap());
+    assert_eq!(local.purge(Some(vec![id]), u64::MAX).unwrap(), 1);
+
+    // 另一个库也迁移并彻底删除同一 legacy 事件，导出只含匿名事件的 v4 备份。
+    let source_directory = Temp::new();
+    let source = source_directory.store();
+    let source_first = inspect_backup(&source_directory.0, &original);
+    source.import_merge(&source_first.token).unwrap();
+    let id = source.cache().items[0].id;
+    assert!(source.delete(id).unwrap());
+    assert_eq!(source.purge(Some(vec![id]), u64::MAX).unwrap(), 1);
+    let (_out, file) = exported(&source);
+    let anonymous = inspect_backup(&target.0, &file);
+    assert!(anonymous.ok, "{:?}", anonymous.steps);
+    assert_eq!(anonymous.upgraded_from, None);
+    let before = merge_database_state(&local);
+    let before_cache = cache_state(&local);
+
+    // 两边都是同一 legacy 事件的匿名计数：幂等去重，合并成功且不重复计数、不改动本地。
+    local.import_merge(&anonymous.token).unwrap();
+    assert_eq!(merge_database_state(&local), before);
+    assert_eq!(cache_state(&local), before_cache);
+    assert_eq!(local.copied_since(0).unwrap(), 1);
+    assert_eq!(local.cache().total, 0);
+    check(&target.0).unwrap();
+}
+
+type DbRows = Vec<Vec<rusqlite::types::Value>>;
+
+fn cache_state(store: &Store) -> String {
+    let cache = store.cache();
+    format!(
+        "{:?}|{}|{:?}|{:?}",
+        cache.items, cache.total, cache.last_recorded_ms, cache.latest_sequence
+    )
+}
+
+fn merge_database_state(store: &Store) -> [DbRows; 7] {
+    let reader = store.reader().unwrap();
+    let c = reader.connection();
+    let rows = |sql: &str| {
+        let mut statement = c.prepare(sql).unwrap();
+        let columns = statement.column_count();
+        statement
+            .query_map([], |row| {
+                (0..columns)
+                    .map(|column| row.get(column))
+                    .collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<DbRows>>()
+            .unwrap()
+    };
+    [
+        rows("SELECT * FROM contents ORDER BY id"),
+        rows("SELECT * FROM formats ORDER BY content_id,name"),
+        rows("SELECT * FROM copy_events ORDER BY id"),
+        rows("SELECT * FROM source_apps ORDER BY id"),
+        rows("SELECT * FROM favorites ORDER BY content_id"),
+        rows("SELECT * FROM trash ORDER BY content_id"),
+        rows("SELECT rowid,search_text FROM search_index ORDER BY rowid"),
+    ]
+}
+
+#[test]
+fn task2_second_review_late_format_event_retarget_rolls_back() {
+    let source_directory = Temp::new();
+    let source = source_directory.store();
+    let at = Instant::now();
+    let mut first_event = event(1, "source.exe");
+    first_event.observed = at;
+    source
+        .ingest(text("迟到格式"), first_event, false, at)
+        .unwrap();
+    let (_old_out, old_file) = exported(&source);
+    let target = Temp::new();
+    let local = target.store();
+    let old = inspect_backup(&target.0, &old_file);
+    assert!(old.ok, "{:?}", old.steps);
+    local.import_merge(&old.token).unwrap();
+    assert_eq!(
+        local.cache().items[0].fingerprint,
+        text("迟到格式").fingerprint
+    );
+    let before = merge_database_state(&local);
+    let before_cache = (
+        local.cache().items[0].fingerprint,
+        local.cache().items[0].copy_count,
+        local.cache().items[0].source.clone(),
+    );
+
+    // 同一观察的正常迟到格式把源内容 A 改为新指纹 B，但保留原 event_key。
+    let mut late_event = event(2, "source.exe");
+    late_event.observed = at;
+    let outcome = source
+        .ingest(rich("迟到格式"), late_event, false, at)
+        .unwrap();
+    assert_eq!(outcome.outcome, "merged_late_formats");
+    assert_eq!(source.cache().total, 1);
+    assert_eq!(
+        source.cache().items[0].fingerprint,
+        rich("迟到格式").fingerprint
+    );
+    let (_new_out, new_file) = exported(&source);
+    let new = inspect_backup(&target.0, &new_file);
+    assert!(new.ok, "{:?}", new.steps);
+
+    // 本地事件仍指向 A；不能为了导入 B 而改绑并留下 A 的计数/来源失真。
+    assert_eq!(
+        local.import_merge(&new.token).err(),
+        Some(Error::Invalid("event_content_conflict"))
+    );
+    assert_eq!(merge_database_state(&local), before);
+    assert_eq!(local.cache().total, 1);
+    assert_eq!(
+        (
+            local.cache().items[0].fingerprint,
+            local.cache().items[0].copy_count,
+            local.cache().items[0].source.clone(),
+        ),
+        before_cache
+    );
+    assert_eq!(local.copied_since(0).unwrap(), 1);
+    check(&target.0).unwrap();
+}
+
+#[test]
+fn task2_second_review_anonymous_event_can_rejoin_explicit_live_content() {
+    let source_directory = Temp::new();
+    let source = source_directory.store();
+    add(&source, "明确恢复", 1, "source.exe");
+    let (_out, file) = exported(&source);
+    let target = Temp::new();
+    let local = target.store();
+    let first = inspect_backup(&target.0, &file);
+    local.import_merge(&first.token).unwrap();
+    let id = local.cache().items[0].id;
+    assert!(local.delete(id).unwrap());
+    assert_eq!(local.purge(Some(vec![id]), u64::MAX).unwrap(), 1);
+    assert_eq!(local.cache().total, 0);
+    assert_eq!(local.copied_since(0).unwrap(), 1);
+
+    // 备份明确带回同一存活正文时，匿名事件可以恢复关联，但仍是一条复制事实。
+    let second = inspect_backup(&target.0, &file);
+    assert!(second.ok, "{:?}", second.steps);
+    local.import_merge(&second.token).unwrap();
+    assert_eq!(local.cache().total, 1);
+    assert_eq!(local.cache().items[0].copy_count, 1);
+    assert_eq!(local.cache().items[0].source, "source.exe");
+    assert_eq!(local.copied_since(0).unwrap(), 1);
+    local.import_merge(&second.token).unwrap();
+    assert_eq!(local.copied_since(0).unwrap(), 1);
+    let reader = local.reader().unwrap();
+    assert_eq!(
+        reader
+            .connection()
+            .query_row(
+                "SELECT count(*) FROM copy_events WHERE content_id=(SELECT id FROM contents) AND event_origin=1 AND source_process='source.exe'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1
+    );
+    drop(reader);
+    check(&target.0).unwrap();
+}
+
+fn v3_late_format_pair(out: &Temp) -> (PathBuf, PathBuf) {
+    let source_directory = Temp::new();
+    let source = source_directory.store();
+    let at = Instant::now();
+    let mut first_event = event(1, "source.exe");
+    first_event.observed = at;
+    source
+        .ingest(text("v3 迟到格式"), first_event, false, at)
+        .unwrap();
+    let first = v3_backup_from_current(&source, out, "s1.nianlai-backup");
+
+    let mut late_event = event(2, "source.exe");
+    late_event.observed = at;
+    let outcome = source
+        .ingest(rich("v3 迟到格式"), late_event, false, at)
+        .unwrap();
+    assert_eq!(outcome.outcome, "merged_late_formats");
+    assert_eq!(source.reader().unwrap().counts().unwrap().events, 1);
+    let second = v3_backup_from_current(&source, out, "s2.nianlai-backup");
+    (first, second)
+}
+
+fn staged_event_key(directory: &Path, token: &str) -> Vec<u8> {
+    let staged = backup::staging(directory, token).unwrap();
+    let c = schema::readonly(&staged.join("history.db")).unwrap();
+    c.query_row("SELECT event_key FROM copy_events", [], |row| row.get(0))
+        .unwrap()
+}
+
+fn assert_v3_late_format_conflict(purge_between: bool) {
+    let archives = Temp::new();
+    let (s1, s2) = v3_late_format_pair(&archives);
+    let target = Temp::new();
+    let local = target.store();
+    let first = inspect_backup(&target.0, &s1);
+    assert!(first.ok, "{:?}", first.steps);
+    assert_eq!(first.upgraded_from, Some(3));
+    let first_key = staged_event_key(&target.0, &first.token);
+    local.import_merge(&first.token).unwrap();
+    assert_eq!(local.copied_since(0).unwrap(), 1);
+    assert_eq!(local.cache().total, 1);
+    assert_eq!(
+        local.cache().items[0].fingerprint,
+        text("v3 迟到格式").fingerprint
+    );
+
+    if purge_between {
+        let id = local.cache().items[0].id;
+        assert!(local.delete(id).unwrap());
+        assert_eq!(local.purge(Some(vec![id]), u64::MAX).unwrap(), 1);
+        assert_eq!(local.cache().total, 0);
+        assert_eq!(local.copied_since(0).unwrap(), 1);
+    }
+    let before = merge_database_state(&local);
+    let before_cache = cache_state(&local);
+    let second = inspect_backup(&target.0, &s2);
+    assert!(second.ok, "{:?}", second.steps);
+    assert_eq!(second.upgraded_from, Some(3));
+    let second_key = staged_event_key(&target.0, &second.token);
+
+    // 内容指纹在迟到格式前后可变。本地事件仍关联存活的 A：不能改绑到 B，冲突回滚。
+    // 本地 A 已彻底删除、只剩匿名事件：同键就是同一次复制，随 B 恢复关联，不重复计数。
+    let result = local.import_merge(&second.token);
+    let resulting_count = local.copied_since(0).unwrap();
+    assert_eq!(first_key, second_key, "迟到格式不得改变旧事件键");
+    assert_eq!(resulting_count, 1, "purge_between={purge_between}");
+    if purge_between {
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(local.cache().total, 1);
+        assert_eq!(
+            local.cache().items[0].fingerprint,
+            rich("v3 迟到格式").fingerprint
+        );
+    } else {
+        assert_eq!(result.err(), Some(Error::Invalid("event_content_conflict")));
+        assert_eq!(merge_database_state(&local), before);
+        assert_eq!(cache_state(&local), before_cache);
+    }
+    let reader = local.reader().unwrap();
+    let (events, anonymous): (i64, i64) = reader
+        .connection()
+        .query_row(
+            "SELECT count(*),sum(content_id IS NULL) FROM copy_events",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(events, 1, "不得留下 K(A)+K(B) 两条事件");
+    assert_eq!(anonymous, 0);
+    drop(reader);
+    check(&target.0).unwrap();
+}
+
+#[test]
+fn task2_third_review_v3_late_format_merge_conflicts_without_double_count() {
+    assert_v3_late_format_conflict(false);
+}
+
+#[test]
+fn task2_third_review_v3_late_format_merge_after_purge_restores_without_double_count() {
+    assert_v3_late_format_conflict(true);
 }
 
 #[test]

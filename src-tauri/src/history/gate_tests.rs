@@ -148,6 +148,27 @@ fn offer(
     body: &str,
     sequence: u32,
 ) -> String {
+    offer_at(
+        gate,
+        history,
+        owner,
+        markers,
+        body,
+        sequence,
+        now_ms() + sequence as u64 * 10,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn offer_at(
+    gate: &Gate,
+    history: &History,
+    owner: &str,
+    markers: &[(&str, u32)],
+    body: &str,
+    sequence: u32,
+    time_ms: u64,
+) -> String {
     let skipped = |reason: &str| {
         history.logger.event(
             "capture",
@@ -168,13 +189,83 @@ fn offer(
     }
     let content = Content::new(data, nianlai_store::hash::sha256).unwrap();
     let now = Instant::now();
+    let mut event = event(sequence, owner);
+    event.time_ms = time_ms;
     history
-        .capture_with(content, event(sequence, owner), false, now, None)
+        .capture_with(content, event, false, now, None)
         .unwrap();
     history
         .logger
         .event("capture", json!({"outcome":"saved","owner_process":owner}));
     "stored".into()
+}
+
+#[test]
+fn task2_health_copied_today_excludes_every_gate_skip() {
+    let directory = Directory::new();
+    let directories = directories(&directory);
+    let history = history(&directories, true);
+    let gate = Gate::default();
+    let mut capture = Capture::default();
+    capture.excluded_apps = vec!["blocked-health-test.exe".into()];
+    gate.apply(&capture);
+    let day_start = 1_700_000_000_000;
+    let offer = |gate: &Gate, history: &History, owner, markers, body, sequence| {
+        offer_at(
+            gate,
+            history,
+            owner,
+            markers,
+            body,
+            sequence,
+            day_start + sequence as u64,
+        )
+    };
+
+    assert_eq!(
+        offer(&gate, &history, "notepad.exe", &[], "今天真实复制", 1),
+        "stored"
+    );
+    gate.set_paused(true);
+    assert_eq!(
+        offer(&gate, &history, "notepad.exe", &[], "暂停不记", 2),
+        "paused"
+    );
+    gate.set_paused(false);
+    assert_eq!(
+        offer(
+            &gate,
+            &history,
+            "blocked-health-test.exe",
+            &[],
+            "排除不记",
+            3
+        ),
+        "excluded_app"
+    );
+    gate.set_ignore_next(true);
+    assert_eq!(
+        offer(&gate, &history, "notepad.exe", &[], "忽略不记", 4),
+        "ignore_next"
+    );
+    assert_eq!(
+        offer(
+            &gate,
+            &history,
+            "notepad.exe",
+            &[(crate::capture::MARKERS[0], 0)],
+            "标记不记",
+            5,
+        ),
+        "marker"
+    );
+    let token = format!("ghp_{}", "aB3dE6gH9jK2mN5pQ8sT1vW4yZ7bC0eF3hJ6");
+    assert_eq!(
+        offer(&gate, &history, "notepad.exe", &[], &token, 6),
+        "sensitive"
+    );
+    assert_eq!(history.health_at(day_start).recorded_today, 1);
+    assert_eq!(history.db().copied_since(day_start).unwrap(), 1);
 }
 
 #[test]

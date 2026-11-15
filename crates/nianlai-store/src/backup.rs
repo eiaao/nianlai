@@ -170,7 +170,7 @@ fn zip_error(_: zip::result::ZipError) -> Error {
     Error::Invalid("zip")
 }
 
-// 在副本上物理删除回收站里的内容及关联行，再清掉不再被引用的来源应用，最后 VACUUM 收回空间。
+// 在副本上物理删除回收站正文及关联生命周期行，只保留匿名计数时间；再清掉不再被引用的来源应用并 VACUUM。
 fn strip_trash(path: &Path) -> Result<(usize, usize)> {
     let c = writable(path)?;
     {
@@ -797,7 +797,7 @@ pub(crate) fn merge_into(
     backup_icons: &Path,
     icons: &Path,
     mut sort_order: i64,
-) -> Result<(MergeReport, i64)> {
+) -> Result<(MergeReport, i64, bool)> {
     let source = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     if schema::version(&source)? != VERSION {
         return Err(Error::Invalid("schema_version"));
@@ -814,6 +814,7 @@ pub(crate) fn merge_into(
         mapped: HashMap::new(),
     };
     let mut added_items = 0;
+    let mut events_changed = false;
     // 按原来的时间顺序一条条放进去，sort_order 随之递增，和同一时间的先后一致。
     let rows: Vec<(i64, Vec<u8>)> = source
         .prepare(&format!(
@@ -876,23 +877,45 @@ pub(crate) fn merge_into(
         }
         {
             let mut events = source.prepare(
-                "SELECT time_ms,source_process,owner_process,owner_pid,sequence,source_app_id FROM copy_events WHERE content_id=?1 ORDER BY time_ms,id",
+                "SELECT event_key,event_origin,time_ms,source_process,owner_process,owner_pid,sequence,source_app_id FROM copy_events WHERE content_id=?1 ORDER BY time_ms,id",
             )?;
             let mut rows = events.query([backup_id])?;
             while let Some(row) = rows.next()? {
-                let app = apps.local(&tx, row.get::<_, Option<i64>>(5)?)?;
+                let event_key = row.get::<_, Vec<u8>>(0)?;
+                let origin = row.get::<_, i64>(1)?;
+                let existing = tx
+                    .query_row(
+                        "SELECT content_id,event_origin FROM copy_events WHERE event_key=?1",
+                        [&event_key],
+                        |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, i64>(1)?)),
+                    )
+                    .optional()?;
+                if existing.is_some_and(|(content, existing_origin)| {
+                    existing_origin != origin || content.is_some_and(|existing| existing != id)
+                }) {
+                    // 不同存活内容不能改绑。
+                    return Err(Error::Invalid("event_content_conflict"));
+                }
+                // 同源同 content_id 是幂等冲突；NULL（内容已彻底删除）随同正文一起恢复关联。
+                // legacy 键由原库行号、毫秒时间、来源进程、所有者进程/PID 和剪贴板序号共同哈希，
+                // 无关库全同几乎不可能；同键就是同一次复制，导回自己的备份时必须能恢复。
+                let app = apps.local(&tx, row.get::<_, Option<i64>>(7)?)?;
                 tx.execute(
-                    "INSERT INTO copy_events(content_id,time_ms,source_process,owner_process,owner_pid,sequence,source_app_id) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+                    "INSERT INTO copy_events(content_id,event_key,event_origin,time_ms,source_process,owner_process,owner_pid,sequence,source_app_id) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) \
+                     ON CONFLICT(event_key) DO UPDATE SET content_id=excluded.content_id,event_origin=excluded.event_origin,time_ms=excluded.time_ms,source_process=excluded.source_process,owner_process=excluded.owner_process,owner_pid=excluded.owner_pid,sequence=excluded.sequence,source_app_id=excluded.source_app_id",
                     params![
                         id,
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, i64>(3)?,
-                        row.get::<_, i64>(4)?,
+                        event_key,
+                        origin,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, i64>(6)?,
                         app
                     ],
                 )?;
+                events_changed = true;
             }
         }
         // 与写入线程一致：复制次数、来源取自最近一次复制事件。
@@ -904,6 +927,38 @@ pub(crate) fn merge_into(
         )?;
         known.insert(fingerprint, id);
         added_items += 1;
+    }
+
+    // 已彻底删除的内容只剩匿名计数事实；随机事件按 event_key 幂等合并。
+    // legacy 同键视为同一次复制（键的构成见上），同源同键幂等去重；只有来源类型不同才冲突。
+    {
+        let mut events = source.prepare(
+            "SELECT event_key,event_origin,time_ms FROM copy_events WHERE content_id IS NULL ORDER BY time_ms,id",
+        )?;
+        let mut rows = events.query([])?;
+        let mut inserted = 0usize;
+        while let Some(row) = rows.next()? {
+            let event_key = row.get::<_, Vec<u8>>(0)?;
+            let origin = row.get::<_, i64>(1)?;
+            let time_ms = row.get::<_, i64>(2)?;
+            let changed = tx.execute(
+                "INSERT INTO copy_events(content_id,event_key,event_origin,time_ms,source_process,owner_process,owner_pid,sequence,source_app_id) \
+                 VALUES(NULL,?1,?2,?3,'','',0,0,NULL) ON CONFLICT(event_key) DO NOTHING",
+                params![event_key, origin, time_ms],
+            )?;
+            if changed == 0 {
+                let existing_origin = tx.query_row(
+                    "SELECT event_origin FROM copy_events WHERE event_key=?1",
+                    [&event_key],
+                    |row| row.get::<_, i64>(0),
+                )?;
+                if existing_origin != origin {
+                    return Err(Error::Invalid("event_content_conflict"));
+                }
+            }
+            inserted += changed;
+        }
+        events_changed |= inserted > 0;
     }
 
     // 收藏：排在现有收藏之后，按备份里的收藏顺序；本地已收藏的不动，回收站里的本地内容不替它收藏。
@@ -938,6 +993,7 @@ pub(crate) fn merge_into(
             added_favorites,
         },
         sort_order,
+        events_changed,
     ))
 }
 

@@ -108,22 +108,22 @@
   {:else if panel.interaction === "close_only"}
     <section class="terminal-feedback" data-hit>
       <span class="terminal-mark" aria-hidden="true">△</span>
-      <p role="status">{panel.message || "本次未提交，请关闭面板后重新呼出"}</p>
+      <p role="status">{panel.message || "这次没贴。收起再呼出一次"}</p>
       <button type="button" onclick={panel.close}>关闭面板</button>
     </section>
   {:else if !panel.interactive && !panel.warming && panel.interaction !== "passive"}
     {#if panel.inputSurface}<div class="focus-search" data-hit><SearchBox {panel} /></div>{/if}
     <section class="activation" data-hit aria-label="面板激活状态">
       {#if panel.interaction === "activated"}
-        <p role="status">{panel.searchStartFailed ? "未能进入搜索，请关闭面板后重新呼出。" : panel.searchStarting ? "正在进入搜索…" : panel.domFocus === "failed" ? "未取得输入焦点，请点击重试" : "正在取得输入焦点，请稍候…"}</p>
+        <p role="status">{panel.searchStartFailed ? "没能开始搜，收起再呼出一次" : panel.searchStarting ? "正在进入搜索…" : panel.domFocus === "failed" ? "打字没反应？点一下这里" : "稍等…"}</p>
         {#if panel.domFocus === "failed" && !panel.searchStarting && !panel.searchStartFailed}
-          <button type="button" onclick={(event) => panel.retryDomFocus(event)}>点击重试输入焦点</button>
+          <button type="button" onclick={(event) => panel.retryDomFocus(event)}>点这里继续</button>
         {/if}
       {:else}
-        <p role="status">{panel.interaction === "activation_pending" || panel.activationRetrying ? "正在取得键盘焦点，请稍候…" : "未取得键盘焦点，请点击面板重试"}</p>
+        <p role="status">{panel.interaction === "activation_pending" || panel.activationRetrying ? "稍等…" : "按键没反应？点一下这里"}</p>
       {/if}
       {#if panel.interaction === "activation_failed"}
-        <button type="button" disabled={panel.activationRetrying} onclick={(event) => panel.retryActivation(event)}>点击重试</button>
+        <button type="button" disabled={panel.activationRetrying} onclick={(event) => panel.retryActivation(event)}>点这里继续</button>
       {/if}
       <button type="button" onclick={panel.close}>关闭面板</button>
     </section>

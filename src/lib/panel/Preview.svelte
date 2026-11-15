@@ -6,12 +6,16 @@
   import { formatTime, type PanelState } from "../state.svelte";
   import { cardKind, colorValue, linkParts, relativeTime, sourceName } from "../cards";
   import { SpringValue } from "./motion";
+  import { displayHotkey } from "../guideCards";
 
   let { panel, item, expanded = false, compact = false }: { panel: PanelState; item: HistoryItem | null; expanded?: boolean; compact?: boolean } = $props();
   let root: HTMLDivElement;
   let previousId: number | null | undefined;
   const kind = $derived(item ? cardKind(item) : "short");
   const rich = $derived(item?.kind === "富文本");
+  const guideText = $derived(item?.guide_id === "t3" ? displayHotkey(panel.hotkey)
+    : item?.guide_id === "t4" ? (panel.autostart ? "电脑开机后，拈来就在托盘里等着。" : "要用时从开始菜单打开拈来。")
+      : item?.preview ?? "");
   const link = $derived(item ? linkParts(item.preview ?? "") : null);
   const color = $derived(item ? colorValue(item.preview ?? "") : null);
   const y = new SpringValue(0, (value) => { if (root) root.style.transform = `translate3d(0, ${value}px, 0)`; }, () => panel.motion);
@@ -99,7 +103,7 @@
   let loadingRest = false;
   const textual = $derived(kind !== "image" && kind !== "file");
   $effect(() => {
-    const id = expanded && item && textual ? item.id : -1;
+    const id = expanded && item && textual && !item.guide_id ? item.id : -1;
     if (id === fullFor) return;
     fullFor = id; full = null; loadingRest = false;
     if (id < 0) return;
@@ -132,12 +136,12 @@
 <div bind:this={root} class="preview-swap" class:expanded class:compact>
   {#if !item}
     <div class="empty-preview">
-      <strong>{panel.query ? "没有可看的匹配项" : "还没有复制过东西"}</strong>
-      <p>{panel.query ? "试试更短的词；Esc 清空搜索。" : "复制文字、图片或文件，它们会按时间出现在这里。"}</p>
+      <strong>{panel.query ? `没找到“${panel.query}”` : "还没复制过东西"}</strong>
+      <p>{panel.query ? "换个短点的词试试。按 Esc 回到全部。" : "复制点什么，它就出现在这里。"}</p>
     </div>
   {:else}
     <div class="preview-eyebrow">
-      <span>{sourceName(item)} · {relativeTime(item.copied_ms)}</span>
+      <span>{item.guide_id ? "新手牌 · Delete 扔掉" : `${sourceName(item)} · ${relativeTime(item.copied_ms)}`}</span>
     </div>
     {#if item.favorite && (item.title || item.note)}
       <!-- M2-6：常用的标题和备注在设置“整理”页里编辑，这里只显示。 -->
@@ -147,7 +151,11 @@
       </div>
     {/if}
 
-    {#if kind === "image"}
+    {#if item.guide_id}
+      <h2 class="preview-title">{item.title}</h2>
+      <p class="preview-text">{guideText}</p>
+      <p class="preview-note">新手牌是说明，贴不出去</p>
+    {:else if kind === "image"}
       {#if expanded}
         <div class="image-stage" class:original={!fit} bind:this={stage} use:measure use:pan role="img" aria-label={item.preview || "图片记录"}>
           {#if image}
@@ -167,29 +175,29 @@
       <div class="color-block" role="img" style={`background-color: ${color.hex}`} aria-label={`颜色 ${color.value}`}></div>
       <div class="color-value">{color.value}</div>
       <div class="color-channels">HEX　{color.hex}<br>RGB　{color.rgb.join(", ")}<br>HSL　{color.hsl[0]}°, {color.hsl[1]}%, {color.hsl[2]}%</div>
-      <p class="preview-note">取用时粘贴原始颜色值，不会自动转换格式。</p>
+      <p class="preview-note">贴出去的是原来的色值</p>
     {:else if kind === "link" && link}
       <div class="link-host">{link.host}</div>
       <div class="link-url">{link.href}</div>
       <div class="link-rule"></div>
-      <p class="preview-note">不会自动访问链接，也不会抓取网页标题。取用时粘贴原始网址。</p>
+      <p class="preview-note">不会打开这个链接，贴出去的就是原网址</p>
     {:else if expanded && full && kind !== "link"}
       {#if kind === "code"}<pre class="code-sheet selectable">{full.text}</pre>{:else}<p class="preview-text selectable">{full.text}</p>{/if}
       {#if full.shown < full.total}
-        <div class="cut" use:loadRest>已显示前 {count(full.shown)} 字 · 滚到底自动加载其余 {count(full.total - full.shown)} 字</div>
+        <div class="cut" use:loadRest>先显示 {count(full.shown)} 字，往下滚看剩下的 {count(full.total - full.shown)} 字</div>
       {/if}
-      {#if rich}<p class="preview-note">显示的是保存的纯文本，不还原富文本样式。</p>{/if}
+      {#if rich}<p class="preview-note">这里只显示文字，不显示原来的格式</p>{/if}
     {:else if kind === "code"}
-      <pre class="code-sheet">{item.preview || "（空文本）"}</pre>
+      <pre class="code-sheet">{item.preview || "（空白）"}</pre>
     {:else if kind === "file"}
       <h2 class="preview-title">{item.file_names.length === 1 ? item.file_names[0] : `${item.file_names.length} 个文件`}</h2>
       <ul class="file-list">
         {#if paths}
           {#each paths as entry}
             <li class={entry.state}>
-              {#if entry.state === "missing"}<b class="file-state" aria-label="不在了">✕</b>{:else if entry.state === "unknown"}<b class="file-state" aria-label="未确认">?</b>{:else}<svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M5 2.5h6l4 4v11H5v-15Z M11 2.5v4h4" stroke="currentColor"/></svg>{/if}
+              {#if entry.state === "missing"}<b class="file-state" aria-label="不在了">✕</b>{:else if entry.state === "unknown"}<b class="file-state" aria-label="连不上">?</b>{:else}<svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M5 2.5h6l4 4v11H5v-15Z M11 2.5v4h4" stroke="currentColor"/></svg>{/if}
               <span class="file-copy"><span>{fileName(entry.path)}</span><code>{entry.path}</code></span>
-              {#if entry.state === "missing"}<small>不在了</small>{:else if entry.state === "unknown"}<small>未确认</small>{/if}
+              {#if entry.state === "missing"}<small>不在了</small>{:else if entry.state === "unknown"}<small>连不上</small>{/if}
             </li>
           {/each}
         {:else}
@@ -201,21 +209,21 @@
         {/if}
       </ul>
       {#if mark?.state === "missing"}
-        <p class="file-note">原文件已被移走或删除，粘贴不了。</p>
+        <p class="file-note">原文件不在了，贴不了</p>
       {:else if mark?.state === "partial"}
-        <p class="file-note">有 {mark.missing} 个已不在，粘贴时只粘还在的 {mark.total - mark.missing} 个。</p>
+        <p class="file-note">有 {mark.missing} 个不在了，只贴剩下的 {mark.total - mark.missing} 个</p>
       {:else if mark?.state === "unknown"}
-        <p class="file-note neutral">网络位置连不上，暂时无法确认。</p>
+        <p class="file-note neutral">网络位置连不上，暂时不知道还在不在</p>
       {:else}
-        <p class="preview-note">这里记录文件引用，不复制文件内容。</p>
+        <p class="preview-note">只记文件在哪，不存文件本身</p>
       {/if}
     {:else if kind === "short"}
-      <h2 class="preview-title">{item.preview || "（空文本）"}</h2>
+      <h2 class="preview-title">{item.preview || "（空白）"}</h2>
     {:else}
-      <p class="preview-text" class:muted={kind === "long" || rich}>{item.preview || "（空文本）"}</p>
-      {#if rich}<p class="preview-note">当前预览为已保存的纯文本摘要，不还原富文本样式。</p>{/if}
+      <p class="preview-text" class:muted={kind === "long" || rich}>{item.preview || "（空白）"}</p>
+      {#if rich}<p class="preview-note">这里只显示文字，不显示原来的格式</p>{/if}
     {/if}
-    {#if item.partial}<p class="partial">部分格式未保存；此处只显示可用内容。</p>{/if}
+    {#if item.partial}<p class="partial">有些格式没记下，这里只显示记下的部分</p>{/if}
   {/if}
 </div>
 

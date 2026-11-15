@@ -24,6 +24,8 @@ use tauri_plugin_global_shortcut::Shortcut;
 
 const DEFAULT_HOTKEY: &str = "Ctrl+`";
 const MIB: u64 = 1024 * 1024;
+// 设置同时经 TypeScript number 使用，超出安全整数会让样本 ID 和计数失真。
+const MAX_SAFE_JSON_INT: u64 = 9_007_199_254_740_991;
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 type Unknown = BTreeMap<String, Value>;
 
@@ -38,6 +40,7 @@ pub struct Settings {
     pub snapshots: Snapshots,
     pub interaction: Interaction,
     pub history: History,
+    pub guide: Guide,
     #[serde(flatten)]
     unknown: Unknown,
 }
@@ -54,6 +57,7 @@ impl Default for Settings {
             snapshots: Snapshots::default(),
             interaction: Interaction::default(),
             history: History::default(),
+            guide: Guide::default(),
             unknown: Unknown::new(),
         }
     }
@@ -136,6 +140,54 @@ impl Default for History {
     fn default() -> Self {
         Self {
             reuse_to_top: true,
+            unknown: Unknown::new(),
+        }
+    }
+}
+
+// 首次启动只保存流程进度；运行时的面板 session 和待保存错误由前端状态机单独持有。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Guide {
+    pub version: u8,
+    pub phase: GuidePhase,
+    pub baseline_ms: Option<u64>,
+    pub baseline_total: u64,
+    pub sample_id: Option<u64>,
+    pub cards_dealt: bool,
+    pub dismissed: Vec<GuideCardId>,
+    #[serde(flatten)]
+    unknown: Unknown,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GuidePhase {
+    AwaitCopy,
+    AwaitShow,
+    AwaitPaste,
+    Completed,
+    Skipped,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GuideCardId {
+    T1,
+    T2,
+    T3,
+    T4,
+}
+
+impl Default for Guide {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            phase: GuidePhase::AwaitCopy,
+            baseline_ms: None,
+            baseline_total: 0,
+            sample_id: None,
+            cards_dealt: false,
+            dismissed: Vec::new(),
             unknown: Unknown::new(),
         }
     }
@@ -417,6 +469,119 @@ fn validate(mut value: Value) -> (Settings, Vec<Issue>) {
         Value::is_boolean,
         &mut issues,
     );
+    let guide = section(object, "guide", &mut issues);
+    field(
+        guide,
+        "version",
+        "guide.version",
+        json!(1),
+        |v| v.as_u64() == Some(1),
+        &mut issues,
+    );
+    field(
+        guide,
+        "phase",
+        "guide.phase",
+        json!("await_copy"),
+        |v| {
+            matches!(
+                v.as_str(),
+                Some("await_copy" | "await_show" | "await_paste" | "completed" | "skipped")
+            )
+        },
+        &mut issues,
+    );
+    field(
+        guide,
+        "baseline_ms",
+        "guide.baseline_ms",
+        Value::Null,
+        |v| v.is_null() || v.as_u64().is_some_and(|n| n <= MAX_SAFE_JSON_INT),
+        &mut issues,
+    );
+    field(
+        guide,
+        "baseline_total",
+        "guide.baseline_total",
+        json!(0),
+        |v| v.as_u64().is_some_and(|n| n <= MAX_SAFE_JSON_INT),
+        &mut issues,
+    );
+    field(
+        guide,
+        "sample_id",
+        "guide.sample_id",
+        Value::Null,
+        |v| v.is_null() || v.as_u64().is_some_and(|n| n > 0 && n <= MAX_SAFE_JSON_INT),
+        &mut issues,
+    );
+    field(
+        guide,
+        "cards_dealt",
+        "guide.cards_dealt",
+        json!(false),
+        Value::is_boolean,
+        &mut issues,
+    );
+    match guide.get("dismissed").cloned() {
+        None => {
+            guide.insert("dismissed".into(), json!([]));
+        }
+        Some(Value::Array(items)) => {
+            let mut dismissed = Vec::new();
+            let mut invalid = false;
+            for item in items {
+                let id = match item.as_str() {
+                    Some("t1") => "t1",
+                    Some("t2") => "t2",
+                    Some("t3") => "t3",
+                    Some("t4") => "t4",
+                    _ => {
+                        invalid = true;
+                        continue;
+                    }
+                };
+                if !dismissed.contains(&id) {
+                    dismissed.push(id);
+                }
+            }
+            guide.insert("dismissed".into(), json!(dismissed));
+            if invalid {
+                issues.push(Issue::new(
+                    "guide.dismissed",
+                    "含有不认识的新手牌 ID，已忽略",
+                ));
+            }
+        }
+        Some(_) => {
+            issues.push(Issue::new("guide.dismissed", "字段值无效，已使用默认值"));
+            guide.insert("dismissed".into(), json!([]));
+        }
+    }
+    let waiting_for_sample = matches!(
+        guide.get("phase").and_then(Value::as_str),
+        Some("await_show" | "await_paste")
+    );
+    if waiting_for_sample && guide.get("sample_id").is_some_and(Value::is_null) {
+        // 等待真实样本的两拍不能在没有 ID 时恢复；退回复制，不让迟到结果误完成。
+        guide.insert("phase".into(), json!("await_copy"));
+        issues.push(Issue::new(
+            "guide.phase",
+            "等待中的样本 ID 无效，已回到复制步骤",
+        ));
+    }
+    let terminal = matches!(
+        guide.get("phase").and_then(Value::as_str),
+        Some("completed" | "skipped")
+    );
+    if !terminal && guide.get("cards_dealt").and_then(Value::as_bool) == Some(true) {
+        // phase 校验和缺失样本回退之后统一收尾：只有终态可以显式重发新手牌。
+        guide.insert("cards_dealt".into(), json!(false));
+        issues.push(Issue::new(
+            "guide.cards_dealt",
+            "进行中的引导不能保留已发牌标记，已关闭",
+        ));
+    }
     // 已逐项规范所有已知字段；未知字段由各层 flatten 原样接收。
     (serde_json::from_value(value).unwrap(), issues)
 }
@@ -477,8 +642,16 @@ pub struct Store {
 impl Store {
     pub fn load(path: PathBuf) -> (Self, Vec<Issue>) {
         let (settings, issues) = match fs::read(&path) {
-            Ok(bytes) => match serde_json::from_slice(&bytes) {
-                Ok(value) => validate(value),
+            Ok(bytes) => match serde_json::from_slice::<Value>(&bytes) {
+                Ok(value) => {
+                    // 必须在默认值填充之前看原始 JSON：旧文件缺 guide 与新安装不是一回事。
+                    let had_guide = value.get("guide").is_some();
+                    let (mut settings, issues) = validate(value);
+                    if !had_guide {
+                        settings.guide.phase = GuidePhase::Completed;
+                    }
+                    (settings, issues)
+                }
                 Err(_) => (
                     Settings::default(),
                     vec![Issue::new(
@@ -523,13 +696,13 @@ impl Store {
         }
         if let Some(value) = update.get("hotkey") {
             // 加载旧文件仍逐字段降级；主动保存非法组合则拒绝整个更新，不能静默改回默认键。
-            parse_hotkey(value.as_str().ok_or("呼出快捷键必须是字符串")?)?;
+            parse_hotkey(value.as_str().ok_or("呼出键必须是字符串")?)?;
         }
         let mut current = self.settings.lock().unwrap();
         let mut value = serde_json::to_value(&*current).unwrap();
         merge(&mut value, update);
         let (settings, issues) = validate(value);
-        atomic_write(&self.path, &settings).map_err(|_| "设置文件写入失败，原设置已保留")?;
+        atomic_write(&self.path, &settings).map_err(|_| "没保存上，还是原来的设置")?;
         *current = settings.clone();
         Ok((settings, issues))
     }
@@ -753,6 +926,228 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn guide_file_presence_controls_fresh_default_and_legacy_migration() {
+        let directory = Directory::new();
+        let path = directory.0.join("settings.json");
+        let (fresh, issues) = Store::load(path.clone());
+        assert!(issues.is_empty());
+        assert_eq!(fresh.get().guide, Guide::default());
+        assert_eq!(
+            serde_json::to_value(fresh.get().guide).unwrap(),
+            json!({"version":1,"phase":"await_copy","baseline_ms":null,
+                "baseline_total":0,"sample_id":null,"cards_dealt":false,"dismissed":[]})
+        );
+
+        let old =
+            serde_json::to_string_pretty(&json!({"theme":"dark","future":{"keep":true}})).unwrap();
+        fs::write(&path, &old).unwrap();
+        let (legacy, issues) = Store::load(path.clone());
+        assert!(issues.is_empty());
+        assert_eq!(legacy.get().guide.phase, GuidePhase::Completed);
+        assert!(!legacy.get().guide.cards_dealt);
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            old,
+            "只读迁移不能改写旧文件"
+        );
+        let (reloaded, _) = Store::load(path);
+        assert_eq!(reloaded.get().guide.phase, GuidePhase::Completed);
+    }
+
+    #[test]
+    fn guide_missing_invalid_and_out_of_range_fields_fall_back_safely() {
+        let directory = Directory::new();
+        let path = directory.0.join("settings.json");
+        fs::write(&path, json!({"guide":{"phase":"completed"}}).to_string()).unwrap();
+        let (store, issues) = Store::load(path.clone());
+        assert!(issues.is_empty());
+        assert_eq!(store.get().guide.phase, GuidePhase::Completed);
+        assert_eq!(store.get().guide.version, 1);
+        assert_eq!(store.get().guide.baseline_ms, None);
+        assert_eq!(store.get().guide.baseline_total, 0);
+        assert_eq!(store.get().guide.sample_id, None);
+        assert!(!store.get().guide.cards_dealt);
+        assert!(store.get().guide.dismissed.is_empty());
+
+        fs::write(
+            &path,
+            json!({"guide":{
+                "version":"new","phase":"done","baseline_ms":-1,"baseline_total":-2,
+                "sample_id":0,"cards_dealt":"yes",
+                "dismissed":["t2","t1","t2","bad",1,"t4","t1"]
+            }})
+            .to_string(),
+        )
+        .unwrap();
+        let (store, issues) = Store::load(path.clone());
+        assert_eq!(issues.len(), 7);
+        let guide = &store.get().guide;
+        assert_eq!(guide.version, 1);
+        assert_eq!(guide.phase, GuidePhase::AwaitCopy);
+        assert_eq!(guide.baseline_ms, None);
+        assert_eq!(guide.baseline_total, 0);
+        assert_eq!(guide.sample_id, None);
+        assert!(!guide.cards_dealt);
+        assert_eq!(
+            guide.dismissed,
+            [GuideCardId::T2, GuideCardId::T1, GuideCardId::T4]
+        );
+
+        for (field, value) in [
+            ("baseline_ms", json!(u64::MAX)),
+            ("baseline_total", json!(u64::MAX)),
+            ("sample_id", json!(u64::MAX)),
+            ("baseline_ms", json!(1.5)),
+            ("baseline_total", json!("2")),
+            ("sample_id", json!(-3)),
+        ] {
+            let mut guide = json!({"phase":"await_paste","sample_id":7});
+            guide[field] = value;
+            fs::write(&path, json!({"guide":guide}).to_string()).unwrap();
+            let (store, _) = Store::load(path.clone());
+            assert!(
+                store
+                    .get()
+                    .guide
+                    .baseline_ms
+                    .is_none_or(|n| n <= 9_007_199_254_740_991)
+            );
+            assert!(store.get().guide.baseline_total <= 9_007_199_254_740_991);
+            if field == "sample_id" {
+                assert_eq!(store.get().guide.phase, GuidePhase::AwaitCopy);
+                assert_eq!(store.get().guide.sample_id, None);
+            } else {
+                assert_eq!(store.get().guide.sample_id, Some(7));
+            }
+        }
+    }
+
+    #[test]
+    fn task14_nonterminal_guide_cannot_keep_cards_dealt() {
+        let directory = Directory::new();
+        let path = directory.0.join("settings.json");
+        for (phase, sample_id) in [
+            ("await_copy", Value::Null),
+            ("await_show", json!(7)),
+            ("await_paste", json!(7)),
+        ] {
+            fs::write(
+                &path,
+                json!({"guide":{
+                    "phase":phase,"sample_id":sample_id,"cards_dealt":true,
+                    "dismissed":["t2"],"future":{"keep":true}
+                }})
+                .to_string(),
+            )
+            .unwrap();
+            let (store, issues) = Store::load(path.clone());
+            assert!(!store.get().guide.cards_dealt, "{phase} 不得保留已发牌");
+            assert!(
+                issues
+                    .iter()
+                    .any(|issue| issue.field == "guide.cards_dealt")
+            );
+            assert_eq!(store.get().guide.dismissed, [GuideCardId::T2]);
+            assert_eq!(
+                serde_json::to_value(&store.get().guide).unwrap()["future"],
+                json!({"keep":true})
+            );
+        }
+
+        for phase in ["completed", "skipped"] {
+            fs::write(
+                &path,
+                json!({"guide":{"phase":phase,"cards_dealt":true}}).to_string(),
+            )
+            .unwrap();
+            let (store, issues) = Store::load(path.clone());
+            assert!(store.get().guide.cards_dealt, "{phase} 的显式重发必须保留");
+            assert!(issues.is_empty());
+        }
+
+        fs::write(
+            &path,
+            json!({"guide":{"phase":"done","cards_dealt":true}}).to_string(),
+        )
+        .unwrap();
+        let (store, issues) = Store::load(path.clone());
+        assert_eq!(store.get().guide.phase, GuidePhase::AwaitCopy);
+        assert!(!store.get().guide.cards_dealt);
+        assert!(issues.iter().any(|issue| issue.field == "guide.phase"));
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue.field == "guide.cards_dealt")
+        );
+    }
+
+    #[test]
+    fn guide_unknown_fields_survive_load_save_and_reload() {
+        let directory = Directory::new();
+        let path = directory.0.join("settings.json");
+        let future = json!({"nested":[1,null,{"中文":"保留"}]});
+        fs::write(
+            &path,
+            json!({"future":future,"guide":{"phase":"await_show","sample_id":9,"future":future}})
+                .to_string(),
+        )
+        .unwrap();
+        let (store, issues) = Store::load(path.clone());
+        assert!(issues.is_empty());
+        store.set(json!({"guide":{"cards_dealt":false}})).unwrap();
+        let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["future"], future);
+        assert_eq!(saved["guide"]["future"], future);
+        assert_eq!(saved["guide"]["phase"], "await_show");
+        let (reloaded, issues) = Store::load(path);
+        assert!(issues.is_empty());
+        assert_eq!(reloaded.get(), store.get());
+    }
+
+    #[test]
+    fn guide_about_and_delete_updates_are_partial_and_preserve_unrelated_fields() {
+        let directory = Directory::new();
+        let path = directory.0.join("settings.json");
+        fs::write(
+            &path,
+            json!({"guide":{"phase":"skipped","cards_dealt":false,"dismissed":["t2"]}}).to_string(),
+        )
+        .unwrap();
+        let (store, issues) = Store::load(path.clone());
+        assert!(issues.is_empty());
+        store
+            .set(json!({"guide":{"cards_dealt":true,"dismissed":[]}}))
+            .unwrap();
+        assert_eq!(store.get().guide.phase, GuidePhase::Skipped);
+        assert!(store.get().guide.cards_dealt);
+        assert!(store.get().guide.dismissed.is_empty());
+
+        store
+            .set(json!({"guide":{
+                "version":1,"phase":"await_copy","baseline_ms":null,"baseline_total":0,
+                "sample_id":null,"cards_dealt":false
+            }}))
+            .unwrap();
+        assert_eq!(store.get().guide.phase, GuidePhase::AwaitCopy);
+        assert!(!store.get().guide.cards_dealt);
+        assert!(store.get().guide.dismissed.is_empty());
+
+        store
+            .set(json!({"guide":{"phase":"completed","cards_dealt":true,"dismissed":["t1"]}}))
+            .unwrap();
+        store
+            .set(json!({"guide":{"dismissed":["t1","t3"]}}))
+            .unwrap();
+        let guide = &store.get().guide;
+        assert_eq!(guide.phase, GuidePhase::Completed);
+        assert!(guide.cards_dealt);
+        assert_eq!(guide.dismissed, [GuideCardId::T1, GuideCardId::T3]);
+        let (reloaded, issues) = Store::load(path);
+        assert!(issues.is_empty());
+        assert_eq!(reloaded.get(), store.get());
+    }
+
+    #[test]
     fn retired_experiments_section_is_read_without_issues_and_kept_as_unknown() {
         let directory = Directory::new();
         let path = directory.0.join("settings.json");
@@ -969,7 +1364,16 @@ pub(crate) mod tests {
         )
         .unwrap();
         let (store, mut issues) = Store::load(path.clone());
-        assert_eq!(store.get(), Settings::default());
+        assert_eq!(
+            store.get(),
+            Settings {
+                guide: Guide {
+                    phase: GuidePhase::Completed,
+                    ..Guide::default()
+                },
+                ..Settings::default()
+            }
+        );
         assert_eq!(issues.len(), 5);
         // JSON 解析器的错误也不能把损坏文件的输入带进诊断。
         fs::write(&path, format!("{{{private}")).unwrap();
@@ -1009,7 +1413,10 @@ pub(crate) mod tests {
         fs::remove_file(&path).unwrap();
         fs::create_dir(&path).unwrap();
         fs::write(path.join("sentinel"), b"old").unwrap();
-        assert!(store.set(json!({"theme":"dark"})).is_err());
+        assert_eq!(
+            store.set(json!({"theme":"dark"})).err().unwrap(),
+            "没保存上，还是原来的设置"
+        );
         assert_eq!(store.get(), Settings::default());
         assert_eq!(fs::read(path.join("sentinel")).unwrap(), b"old");
         assert_eq!(fs::read_dir(&directory.0).unwrap().count(), 1);

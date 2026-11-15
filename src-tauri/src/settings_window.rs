@@ -8,6 +8,15 @@ use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
 /// 设置窗口的标签。`lib.rs` 的关闭处理按它区分：关设置窗口只销毁这个窗口，不退出程序。
 pub const LABEL: &str = "settings";
+const DEFAULT_SIZE: (f64, f64) = (1120.0, 680.0);
+const MIN_SIZE: (f64, f64) = (860.0, 560.0);
+
+fn page_url(page: Option<&str>) -> String {
+    match page {
+        Some(page) => format!("settings.html#{page}"),
+        None => "settings.html".to_owned(),
+    }
+}
 
 /// 打开设置窗口：已经开着就提到前面，没有就新建。
 ///
@@ -29,13 +38,12 @@ pub fn open_page(app: &AppHandle, page: Option<&str>) -> tauri::Result<()> {
         }
         return window.set_focus();
     }
-    let url = match page {
-        Some(page) => format!("settings.html#{page}"),
-        None => "settings.html".to_owned(),
-    };
+    let url = page_url(page);
     WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App(url.into()))
         .title("拈来 · 设置")
-        .inner_size(860.0, 620.0)
+        .inner_size(DEFAULT_SIZE.0, DEFAULT_SIZE.1)
+        .min_inner_size(MIN_SIZE.0, MIN_SIZE.1)
+        .resizable(true)
         .center()
         .build()?;
     Ok(())
@@ -45,4 +53,30 @@ pub fn open_page(app: &AppHandle, page: Option<&str>) -> tauri::Result<()> {
 #[tauri::command]
 pub async fn open_settings(app: AppHandle, page: Option<String>) -> Result<(), String> {
     open_page(&app, page.as_deref()).map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn settings_window_uses_resizable_six_page_shell_sizes() {
+        assert_eq!(DEFAULT_SIZE, (1120.0, 680.0));
+        assert_eq!(MIN_SIZE, (860.0, 560.0));
+        assert!(MIN_SIZE.0 <= DEFAULT_SIZE.0 && MIN_SIZE.1 <= DEFAULT_SIZE.1);
+    }
+
+    #[test]
+    fn settings_window_keeps_legacy_deep_links_in_initial_url() {
+        assert_eq!(page_url(None), "settings.html");
+        for view in ["trash", "snapshots", "images", "export", "import"] {
+            assert_eq!(page_url(Some(view)), format!("settings.html#{view}"));
+        }
+    }
+
+    #[test]
+    fn settings_window_label_matches_close_dispatch_constant() {
+        // 仅固定 lib.rs 关闭分派使用的标签常量；本纯测试不断言运行时创建/销毁生命周期。
+        assert_eq!(LABEL, "settings");
+    }
 }

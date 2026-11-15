@@ -51,14 +51,14 @@
   }
 </script>
 
-<p class="page-intro">把历史库、来源图标和一份清单打成一个文件（.nianlai-backup）。<strong>不加密</strong>：文件里有你复制过的文字、图片和文件路径，请放在自己信任的地方。</p>
+<p class="page-intro">把复制过的内容、来源图标和一份清单打成一个文件（.nianlai-backup）。<strong>不加密</strong>：文件里有你复制过的文字、图片和文件在哪，请放在自己信得过的地方。</p>
 
 <div class="card">
   <div class="setting">
     <span class="setting-copy">
       {#if summary}
-        <strong>包含 {count(summary.items)} 条历史 · {count(summary.favorites)} 条常用 · {count(summary.icons)} 个来源图标</strong>
-        <small>回收站里的不导出。文件类条目只有路径，不包含文件本身</small>
+        <strong>包含 {count(summary.items)} 张复制内容 · {count(summary.favorites)} 张收藏 · {count(summary.icons)} 个来源图标</strong>
+        <small>回收站里的不导出。文件只记在哪，不包含文件本身</small>
       {:else if !error}
         <strong>正在统计…</strong>
       {/if}
@@ -74,7 +74,7 @@
   </div>
   {#if result}
     <div class="setting result" role="status">
-      <span class="setting-copy"><strong>已导出 {size(result.bytes)}</strong><small>{count(result.items)} 条历史 · {count(result.favorites)} 条常用 · {count(result.icons)} 个图标</small></span>
+      <span class="setting-copy"><strong>已导出 {size(result.bytes)}</strong><small>{count(result.items)} 张复制内容 · {count(result.favorites)} 张收藏 · {count(result.icons)} 个图标</small></span>
       <button type="button" class="link" onclick={() => result && ipc.revealInExplorer(result.path).catch((value) => { error = message(value); })}>在资源管理器里显示</button>
     </div>
   {/if}
@@ -85,7 +85,7 @@
   .page-intro strong { color: var(--settings-text); font-weight: 600; }
   .num { color: var(--settings-text); font: 600 13px var(--font-mono); white-space: nowrap; }
   .path { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-family: var(--font-mono); }
-  button { min-height: 28px; flex: none; display: inline-flex; align-items: center; gap: 6px; padding: 3px 12px; border: 1px solid var(--settings-line); border-radius: var(--radius-sm); background: var(--settings-selected); font-size: 11px; white-space: nowrap; }
+  button { min-height: 28px; flex: none; display: inline-flex; align-items: center; gap: 6px; padding: 3px 12px; border: 1px solid var(--settings-line); border-radius: var(--radius-sm); background: var(--settings-selected); font-size: 12px; white-space: nowrap; }
   button.ghost { background: transparent; }
   button.primary { border-color: var(--settings-accent); color: var(--settings-accent); font-weight: 600; }
   button.primary.done { background: var(--settings-accent); color: var(--settings-card); }
@@ -96,6 +96,6 @@
   /* 对勾、转圈和 rise/draw/spin 关键帧在 settings.css；这里只改时长。 */
   .tick { animation-duration: 360ms; animation-delay: 60ms; }
   .result { animation: rise 260ms ease-out; }
-  .error { margin: 0; padding: 10px 16px; color: var(--state-critical); font-size: 11px; }
-  :global(html[data-reduce-motion="true"]) .result { animation: none; }
+  .error { margin: 0; padding: 10px 16px; color: var(--state-critical); font-size: 12px; }
+  :global(html[data-motion="none"]) .result, :global(html[data-reduce-motion="true"]) .result { animation: none; }
 </style>

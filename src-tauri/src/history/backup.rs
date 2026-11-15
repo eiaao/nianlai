@@ -14,7 +14,7 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
-const MEMORY_MODE: &str = "历史库没有打开，备份与导入暂时不可用";
+const MEMORY_MODE: &str = "存东西的文件没打开，备份与导入暂时用不了";
 const BUSY_MESSAGE: &str = "正在进行另一项备份或导入，请等它结束再试";
 const SUFFIX: &str = ".nianlai-backup";
 
@@ -104,7 +104,7 @@ impl History {
     pub fn backup_summary(&self) -> Result<Summary, String> {
         let (_, directory) = self.backup_store()?;
         let summary: BackupSummary = nianlai_store::backup_summary(&directory)
-            .map_err(|_| "统计备份内容失败，请稍后再试".to_owned())?;
+            .map_err(|_| "没能统计备份内容，稍后再试".to_owned())?;
         Ok(Summary {
             items: summary.items,
             favorites: summary.favorites,
@@ -153,7 +153,7 @@ impl History {
                 "bytes":result.as_ref().ok().map(|r|r.bytes),
                 "error_code":result.as_ref().err().map(ToString::to_string)}),
         );
-        let report = result.map_err(|_| "导出没有成功，现有数据不受影响".to_owned())?;
+        let report = result.map_err(|_| "没导出成，现有数据没动".to_owned())?;
         Ok(Exported {
             path: destination.to_string_lossy().into_owned(),
             bytes: report.bytes,
@@ -196,7 +196,7 @@ impl History {
                     nianlai_store::Error::Invalid("import_missing") => {
                         "这份备份的检查结果已失效，请重新选择文件".to_owned()
                     }
-                    _ => "合并没有成功，现有数据不受影响".to_owned(),
+                    _ => "没合并成，现有数据没动".to_owned(),
                 }),
             Mode::Overwrite => super::snapshots::schedule_import(&directory, token, &self.logger)
                 .map(|()| Imported {

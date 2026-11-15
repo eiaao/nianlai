@@ -817,7 +817,7 @@ fn refresh_source_app_updates_display_and_icon_reference_only() {
 }
 
 // 面板 Delete（B12）：先进回收站，列表、搜索、收藏里都看不到；能恢复回原位；再复制同样内容也会回来。
-// 物理删除连带格式、复制事件、搜索索引和收藏行。
+// 物理删除连带正文、格式、搜索索引和收藏行；计数只保留匿名事件时间。
 #[test]
 fn delete_moves_to_trash_then_restore_revive_and_purge() {
     let temp = Temp::new();
@@ -1133,6 +1133,139 @@ fn favorite_labels_are_cleaned_limited_and_searchable() {
     check(&temp.0).unwrap();
 }
 
+#[test]
+fn copied_since_counts_full_event_history_and_rejects_overflowing_start() {
+    let store = Store::open_memory(sha256, MemoryOptions::unbounded()).unwrap();
+    let at = Instant::now();
+    let day_start = 1_700_000_000_000;
+    let save_at = |value: &str, sequence: u32, time_ms: u64| {
+        let mut event = event(sequence, at);
+        event.time_ms = time_ms;
+        store.ingest(text(value), event, false, at).unwrap()
+    };
+
+    save_at("昨天", 1, day_start - 1);
+    let repeated = save_at("同内容", 2, day_start);
+    assert_eq!(save_at("同内容", 3, day_start + 1).outcome, "duplicate");
+    let removed = save_at("删除仍保留当天事件", 4, day_start + 2)
+        .record_id
+        .unwrap();
+    let content = text("同内容");
+    assert!(
+        store
+            .before_write(
+                repeated.record_id.unwrap(),
+                content.fingerprint,
+                content.fingerprint,
+                at,
+            )
+            .unwrap()
+    );
+    assert_eq!(
+        save_at("同内容", 5, day_start + 3).reason,
+        Some("own_echo"),
+        "被挡下的内容不能新增 copy_events"
+    );
+    for sequence in 6..=310 {
+        save_at(&format!("超过最近列表-{sequence}"), sequence, day_start + 4);
+    }
+    assert!(store.delete(removed).unwrap());
+    assert_eq!(store.cache().items.len(), CACHE_LIMIT);
+    assert!(store.cache().total > CACHE_LIMIT);
+    assert_eq!(store.copied_since(day_start - 1).unwrap(), 309);
+    assert_eq!(store.copied_since(day_start).unwrap(), 308);
+    assert_eq!(
+        store.copied_since(day_start + 1).unwrap(),
+        307,
+        "起点本身计入，重复复制分别计一次，删除不倒扣"
+    );
+    assert_eq!(store.copied_since(i64::MAX as u64 + 1).unwrap(), 0);
+    assert_eq!(store.copied_since(u64::MAX).unwrap(), 0);
+}
+
+#[test]
+fn copied_since_survives_manual_purge_clear_expiry_and_reopen() {
+    type AnonymousRow = (Option<i64>, String, String, i64, i64, Option<i64>);
+    for mode in 0..3 {
+        let temp = Temp::new();
+        let store = temp.store();
+        let at = Instant::now();
+        let mut event = event(1, at);
+        event.time_ms = 1_700_000_000_000;
+        let id = store
+            .ingest(text(&format!("彻底删除-{mode}")), event, false, at)
+            .unwrap()
+            .record_id
+            .unwrap();
+        store.set_favorite(id, true).unwrap();
+        assert!(store.delete(id).unwrap());
+        match mode {
+            0 => {
+                assert_eq!(store.purge(Some(vec![id]), u64::MAX).unwrap(), 1);
+            }
+            1 => {
+                assert_eq!(store.purge(None, u64::MAX).unwrap(), 1);
+            }
+            _ => {
+                let c = writable(&temp.0.join("history.db")).unwrap();
+                c.execute(
+                    "UPDATE trash SET deleted_ms=0 WHERE content_id=?1",
+                    [id as i64],
+                )
+                .unwrap();
+                drop(c);
+                assert_eq!(store.purge(None, 1).unwrap(), 1);
+            }
+        }
+        assert_eq!(store.copied_since(0).unwrap(), 1, "purge 模式 {mode}");
+        assert!(store.reader().unwrap().content(id).unwrap().is_none());
+        let c = writable(&temp.0.join("history.db")).unwrap();
+        let remaining: Vec<i64> = c
+            .prepare("SELECT (SELECT count(*) FROM contents),(SELECT count(*) FROM formats),(SELECT count(*) FROM trash),(SELECT count(*) FROM favorites)")
+            .unwrap()
+            .query_row([], |r| Ok(vec![r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?]))
+            .unwrap();
+        assert_eq!(remaining, [0, 0, 0, 0], "正文及关联生命周期行仍需删除");
+        let anonymous: Vec<AnonymousRow> = c
+            .prepare("SELECT content_id,source_process,owner_process,owner_pid,sequence,source_app_id FROM copy_events")
+            .unwrap()
+            .query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+            })
+            .unwrap()
+            .collect::<std::result::Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            anonymous,
+            [(None, String::new(), String::new(), 0, 0, None)],
+            "只留下匿名计数事实，模式 {mode}"
+        );
+        drop(c);
+        drop(store);
+        let reopened = temp.store();
+        assert_eq!(reopened.copied_since(0).unwrap(), 1, "重开后模式 {mode}");
+    }
+}
+
+#[test]
+fn copied_since_uses_event_time_index() {
+    let temp = Temp::new();
+    let _store = temp.store();
+    let c = writable(&temp.0.join("history.db")).unwrap();
+    let mut statement = c
+        .prepare("EXPLAIN QUERY PLAN SELECT count(*) FROM copy_events WHERE time_ms >= ?1")
+        .unwrap();
+    let details: Vec<String> = statement
+        .query_map([0i64], |r| r.get(3))
+        .unwrap()
+        .collect::<std::result::Result<_, _>>()
+        .unwrap();
+    assert!(
+        details.iter().any(|detail| detail.contains("event_time")),
+        "计数查询必须按时间索引缩小扫描范围：{details:?}"
+    );
+}
+
 // 内存库：同一套表结构、迁移和搜索，只是不落盘。
 mod memory {
     use super::*;
@@ -1248,6 +1381,35 @@ mod memory {
         let first = ingest(&store, text("a-编号"), 1, at).record_id.unwrap();
         let second = ingest(&store, text("b-编号"), 2, at).record_id.unwrap();
         assert_eq!((first, second), ((1 << 52) + 1, (1 << 52) + 2));
+    }
+
+    #[test]
+    fn production_fallback_eviction_preserves_anonymous_copy_times() {
+        let store = Store::open_memory(sha256, MemoryOptions::fallback()).unwrap();
+        let at = Instant::now();
+        let day_start = 1_700_000_000_000;
+        let total = CACHE_LIMIT as u32 + 1;
+        let mut first_id = 0;
+        for sequence in 1..=total {
+            let mut event = event(sequence, at);
+            event.time_ms = day_start + u64::from(sequence);
+            let id = store
+                .ingest(text(&format!("生产回退-{sequence}")), event, false, at)
+                .unwrap()
+                .record_id
+                .unwrap();
+            if sequence == 1 {
+                first_id = id;
+            }
+        }
+        let reader = store.reader().unwrap();
+        assert!(reader.content(first_id).unwrap().is_none());
+        let counts = reader.counts().unwrap();
+        assert_eq!(counts.contents, CACHE_LIMIT);
+        assert_eq!(counts.formats, CACHE_LIMIT, "淘汰正文和格式不能复活");
+        assert_eq!(store.cache().total, CACHE_LIMIT);
+        assert_eq!(store.copied_since(day_start).unwrap(), total as usize);
+        assert_eq!(counts.events, total as usize, "只多保留匿名事件时间");
     }
 
     #[test]

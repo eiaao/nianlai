@@ -2,7 +2,7 @@
   import type { PanelState } from "../state.svelte";
 
   let { panel }: { panel: PanelState } = $props();
-  const loading = $derived(panel.history.store_status === "正在加载历史");
+  const loading = $derived(panel.history.store_status === "正在打开");
   const paused = $derived(!!panel.history.store_status?.includes("暂停"));
 </script>
 
@@ -11,16 +11,16 @@
     <span aria-hidden="true">{paused ? "Ⅱ" : loading ? "···" : "△"}</span>
     <span class="message">
       {#if paused}
-        已暂停记录 · 现在复制的内容不会保存
+        已暂停，现在复制的不会记下
       {:else if loading}
-        正在加载历史 · 记录状态尚未就绪
+        正在打开，稍等
       {:else if panel.history.store_status}
-        存储异常 · {panel.history.store_status}，新内容可能只保留在内存中
+        存不进去了：{panel.history.store_status}。现在复制的，关掉拈来就没了
       {:else}
-        未在记录 · 剪贴板监听尚未就绪或已中断，后端会自动恢复
+        暂时没在记录，正在自己恢复
       {/if}
     </span>
-    <button type="button" tabindex="-1" onpointerdown={(event) => event.preventDefault()} onclick={() => { void panel.refreshRecordingStatus(); }}>刷新状态</button>
+    <button type="button" tabindex="-1" onpointerdown={(event) => event.preventDefault()} onclick={() => { void panel.refreshRecordingStatus(); }}>再看看</button>
   </section>
 {/if}
 

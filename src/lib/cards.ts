@@ -119,7 +119,7 @@ export function cardKind(item: Pick<HistoryItem, "kind" | "preview" | "file_name
 
 export const fileExt = (name: string) => (/\.([a-z0-9]{1,5})$/i.exec(name)?.[1] ?? "文件").toUpperCase();
 export const firstLine = (text: string) => text.split("\n").find((line) => line.trim()) ?? "";
-export const sourceName = (item: HistoryItem) => item.source_name?.trim() || item.source || "来源未知";
+export const sourceName = (item: HistoryItem) => item.source_name?.trim() || item.source || "来源不明";
 /** 图片条目的“1280 × 720”；后端的预览文字形如“图片 1280×720”。 */
 export const imageSize = (item: HistoryItem) => (/(\d+)\s*[×x]\s*(\d+)/.exec(item.preview ?? "") ?? []).slice(1, 3).join(" × ");
 export const cardLabel = (item: HistoryItem) => item.title || firstLine(item.preview ?? "") || item.file_names[0] || "图片";
@@ -142,7 +142,7 @@ export function relativeTime(millis: number, now = Date.now()) {
   return `${date.getMonth() + 1}月${date.getDate()}日`;
 }
 
-export type TimeGroup = "常用" | "刚才" | "今天上午" | "今天下午" | "昨天" | "这周早些时候" | "更早";
+export type TimeGroup = "收藏" | "刚才" | "今天上午" | "今天下午" | "昨天" | "这周早些时候" | "更早";
 
 /** 时间分组：一小时内“刚才”，今天按上午 / 下午，昨天，本周（周一起）更早的几天，其余“更早”。 */
 export function timeGroup(millis: number, now = Date.now()): TimeGroup {

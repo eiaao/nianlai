@@ -24,11 +24,12 @@ async function compilePanel() {
   const compiledPath = join(temporary, "state.svelte.mjs");
   const preferencesPath = join(temporary, "preferences.mjs");
   const cardsPath = join(temporary, "cards.mjs");
+  const guideCardsPath = join(temporary, "guideCards.mjs");
   const cleanup = () => {
     assert.equal(dirname(temporary), temporaryBase);
     assert.ok(basename(temporary).startsWith("nianlai-panel-key-repeat-"));
     // 只删除本次创建的几个文件和空目录，不递归清理任何路径。
-    for (const path of [compiledPath, preferencesPath, cardsPath, ipcPath]) if (existsSync(path)) unlinkSync(path);
+    for (const path of [compiledPath, preferencesPath, cardsPath, guideCardsPath, ipcPath]) if (existsSync(path)) unlinkSync(path);
     rmdirSync(temporary);
     assert.equal(existsSync(temporary), false);
   };
@@ -39,15 +40,23 @@ let rejectNext = false;
 let rejectSearch = false;
 let pendingPaste = null;
 let rejectQueue = false;
+let rejectMutation = false;
+let rejectHistorySearch = false;
+let rejectHistoryRead = false;
+let rejectSubscription = false;
 const handlers = new Map();
 export const previewKeys = [];
 export async function setPreviewKeys(open) { previewKeys.push(open); }
-export async function copySelection(id, text) { calls.push({ command: "copySelection", id, text }); }
-export function reset() { calls.length = 0; previewKeys.length = 0; rejectNext = false; rejectSearch = false; rejectQueue = false; pendingPaste = null; handlers.clear();
-  store.history = null; store.favorites = []; store.deletable = true; store.undoable = null; }
+export async function copySelection(id, text) { calls.push({ command: "copySelection", id, text }); if (rejectMutation) { rejectMutation = false; throw new Error("模拟复制失败"); } }
+export function reset() { calls.length = 0; previewKeys.length = 0; rejectNext = false; rejectSearch = false; rejectQueue = false; rejectMutation = false; rejectHistorySearch = false; rejectHistoryRead = false; rejectSubscription = false; pendingPaste = null; handlers.clear();
+  store.history = null; store.favorites = []; store.deletable = true; store.undoable = null; store.favoriteMissing = false; }
 export function rejectNextPaste() { rejectNext = true; }
 export function rejectNextQueue(reason = true) { rejectQueue = reason; }
 export function rejectNextSearch() { rejectSearch = true; }
+export function rejectNextMutation() { rejectMutation = true; }
+export function rejectNextHistorySearch() { rejectHistorySearch = true; }
+export function rejectNextHistoryRead() { rejectHistoryRead = true; }
+export function rejectNextSubscription() { rejectSubscription = true; }
 export function deferNextPaste() {
   let resolve, reject;
   const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
@@ -74,18 +83,26 @@ export async function startSearch(session) {
   if (rejectSearch) { rejectSearch = false; throw new Error("模拟搜索切换失败"); }
 }
 // 交互优化（收藏、删除、撤销）用的可控替身；默认 getHistory 返回 null，启动预热直接跳过，不影响旧用例。
-export const store = { history: null, favorites: [], deletable: true, undoable: null };
-export async function getHistory() { return store.history; }
+export const store = { history: null, favorites: [], deletable: true, undoable: null, favoriteMissing: false };
+export async function getHistory() { if (rejectHistoryRead) { rejectHistoryRead = false; throw new Error("模拟读取失败"); } return store.history; }
 export async function getFavorites() { return store.favorites; }
 export async function setFavorite(id, favorite) {
   calls.push({ command: "setFavorite", id, favorite });
+  if (rejectMutation) { rejectMutation = false; throw new Error("模拟收藏保存失败"); }
+  if (store.favoriteMissing) return null;
   return { id, kind: "文本", preview: "合成条目", file_names: [], source: "合成来源", copied_ms: 0, copy_count: 1, partial: false,
     favorite, favorite_position: favorite ? 9 : null };
 }
-export async function deleteItem(id) { calls.push({ command: "deleteItem", id }); return store.deletable; }
+export async function deleteItem(id) { calls.push({ command: "deleteItem", id }); if (rejectMutation) { rejectMutation = false; throw new Error("模拟删除失败"); } return store.deletable; }
 export async function undoDelete() {
   calls.push({ command: "undoDelete" });
+  if (rejectMutation) { rejectMutation = false; throw new Error("模拟撤销失败"); }
   return store.undoable ? { ...(store.history?.items.find((item) => item.id === store.undoable) ?? {}), id: store.undoable, favorite: false } : null;
+}
+export async function searchHistory(query, requestId) {
+  calls.push({ command: "searchHistory", query, requestId });
+  if (rejectHistorySearch) { rejectHistorySearch = false; throw new Error("模拟搜索失败"); }
+  return { request_id: requestId, items: [] };
 }
 // 面板里的其余 IPC 调用不再用 ?. 兜底，替身补全为无副作用的空实现。
 export async function getSettings() { return null; }
@@ -97,7 +114,7 @@ export async function frontendReady() {}
 export async function reportPainted() {}
 export async function searchReady() {}
 export async function appVersion() { return "0.0.0-test"; }
-const subscribe = (name) => async (handler) => { handlers.set(name, handler); return () => handlers.delete(name); };
+const subscribe = (name) => async (handler) => { if (rejectSubscription) { rejectSubscription = false; throw new Error("模拟订阅失败"); } handlers.set(name, handler); return () => handlers.delete(name); };
 export const onPanelShown = subscribe("shown");
 export const onPanelInteraction = subscribe("interaction");
 export const onForegroundRevision = subscribe("foreground-revision");
@@ -123,14 +140,16 @@ export function emit(name, payload) { return handlers.get(name)?.(payload); }
       ["./ipc", pathToFileURL(ipcPath).href],
       ["./preferences", pathToFileURL(preferencesPath).href],
       ["./cards", pathToFileURL(cardsPath).href],
+      ["./guideCards", pathToFileURL(guideCardsPath).href],
     ]);
     writeFileSync(cardsPath, transpile("src/lib/cards.ts"));
+    writeFileSync(guideCardsPath, transpile("src/lib/guideCards.ts"));
     // 真实的 preferences.ts 一并转译，面板与设置页用同一份偏好映射。
     writeFileSync(preferencesPath, ts.transpileModule(readFileSync(join(root, "src/lib/preferences.ts"), "utf8"), {
       compilerOptions: { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.ESNext },
     }).outputText);
     const compiled = compileModule(stripped, { filename: "state.svelte.js", generate: "client", dev: false }).js.code
-      .replace(/(from\s+)(["'])(svelte\/internal\/client|svelte|\.\/ipc|\.\/preferences|\.\/cards)\2/g,
+      .replace(/(from\s+)(["'])(svelte\/internal\/client|svelte|\.\/ipc|\.\/preferences|\.\/cards|\.\/guideCards)\2/g,
         (_, prefix, _quote, specifier) => prefix + JSON.stringify(imports.get(specifier)));
     writeFileSync(compiledPath, compiled);
     const { PanelState } = await import(pathToFileURL(compiledPath).href);
@@ -183,7 +202,7 @@ test("通用终止反馈只恢复当前隐藏会话的关闭提示", async (suit
   const { PanelState, ipc, cleanup } = await compilePanel();
   suite.after(cleanup);
 
-  for (const message of ["剪贴板已变化，本次未粘贴，请关闭面板后重新呼出", "粘贴结果未确认，请先检查目标，避免重复粘贴"]) {
+  for (const message of ["剪贴板刚被改过，这次没贴。再呼出一次", "不确定贴上没有，先看一眼，别贴两遍"]) {
     await suite.test(message, async (context) => {
       const { panel, focusCalls } = await createPanel(context, PanelState, ipc);
       const beforeFocus = focusCalls();
@@ -261,6 +280,34 @@ test("Activated DOM 快速取用、焦点准备与自然搜索输入", async (su
   const actions = submissions.filter((action) => action.key === "Enter" || Number(action.key) <= 7).map((action) => action.name.startsWith("Ctrl+") && action.key !== "Enter"
     ? { ...action, name: action.key, ctrlKey: false } : action);
   const expected = (action) => ({ command: "pasteItem", session: 37, id: 101 + action.index, mode: action.mode });
+
+  await suite.test("Activated DOM 单牌 releaseDomChoice 对实际负数 id 零 IPC", async (context) => {
+    const { panel } = await activatedPanel(context, PanelState, ipc);
+    const negative = { ...items()[0], id: -1, preview: "伪造负数项" };
+    panel.history = { ...panel.history, items: [negative, ...items()] };
+    panel.recentIds = [-1, ...items().map((item) => item.id)];
+    panel.selected = 0;
+    keydown(panel, { key: "Enter", code: "Enter" });
+    assert.equal(panel.pendingDom?.id, -1, "确实构造了 Activated DOM 单牌提交");
+    keyup(panel, { key: "Enter", code: "Enter" });
+    assert.deepEqual(ipc.calls, []);
+    assert.equal(panel.notice, "新手牌是说明，贴不出去");
+  });
+
+  await suite.test("Activated DOM 实际含负数 id 的 queue 在 releaseDomChoice 前零 IPC", async (context) => {
+    const { panel } = await activatedPanel(context, PanelState, ipc);
+    const negative = { ...items()[0], id: -1, preview: "伪造负数队列项" };
+    panel.history = { ...panel.history, items: [negative, ...items()] };
+    panel.recentIds = [-1, ...items().map((item) => item.id)];
+    panel.stack = [negative, items()[0]];
+    keydown(panel, { key: "Enter", code: "Enter", ctrlKey: true, shiftKey: true });
+    assert.deepEqual(panel.pendingDom?.queueIds, [-1, 101], "确实构造了含负数 ID 的 queue 提交");
+    keyup(panel, { key: "Enter", code: "Enter", ctrlKey: true, shiftKey: true });
+    keyup(panel, { key: "Shift", code: "ShiftLeft", ctrlKey: true });
+    keyup(panel, { key: "Control", code: "ControlLeft" });
+    assert.deepEqual(ipc.calls, []);
+    assert.equal(panel.notice, "新手牌是说明，贴不出去");
+  });
 
   for (const action of actions) {
     await suite.test(`${action.name} 固定首次按下的条目和模式，等确认键及修饰键真实松开`, async (context) => {
@@ -502,7 +549,7 @@ test("Activated DOM 快速取用、焦点准备与自然搜索输入", async (su
     keyup(panel, { key: "Enter" });
     assert.deepEqual(ipc.calls, []);
     assert.equal(panel.busy, false);
-    assert.match(panel.message, /重新选择/);
+    assert.match(panel.message, /重选/);
     keydown(panel, { key: "Enter" });
     keyup(panel, { key: "Enter" });
     assert.deepEqual(ipc.calls, [{ command: "pasteItem", session: 37, id: 102, mode: "paste", selection: { revision: 4, nonce: 2 } }]);
@@ -548,7 +595,7 @@ test("Activated DOM 快速取用、焦点准备与自然搜索输入", async (su
     assert.equal(panel.searchStarting, false);
     assert.equal(panel.searchStartFailed, true);
     assert.equal(panel.interactive, false);
-    assert.match(panel.message, /重新呼出/);
+    assert.match(panel.message, /再呼出/);
   });
 
   await suite.test("Esc 撤销等待修饰键的选择，全部真实松键后只关闭", async (context) => {
@@ -622,6 +669,7 @@ async function createPanel(context, PanelState, ipc, options = {}) {
     restoreGlobals.push(() => { if (descriptor) Object.defineProperty(globalThis, name, descriptor); else delete globalThis[name]; });
   }
   ipc.reset();
+  if (options.rejectSubscription) ipc.rejectNextSubscription();
   const panel = new PanelState();
   let focusCalls = 0;
   let focusRefused = options.focusRefused === true;
@@ -629,11 +677,13 @@ async function createPanel(context, PanelState, ipc, options = {}) {
   const disconnect = panel.connect();
   context.after(() => { disconnect(); restoreGlobals.forEach((restore) => restore()); });
   await flush();
-  ipc.emit("shown", shown(options));
-  // 普通 quick 的夹具代表“搜索中”：搜索词非空，结果就是 searchItems（总是摊开）。
-  if (!options.interaction || options.interaction === "quick") { panel.mode = "search"; panel.query = "合成"; }
-  panel.searchItems = items();
-  panel.selected = 1;
+  if (!options.skipShown) {
+    ipc.emit("shown", shown(options));
+    // 普通 quick 的夹具代表“搜索中”：搜索词非空，结果就是 searchItems（总是摊开）。
+    if (!options.interaction || options.interaction === "quick") { panel.mode = "search"; panel.query = "合成"; }
+    panel.searchItems = items();
+    panel.selected = 1;
+  }
   assert.equal(panel.busy, false);
   return {
     panel, advance: (milliseconds) => { now += milliseconds; },
@@ -678,7 +728,7 @@ function beforeInput(panel, options = {}) {
 test("原生协调失败结束旧取用会话并保留关闭入口", async (suite) => {
   const { PanelState, ipc, cleanup } = await compilePanel();
   suite.after(cleanup);
-  const message = "剪贴板忙，本次未提交，请关闭面板后重新呼出";
+  const message = "剪贴板被别的程序占着，这次没贴。再呼出一次";
 
   await suite.test("busy不隐藏，终态拒绝全部迟到重开和取用，只留鼠标关闭", async (context) => {
     const { panel } = await activatedSearch(context, PanelState, ipc);
@@ -736,7 +786,7 @@ test("原生协调失败结束旧取用会话并保留关闭入口", async (suit
     ipc.emit("hidden", { session: 37 });
     pending.resolve(); await flush();
     assert.equal(panel.visible, false);
-    assert.doesNotMatch(panel.message, /剪贴板忙/);
+    assert.doesNotMatch(panel.message, /剪贴板被别的程序占着/);
     ipc.emit("shown", shown({ session: 38 }));
     ipc.emit("error", { session: 37, message, close_only: true });
     ipc.emit("hidden", { session: 37 });
@@ -884,7 +934,7 @@ test("搜索选择快照与受限激活交互的反例", async (suite) => {
     await panel.choose(1, "paste", event);
     assert.deepEqual(ipc.calls, []);
     assert.equal(panel.busy, false);
-    assert.match(panel.message, /重新选择|重试/);
+    assert.match(panel.message, /重选/);
     await panel.choose(1, "paste", click());
     assert.deepEqual(ipc.calls, [expected({ selection: { revision: 4, nonce: 1 } })]);
   });
@@ -960,7 +1010,7 @@ test("搜索选择快照与受限激活交互的反例", async (suite) => {
       ipc.emit("foreground-revision", { session: 37, revision });
       keydown(panel, { key: "Enter" });
       assert.deepEqual(ipc.calls, []);
-      assert.match(panel.message, /重新呼出/);
+      assert.match(panel.message, /再呼出/);
       advance(1);
       ipc.emit("foreground-revision", { session: 37, revision: 4 });
       keydown(panel, { key: "Enter" });
@@ -1085,12 +1135,12 @@ test("搜索选择快照与受限激活交互的反例", async (suite) => {
 
   await suite.test("被动提示移除全部取用和搜索入口，迟到 activated 不能重新打开", async (context) => {
     const { panel } = await createPanel(context, PanelState, ipc);
-    ipc.emit("paste-result", pasteResult({ hint_dwell_ms: 3000, hint_message: "已复制，请点击目标输入位置后按 Ctrl+V" }));
+    ipc.emit("paste-result", pasteResult({ hint_dwell_ms: 3000, hint_message: "已复制。点一下要贴的地方，再按 Ctrl+V" }));
     assert.equal(panel.interaction, "passive");
     assert.equal(panel.filtered.length, 0);
     assert.equal(panel.locked, true);
     assert.equal(panel.busy, true);
-    assert.equal(panel.message, "已复制，请点击目标输入位置后按 Ctrl+V");
+    assert.equal(panel.message, "已复制。点一下要贴的地方，再按 Ctrl+V");
     ipc.emit("interaction", { session: 37, interaction: "activated" });
     ipc.emit("interaction", { session: 37, interaction: "passive" });
     await ipc.emit("mode", { session: 37, mode: "search" });
@@ -1099,7 +1149,7 @@ test("搜索选择快照与受限激活交互的反例", async (suite) => {
     await panel.choose(1, "paste", click());
     panel.searchPointer({ preventDefault() {} });
     assert.equal(panel.interaction, "passive");
-    assert.equal(panel.message, "已复制，请点击目标输入位置后按 Ctrl+V");
+    assert.equal(panel.message, "已复制。点一下要贴的地方，再按 Ctrl+V");
     assert.deepEqual(ipc.calls, []);
     panel.close();
     assert.deepEqual(ipc.calls, [{ command: "hidePanel", session: 37 }]);
@@ -1111,7 +1161,7 @@ test("搜索选择快照与受限激活交互的反例", async (suite) => {
     assert.equal(panel.interaction, "passive");
     assert.equal(panel.busy, true);
     assert.equal(panel.locked, true);
-    assert.equal(panel.message, "粘贴结果未确认，请先检查目标，避免重复粘贴");
+    assert.equal(panel.message, "不确定贴上没有，先看一眼，别贴两遍");
     assert.doesNotMatch(panel.message, /已复制|Ctrl\+V|已粘贴/);
     keydown(panel, { key: "Enter" });
     keyup(panel, { key: "Enter" });
@@ -1126,14 +1176,14 @@ test("搜索选择快照与受限激活交互的反例", async (suite) => {
     ipc.emit("paste-result", pasteResult({ hint_dwell_ms: 3000 }));
     assert.match(panel.message, /已复制/);
     assert.doesNotMatch(panel.message, /管理员/);
-    assert.match(panel.message, /点击目标输入位置/);
+    assert.match(panel.message, /点一下要贴的地方/);
   });
 
   await suite.test("已确认的被动提示不被迟到同会话 IPC 失败或错误事件覆盖", async (context) => {
     const { panel } = await createPanel(context, PanelState, ipc);
     const pending = ipc.deferNextPaste();
     keydown(panel, { key: "Enter" });
-    const hint = "已复制，请点击目标输入位置后按 Ctrl+V";
+    const hint = "已复制。点一下要贴的地方，再按 Ctrl+V";
     ipc.emit("paste-result", pasteResult({ hint_dwell_ms: 3000, hint_message: hint }));
     pending.reject(new Error("迟到的 IPC 失败"));
     await flush();
@@ -1221,7 +1271,7 @@ test("普通 Quick 的 Tab 与 Esc 浮层分层键位", async (suite) => {
     ipc.emit("key", { session: 37, key: "Ctrl+C" });
     await flush();
     assert.deepEqual(ipc.calls, []);
-    assert.match(panel.message, /先用鼠标选中/);
+    assert.match(panel.message, /先选中要复制的字/);
     selected = "选中的字😀";
     ipc.emit("key", { session: 37, key: "Ctrl+C" });
     await flush();
@@ -1322,7 +1372,7 @@ test("交互优化：收藏不占槽位、本次呼出不挪位置、删除可�
     ipc.store.undoable = null;
     ipc.emit("key", { session: 37, key: "Ctrl+Z" });
     await flush();
-    assert.match(panel.message, /没有可以撤销/);
+    assert.match(panel.message, /没有能撤销的/);
   });
 
   await suite.test("收藏的要按住 Delete：按满才删，提前松开或移开选择都取消", async (context) => {
@@ -1461,9 +1511,9 @@ test("交互优化：收藏不占槽位、本次呼出不挪位置、删除可�
     ipc.emit("paste-result", pasteResult({ paste_result: "confirmed", reason: null, layer3: { conclusion: "confirmed" } }));
     assert.equal(panel.message, "");
     ipc.emit("paste-result", pasteResult({ paste_result: "sent", reason: null, layer2: { timed_out: true } }));
-    assert.match(panel.message, /可能没收到/);
+    assert.equal(panel.message, "贴了，但那边可能没收到");
     ipc.emit("paste-result", pasteResult({ paste_result: "confirmed", reason: null, as_text: { error: "x" } }));
-    assert.match(panel.message, /转文字失败/);
+    assert.equal(panel.message, "没能转成纯文字，按原样贴了");
   });
 });
 
@@ -2041,7 +2091,7 @@ test("v10 前端审查：冻结手牌、当前页数字、一叠和边界保护"
     const { panel } = await createPanel(context, PanelState, ipc);
     panel.stack = [];
     ipc.emit("hidden", { session: 37, queue: true });
-    const stop = { session: 37, remaining: 0, total: 4, automatic: false, busy: false, error: "两分钟没有放牌，逐张放已停止；请重新选择剩余条目。", stopped: "idle_timeout", remaining_ids: [103, 999, 101] };
+    const stop = { session: 37, remaining: 0, total: 4, automatic: false, busy: false, error: "两分钟没粘贴，逐张放已停止。重新选择剩下的", stopped: "idle_timeout", remaining_ids: [103, 999, 101] };
     ipc.emit("queue", stop);
     ipc.emit("hidden", { session: 37 });
     assert.equal(panel.queue?.error, stop.error, "收起后小指示仍显示原因");
@@ -2217,4 +2267,244 @@ test("九种牌面判定与网址拆分（纯函数）", async (suite) => {
     assert.equal(cards.timeGroup(new Date(2026, 10, 1).getTime(), now), "更早");
     assert.equal(cards.relativeTime(new Date(2026, 10, 11, 14, 51).getTime(), now), "昨天 14:51");
   });
+});
+
+test("v11 HandCard 两处藏印与普通点击接线", () => {
+  const source = readFileSync(join(root, "src/lib/panel/HandCard.svelte"), "utf8");
+  assert.match(source, /<i class="seal" aria-label="收藏">藏<\/i>/);
+  assert.match(source, /<i class="sl">藏<\/i>/);
+  assert.doesNotMatch(source, /<i class="seal"[^>]*>常<\/i>|<i class="sl">常<\/i>/);
+  for (const name of ["seal", "sl"]) {
+    const rule = source.match(new RegExp(`\\.${name} \\{[^}]*\\}`))?.[0];
+    assert.ok(rule, `缺少 .${name} 规则`);
+    assert.match(rule, /width: 18px/);
+    assert.match(rule, /height: 18px/);
+    assert.match(rule, /border-radius: 4px/);
+    assert.match(rule, /background: var\(--hand-seal\)/);
+  }
+  // 本任务只换印面，不改变普通点击、拖动收尾和 Enter 的既有调用。
+  assert.match(source, /onclick=\{click\}/);
+  assert.match(source, /panel\.chooseByMouse\(index, event\)/);
+  assert.match(source, /void panel\.choose\(index, "paste", event\)/);
+});
+
+test("v11 D PanelState 用户提示与粘贴结果分支", async (suite) => {
+  const { PanelState, ipc, cleanup } = await compilePanel();
+  suite.after(cleanup);
+
+  for (const testCase of [
+    {
+      name: "权限更高的程序只复制",
+      payload: { hint_dwell_ms: 3000 },
+      detail: "那个程序权限更高，贴不进去。切过去按 Ctrl+V",
+      message: "已复制。点一下要贴的地方，再按 Ctrl+V",
+    },
+    {
+      name: "窗口变化只复制",
+      payload: { reason: "external_switch", hint_dwell_ms: 3000 },
+      detail: "窗口换了，怕贴错，只复制了。按 Ctrl+V 贴上",
+      message: "已复制。点一下要贴的地方，再按 Ctrl+V",
+    },
+    {
+      name: "位置可靠时按 Ctrl+V",
+      payload: { reason: "external_switch", hint_dwell_ms: 3000, hint_message: "已复制，按 Ctrl+V 贴上" },
+      detail: "已复制，按 Ctrl+V 贴上",
+      message: "已复制，按 Ctrl+V 贴上",
+    },
+  ]) {
+    await suite.test(testCase.name, async (context) => {
+      const { panel } = await createPanel(context, PanelState, ipc);
+      ipc.emit("paste-result", pasteResult(testCase.payload));
+      assert.equal(panel.feedback.title, "复制好了，没贴上");
+      assert.equal(panel.feedback.detail, testCase.detail);
+      assert.equal(panel.message, testCase.message);
+    });
+  }
+
+  await suite.test("原生未知结果不宣称只复制", async (context) => {
+    const { panel } = await createPanel(context, PanelState, ipc);
+    ipc.emit("paste-result", pasteResult({ paste_result: "native_submission_unknown" }));
+    assert.equal(panel.message, "不确定贴上没有，先看一眼，别贴两遍");
+  });
+
+  await suite.test("普通偏差结果逐句对应", async (context) => {
+    const { panel } = await createPanel(context, PanelState, ipc);
+    ipc.emit("paste-result", pasteResult({ paste_result: "sent", reason: null, layer2: { timed_out: true } }));
+    assert.equal(panel.message, "贴了，但那边可能没收到");
+    ipc.emit("paste-result", pasteResult({ paste_result: "confirmed", reason: null, as_text: { error: "x" } }));
+    assert.equal(panel.message, "没能转成纯文字，按原样贴了");
+    ipc.emit("paste-result", pasteResult({ reason: "external_switch" }));
+    assert.equal(panel.message, "已复制。点一下要贴的地方，再按 Ctrl+V");
+  });
+
+  for (const message of ["这张已经删了，没贴", "原文件不在了，没贴", "没读出这张，剪贴板没动", "没放进剪贴板，再试一次"]) {
+    await suite.test(`失败标题：${message}`, async (context) => {
+      const { panel } = await createPanel(context, PanelState, ipc);
+      ipc.emit("error", { session: 37, message, close_only: false });
+      assert.equal(panel.feedback.title, "没贴上");
+      assert.equal(panel.feedback.detail, message);
+    });
+  }
+
+  await suite.test("删除、撤销、常用与复制错误", async (context) => {
+    const { panel } = await createPanel(context, PanelState, ipc);
+    panel.mode = "quick";
+    ipc.store.favoriteMissing = true;
+    await panel.toggleFavorite(panel.currentItem.id);
+    assert.equal(panel.message, "这张已经不在了");
+    ipc.store.favoriteMissing = false;
+    ipc.rejectNextMutation();
+    await panel.toggleFavorite(panel.currentItem.id);
+    assert.equal(panel.message, "没设成收藏，再试一次");
+
+    ipc.store.deletable = false;
+    panel.pressDelete();
+    await flush();
+    assert.equal(panel.message, "这张已经不在了");
+    ipc.store.deletable = true;
+    ipc.rejectNextMutation();
+    panel.pressDelete();
+    await flush();
+    assert.equal(panel.message, "没删掉，再试一次");
+
+    ipc.store.undoable = null;
+    await panel.undoDelete();
+    assert.equal(panel.message, "没有能撤销的");
+    ipc.rejectNextMutation();
+    await panel.undoDelete();
+    assert.equal(panel.message, "没撤销成，再试一次");
+
+    const original = globalThis.window;
+    let selected = "";
+    globalThis.window = { ...(original ?? {}), getSelection: () => ({ toString: () => selected }) };
+    context.after(() => { globalThis.window = original; });
+    panel.previewOpen = true;
+    await panel.copySelection();
+    assert.equal(panel.message, "先选中要复制的字");
+    selected = "字";
+    ipc.rejectNextMutation();
+    await panel.copySelection();
+    assert.equal(panel.message, "没复制成，再试一次");
+  });
+
+  await suite.test("搜索、读取和通用命令错误", async (context) => {
+    const { panel } = await createPanel(context, PanelState, ipc);
+    ipc.rejectNextHistorySearch();
+    await panel.search("新词");
+    assert.equal(panel.message, "没搜成，再试一次");
+    ipc.rejectNextHistoryRead();
+    await panel.refreshRecordingStatus();
+    assert.equal(panel.message, "没读到，稍后再试");
+    panel.message = "";
+    ipc.rejectNextHistoryRead();
+    ipc.emit("history-changed", { session: 37 });
+    await flush();
+    assert.equal(panel.message, "没打开你记下的东西。收起再呼出试试");
+    panel.searchItems = items();
+    panel.selected = 1;
+    ipc.rejectNextPaste();
+    await panel.choose(1, "paste", click());
+    assert.equal(panel.message, "没做成，再试一次");
+  });
+
+  await suite.test("搜索切换和启动失败", async (context) => {
+    const { panel } = await activatedPanel(context, PanelState, ipc);
+    ipc.rejectNextSearch();
+    keydown(panel, { key: "/", code: "Slash" });
+    await flush();
+    assert.equal(panel.message, "没能开始搜，收起再呼出一次");
+  });
+
+  await suite.test("前端启动失败", async (context) => {
+    const { panel } = await createPanel(context, PanelState, ipc, { skipShown: true, rejectSubscription: true });
+    assert.equal(panel.message, "拈来没启动好。退出后重新打开");
+  });
+});
+
+// 无法在不启动真实应用的前提下实例化的 Svelte 与原生/Tauri 分支，逐句钉住实际渲染源。
+// 这不是禁用词反向断言：每一项都是应当出现的完整新文案。
+const v11CopySources = {
+  "src/lib/cards.ts": ['item.source || "来源不明"'],
+  "src/lib/panel/SearchBox.svelte": ['placeholder="搜文字和文件名"', '>拼完再搜</span>'],
+  "src/lib/panel/HandPanel.svelte": [
+    '没找到“${panel.query}”', '找到 <b>{panel.handSource.length}</b> 张 · 第 {panel.selected + 1} 张',
+    '第 <b>{panel.selected + 1}</b> 张，共 {panel.handSource.length} 张', '{head.count} 张',
+    '换个短点的词试试。按 Esc 回到全部。', '还没复制过东西', '粘贴对应一张', '上一张 / 下一张', '<b>＋</b>', '设为收藏', '取消收藏',
+  ],
+  "src/lib/panel/Footer.svelte": [
+    '>知道了</button>', '收藏的要按住 {panel.holdDelete.keys} 才删',
+    '<span class="undo-text">已放进回收站 ·</span>',
+  ],
+  "src/lib/panel/Panel.svelte": [
+    '这次没贴。收起再呼出一次', '没能开始搜，收起再呼出一次', '打字没反应？点一下这里',
+    '按键没反应？点一下这里', '>点这里继续</button>', '"稍等…"',
+  ],
+  "src/lib/panel/Preview.svelte": [
+    '没找到“${panel.query}”', '还没复制过东西', '复制点什么，它就出现在这里。',
+    '换个短点的词试试。按 Esc 回到全部。', '贴出去的是原来的色值',
+    '不会打开这个链接，贴出去的就是原网址', '先显示 {count(full.shown)} 字，往下滚看剩下的 {count(full.total - full.shown)} 字',
+    '这里只显示文字，不显示原来的格式', '（空白）', 'aria-label="连不上"', '>连不上</small>',
+    '原文件不在了，贴不了', '个不在了，只贴剩下的', '网络位置连不上，暂时不知道还在不在',
+    '只记文件在哪，不存文件本身', '有些格式没记下，这里只显示记下的部分',
+  ],
+  "src/lib/panel/HandCard.svelte": ['（空白）', '<span class="missing">不在了</span>'],
+  "src/lib/panel/RecordBanner.svelte": [
+    '"正在打开"', '已暂停，现在复制的不会记下', '正在打开，稍等', '存不进去了：',
+    '现在复制的，关掉拈来就没了', '暂时没在记录，正在自己恢复', '>再看看</button>',
+  ],
+  "src/lib/state.svelte.ts": [
+    '已复制。点一下要贴的地方，再按 Ctrl+V', '没读到，稍后再试', '这张已经不在了',
+    '没设成收藏，再试一次', '没删掉，再试一次', '没有能撤销的', '没撤销成，再试一次',
+    '先选中要复制的字', '没复制成，再试一次', 'title: "没贴上"', '没搜成，再试一次',
+    '没做成，再试一次', '松开就贴', '松开就收起', '松开就开始逐张放',
+    '窗口变了，请重选一张', '出了点岔子，收起再呼出一次', '正在复制…',
+    '没打开你记下的东西。收起再呼出试试', '拈来没启动好。退出后重新打开',
+    '不确定贴上没有，先看一眼，别贴两遍', '那个程序权限更高，贴不进去。切过去按 Ctrl+V',
+    '窗口换了，怕贴错，只复制了。按 Ctrl+V 贴上', 'title: "复制好了，没贴上"',
+    '贴了，但那边可能没收到', '没能转成纯文字，按原样贴了',
+  ],
+  "src-tauri/src/panel.rs": [
+    '没做成，再试一次', '已复制，按 Ctrl+V 贴上', '已复制。点一下要贴的地方，再按 Ctrl+V',
+    '那个程序权限更高，逐张放用不了。请一张一张粘贴', '请在搜索面板重新选择一张',
+    '选择期间窗口变了，请重选一张', '面板模式变了，请重选一张',
+    '没法确认剪贴板的变化，逐张放没开始。再试一次', '这张已经删了，没贴',
+    '原文件不在了，没贴', '没读出这张，剪贴板没动', '没放进剪贴板，再试一次',
+  ],
+  "src-tauri/src/platform/windows/paste.rs": ['json!("不确定贴上没有，先看一眼，别贴两遍")'],
+  "src-tauri/src/app.rs": ['ok_or("这张已经不在了")'],
+  "src-tauri/src/lib.rs": [
+    '设置没保存上，再试一次', '存东西的文件没打开，暂时不能使用存档',
+    '存档没生成，再试一次', '恢复没完成，再试一次', '文件对话框没完成，再试一次',
+    '没做成，再试一次', '没复制成，再试一次',
+  ],
+  "src-tauri/src/settings.rs": ['呼出键必须是字符串', '没保存上，还是原来的设置'],
+  "src-tauri/src/shortcut.rs": ['这个组合已经留给退出或调试，换一个', '未列出的系统组合也可能用不了'],
+  "src-tauri/src/history/backup.rs": [
+    '存东西的文件没打开，备份与导入暂时用不了', '没能统计备份内容，稍后再试',
+    '没导出成，现有数据没动', '没合并成，现有数据没动',
+  ],
+  "src-tauri/src/history/storage.rs": ['存东西的文件没打开，存储管理暂时用不了'],
+  "src-tauri/src/recovery.rs": ['已停止自动重启。详细信息在 {}'],
+};
+
+for (const [file, expected] of Object.entries(v11CopySources)) {
+  test(`v11 D 源码对照 ${file}`, () => {
+    const source = readFileSync(join(root, file), "utf8");
+    assert.deepEqual(expected.filter((text) => !source.includes(text)), []);
+  });
+}
+
+function handPanelBranch(className) {
+  const source = readFileSync(join(root, "src/lib/panel/HandPanel.svelte"), "utf8");
+  const match = source.match(new RegExp(`<div class="${className}"[\\s\\S]*?</div>`));
+  assert.ok(match, `缺少 ${className} 生产分支`);
+  return match[0];
+}
+
+test("v11 D HandPanel 摊开空白行使用精确说明", () => {
+  assert.ok(handPanelBranch("blank-row").includes(': "复制点什么，它就出现在这里。"'));
+});
+
+test("v11 D HandPanel 扇面空白卡使用精确说明", () => {
+  assert.ok(handPanelBranch("blank-card").includes('<strong>复制点什么，<br>它就出现在这里。</strong>'));
 });

@@ -13,7 +13,7 @@
   const STEPS: { id: BackupStep["id"]; label: string }[] = [
     { id: "manifest", label: "读取清单" },
     { id: "hashes", label: "核对文件" },
-    { id: "database", label: "检查历史库" },
+    { id: "database", label: "检查存东西的文件" },
   ];
 
   let phase = $state<"pick" | "checking" | "ready" | "failed" | "working" | "merged" | "restarting">("pick");
@@ -27,7 +27,7 @@
   let error = $state("");
   let armTimer: ReturnType<typeof setTimeout> | null = null;
 
-  const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, reducedMotion() ? 0 : ms));
+  const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, reducedMotion() || document.documentElement.dataset.motion === "none" ? 0 : ms));
 
   async function pick() {
     error = "";
@@ -108,7 +108,7 @@
   }
 </script>
 
-<p class="page-intro">{#if inspection}{inspection.file_name} · 导出于 {time(inspection.exported_ms)} · 来自 {inspection.app_version}{:else}选一个 .nianlai-backup 文件。导入前会先校验，校验没通过不会改动现在的任何数据。{/if}</p>
+<p class="page-intro">{#if inspection}{inspection.file_name} · 导出于 {time(inspection.exported_ms)} · 来自 {inspection.app_version}{:else}选一个 .nianlai-backup 文件。导入时会先检查，有问题就什么都不动。{/if}</p>
 
 {#if phase === "pick"}
   <div class="card">
@@ -135,7 +135,7 @@
   {#if phase === "failed"}
     <div class="card">
       <div class="setting">
-        <span class="setting-copy"><strong class="bad">校验没通过，没有改动任何数据</strong><small>换一个备份文件再试；如果文件是从别处拷来的，确认拷贝完整</small></span>
+        <span class="setting-copy"><strong class="bad">这个备份有问题，什么都没动</strong><small>换一个备份文件再试；如果文件是从别处拷来的，确认拷贝完整</small></span>
         <button type="button" onclick={reset}>换一个文件</button>
       </div>
     </div>
@@ -143,32 +143,32 @@
     <div class="choices" role="radiogroup" aria-label="导入方式">
       <button type="button" class="choice" role="radio" aria-checked={mode === "merge"} disabled={phase === "working"} onclick={() => { mode = "merge"; armed = false; }}>
         <span class="radio" aria-hidden="true"></span>
-        <span class="copy"><strong>合并</strong><small>把备份里有、现在没有的内容加进来；同样的内容只留一份。常用追加在现有常用后面。</small></span>
-        <span class="figure">{#if nothingNew}没有新内容{:else}新增 {count(inspection.merge?.new_items ?? 0)} 条{#if inspection.merge?.new_favorites} · 常用 +{count(inspection.merge.new_favorites)}{/if}{/if}</span>
+        <span class="copy"><strong>合并</strong><small>把备份里有、现在没有的内容加进来；同样的内容只留一份。收藏追加在现有收藏后面。</small></span>
+        <span class="figure">{#if nothingNew}没有新内容{:else}新增 {count(inspection.merge?.new_items ?? 0)} 张{#if inspection.merge?.new_favorites} · 收藏 +{count(inspection.merge.new_favorites)}{/if}{/if}</span>
       </button>
       <button type="button" class="choice" role="radio" aria-checked={mode === "overwrite"} disabled={phase === "working"} onclick={() => { mode = "overwrite"; }}>
         <span class="radio" aria-hidden="true"></span>
-        <span class="copy"><strong>覆盖</strong><small>用备份替换现在的全部历史。替换前先把当前历史另存成一份“恢复前”存档，然后拈来重启。</small></span>
-        <span class="figure">替换为 {count(inspection.overwrite?.items ?? 0)} 条</span>
+        <span class="copy"><strong>覆盖</strong><small>用备份替换现在的全部内容。替换前先把现在的另存成一份“回去之前”存档，然后拈来重新打开。</small></span>
+        <span class="figure">替换为 {count(inspection.overwrite?.items ?? 0)} 张</span>
       </button>
     </div>
     <div class="actions">
       {#if error}<span class="error inline" role="alert">{error}</span>{/if}
       <button type="button" disabled={phase === "working"} onclick={reset}>取消</button>
       <button type="button" class="primary" class:armed disabled={disabled || phase === "working" || (mode === "merge" && nothingNew)} title={mode === "merge" && nothingNew ? "备份里的内容这里都有了" : undefined} onclick={confirm}>
-        {#if phase === "working"}<span class="spinner" aria-hidden="true"></span>{mode === "merge" ? "正在合并…" : "正在准备…"}{:else if mode === "merge"}合并{:else if armed}确认覆盖并重启{:else}覆盖并重启{/if}
+        {#if phase === "working"}<span class="spinner" aria-hidden="true"></span>{mode === "merge" ? "正在合并…" : "正在准备…"}{:else if mode === "merge"}合并{:else if armed}再点一次，换成备份{:else}覆盖并重启{/if}
         {#if armed}<i class="countdown" aria-hidden="true"></i>{/if}
       </button>
     </div>
   {:else if phase === "merged" && result}
     <div class="card done" role="status">
       <div class="setting">
-        <span class="setting-copy"><strong>合并完成：新增 <span class="big"><RollingNumber value={shown} /></span> 条历史{result.added_favorites ? ` · 常用 +${result.added_favorites}` : ""}</strong><small>{result.added_items ? "新内容按原来的复制时间排进历史里" : "备份里的内容这里都有了，没有新增"}</small></span>
+        <span class="setting-copy"><strong>合并完成：新增 <span class="big"><RollingNumber value={shown} /></span> 张复制内容{result.added_favorites ? ` · 收藏 +${result.added_favorites}` : ""}</strong><small>{result.added_items ? "新内容按原来的复制时间排好" : "备份里的内容这里都有了，没有新增"}</small></span>
         <button type="button" onclick={reset}>再导入一个</button>
       </div>
     </div>
   {:else if phase === "restarting"}
-    <div class="card"><p class="note">已登记覆盖。{result?.auto_restart ? "拈来正在重启" : "拈来即将退出，请手动重新打开"}，之后历史就是备份里的内容；原来的历史另存成了“恢复前”存档，在“全部存档”里。</p></div>
+    <div class="card"><p class="note">已登记覆盖。{result?.auto_restart ? "拈来正在重新打开" : "拈来即将退出，请手动重新打开"}，之后就是备份里的内容；原来的另存成了“回去之前”存档，在“全部存档”里。</p></div>
   {/if}
 {/if}
 
@@ -177,7 +177,7 @@
   .step { display: grid; grid-template-columns: 18px 88px minmax(0, 1fr); align-items: center; gap: 10px; min-height: 36px; padding: 0 16px; font-size: 12px; }
   .step + .step { border-top: 1px solid var(--settings-line); }
   .step.waiting { opacity: .45; }
-  .step small { color: var(--settings-muted); font-size: 11px; }
+  .step small { color: var(--settings-muted); font-size: 12px; }
   .step.failed small, .step.failed strong { color: var(--state-critical); }
   .mark { width: 16px; height: 16px; display: grid; place-items: center; color: var(--settings-accent); }
   .step.failed .mark { color: var(--state-critical); }
@@ -192,10 +192,10 @@
   .choice[aria-checked="true"] .radio { border-color: var(--settings-accent); box-shadow: inset 0 0 0 2.5px var(--settings-card), inset 0 0 0 6px var(--settings-accent); }
   .copy { display: grid; gap: 4px; }
   .copy strong { font-size: 13px; }
-  .copy small { color: var(--settings-muted); font-size: 11px; line-height: 1.6; }
+  .copy small { color: var(--settings-muted); font-size: 12px; line-height: 1.6; }
   .figure { color: var(--settings-text); font: 600 12px var(--font-mono); white-space: nowrap; }
   .actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
-  button { position: relative; min-height: 28px; flex: none; display: inline-flex; align-items: center; gap: 6px; overflow: hidden; padding: 3px 12px; border: 1px solid var(--settings-line); border-radius: var(--radius-sm); background: var(--settings-selected); font-size: 11px; white-space: nowrap; }
+  button { position: relative; min-height: 28px; flex: none; display: inline-flex; align-items: center; gap: 6px; overflow: hidden; padding: 3px 12px; border: 1px solid var(--settings-line); border-radius: var(--radius-sm); background: var(--settings-selected); font-size: 12px; white-space: nowrap; }
   button.primary { border-color: var(--settings-accent); color: var(--settings-accent); font-weight: 600; }
   button.primary.armed { border-color: var(--state-caution); color: var(--state-caution); }
   button:disabled { opacity: .6; }
@@ -203,10 +203,12 @@
   @keyframes shrink { to { transform: scaleX(0); } }
   .bad { color: var(--state-critical); }
   .done { animation: rise 260ms ease-out; }
-  .big { display: inline-block; color: var(--settings-accent); font: 700 16px var(--font-mono); }
-  .note { margin: 0; padding: 14px 16px; color: var(--settings-muted); font-size: 11px; line-height: 1.6; }
-  .error { margin: 0; padding: 10px 16px; color: var(--state-critical); font-size: 11px; }
+  .big { display: inline-block; color: var(--settings-accent); font: 700 20px var(--font-mono); }
+  .note { margin: 0; padding: 14px 16px; color: var(--settings-muted); font-size: 12px; line-height: 1.6; }
+  .error { margin: 0; padding: 10px 16px; color: var(--state-critical); font-size: 12px; }
   .error.inline { padding: 0; margin-right: auto; }
-  :global(html[data-reduce-motion="true"]) .cross { animation: none; stroke-dashoffset: 0; }
-  :global(html[data-reduce-motion="true"]) .choices, :global(html[data-reduce-motion="true"]) .done, :global(html[data-reduce-motion="true"]) .countdown { animation: none; }
+  :global(html[data-motion="none"]) .cross, :global(html[data-reduce-motion="true"]) .cross { animation: none; stroke-dashoffset: 0; }
+  :global(html[data-motion="none"]) .choices, :global(html[data-reduce-motion="true"]) .choices,
+  :global(html[data-motion="none"]) .done, :global(html[data-reduce-motion="true"]) .done,
+  :global(html[data-motion="none"]) .countdown, :global(html[data-reduce-motion="true"]) .countdown { animation: none; }
 </style>

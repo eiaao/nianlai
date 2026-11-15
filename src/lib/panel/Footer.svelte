@@ -11,22 +11,22 @@
       <div class="result" class:copied={panel.feedback.kind === "copied"} class:failed={panel.feedback.kind === "failed"} role="status" aria-live="polite">
         <i class="result-line" class:animated={panel.motion !== "none"} style={`animation-duration: ${panel.feedback.duration}ms`}></i>
         <div class="result-copy"><strong>{panel.feedback.title}</strong><small>{panel.feedback.detail}</small></div>
-        {#if panel.interaction === "passive"}<button type="button" tabindex="-1" onpointerdown={(event) => event.preventDefault()} onclick={panel.close}>关闭提示</button>{/if}
+        {#if panel.interaction === "passive"}<button type="button" tabindex="-1" onpointerdown={(event) => event.preventDefault()} onclick={panel.close}>知道了</button>{/if}
       </div>
     {/key}
   {:else if panel.interaction === "passive"}
     <span class="line">{panel.message}</span>
-    <button type="button" tabindex="-1" onpointerdown={(event) => event.preventDefault()} onclick={panel.close}>关闭提示</button>
+    <button type="button" tabindex="-1" onpointerdown={(event) => event.preventDefault()} onclick={panel.close}>知道了</button>
   {:else if panel.message}
     <p class="line message" role="status">{panel.message}</p>
   {:else if panel.holdDelete?.phase === "hint"}
-    <span class="line" role="status">常用的要按住 {panel.holdDelete.keys} 才会删除</span>
+    <span class="line" role="status">收藏的要按住 {panel.holdDelete.keys} 才删</span>
   {:else if panel.notice}
     <span class="line" role="status" aria-live="polite">{panel.notice}</span>
   {:else if panel.undo}
     {#key panel.undo.startedAt}
       <span class="undo" role="status" aria-live="polite">
-        <span class="undo-text">已放进回收站<span class="undo-label">「{panel.undo.label}」</span></span>
+        <span class="undo-text">已放进回收站 ·</span>
         <button type="button" tabindex="-1" onpointerdown={(event) => event.preventDefault()} onclick={() => { void panel.undoDelete(); }}>撤销</button><kbd>Ctrl+Z</kbd>
         <i class="undo-progress" style={`animation-duration: ${panel.undo.duration}ms`}></i>
       </span>
@@ -49,7 +49,6 @@
   button { flex: none; margin-left: auto; padding: 2px 0 2px 8px; border: 0; background: transparent; color: inherit; text-decoration: underline; font-size: 12px; }
   .undo { position: relative; min-width: 0; display: inline-flex; align-items: center; gap: 6px; padding: 4px 0; overflow: hidden; }
   .undo-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-  .undo-label { color: var(--hand-ink-3); }
   .undo button { margin-left: 2px; padding: 0; color: var(--hand-ink); font-weight: 600; }
   kbd { color: var(--hand-ink-3); font: 12px/1 var(--font-ui); }
   .undo-progress { position: absolute; left: 0; bottom: 0; width: 100%; height: 2px; background: currentColor; opacity: .5; transform-origin: left; animation-name: countdown; animation-timing-function: linear; animation-fill-mode: forwards; }

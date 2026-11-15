@@ -1,8 +1,10 @@
 <script lang="ts">
   // “数据与备份”分区（M2-3 / M2-D）：占用 → 垃圾清理 → 回收站 → 快照 → 备份。
   // 回收站、全部快照、手动挑选截图是这一页的子页面，由 view 切换；面板里的回收站入口直接跳到 trash。
+  import { onDestroy } from "svelte";
   import * as ipc from "../lib/ipc";
   import TrashSection from "./TrashSection.svelte";
+  import TrashFan from "./TrashFan.svelte";
   import SnapshotSection from "./SnapshotSection.svelte";
   import ImagePicker from "./ImagePicker.svelte";
   import BackupExport from "./BackupExport.svelte";
@@ -24,13 +26,17 @@
   let overview = $state<StorageOverview | null>(null);
   let snapshots = $state<SnapshotState | null>(null);
   let loadError = $state("");
+  let loadGeneration = 0;
+  let disposed = false;
   let busy = $state("");
   // 清理后“+N”飞向回收站那一行；落下时回收站的数字弹一下，再刷新数字让它们滚过去。
   let trashTarget = $state<HTMLElement>();
   let trashNumber = $state<ReturnType<typeof RollingNumber>>();
+  let trashFan = $state<ReturnType<typeof TrashFan>>();
   function landed() {
     trashNumber?.bump();
     void load();
+    void trashFan?.reload();
   }
   let imageRange = $state<"30" | "90" | "all">("30");
   let notices = $state<Record<string, string>>({});
@@ -39,8 +45,8 @@
   const TITLES: Record<StorageView, string> = { main: "", trash: "回收站", snapshots: "全部存档", images: "截图类图片", export: "导出备份", import: "导入备份" };
   // 占比色只用现有的强调色和状态色。
   const SEGMENTS = [
-    { key: "文本", label: "文本", tone: "text" },
-    { key: "富文本", label: "富文本", tone: "rich" },
+    { key: "文本", label: "文字", tone: "text" },
+    { key: "富文本", label: "带格式的文字", tone: "rich" },
     { key: "图片", label: "图片", tone: "image" },
     { key: "文件", label: "文件（只存路径）", tone: "file" },
   ];
@@ -71,14 +77,23 @@
   const compactNeeds = $derived(overview ? overview.database_bytes + overview.database_bytes / 10 + 16 * 1024 * 1024 : 0);
   const compactBlocked = $derived(!!overview && overview.free_bytes !== null && overview.free_bytes < compactNeeds);
 
-  async function load() {
+  // 初始 view effect、清理、恢复和各子页刷新共用代次；旧请求的任一半都不能提交。
+  async function load(propagateError = false) {
+    const request = ++loadGeneration;
     try {
-      [overview, snapshots] = await Promise.all([ipc.getStorage(), ipc.getSnapshots()]);
+      const [nextOverview, nextSnapshots] = await Promise.all([ipc.getStorage(), ipc.getSnapshots()]);
+      if (disposed || request !== loadGeneration) return;
+      overview = nextOverview;
+      snapshots = nextSnapshots;
       loadError = "";
     } catch (error) {
+      // 过期的 load(true) 也按成功结束，调用方不能据此显示过期的“占用没刷新”。
+      if (disposed || request !== loadGeneration) return;
       loadError = message(error);
+      if (propagateError) throw error;
     }
   }
+  onDestroy(() => { disposed = true; loadGeneration += 1; });
   // 打开时和从子页面回来时刷新数字。
   $effect(() => { if (view === "main") void load(); });
 
@@ -113,13 +128,13 @@
       <ImagePicker {disabled} onchange={() => { void load(); }} />
     {/if}
   {:else}
-    <div><h2>数据与备份</h2><p class="page-intro">拈来的数据都存在这台电脑上。文件类条目只记路径，不复制文件本身；截图、浏览器里复制的图片没有源文件，存在历史库里。这里不会自动删除任何东西。</p></div>
+    <div><h2>数据与备份</h2><p class="page-intro">东西都存在这台电脑上。这里不会自己删东西。文件只记在哪，不存文件本身；截图和浏览器里复制的图片存在拈来里。</p></div>
 
     {#if snapshots?.restored}
       {#if snapshots.restored.error}
-        <p class="banner error">{snapshots.restored.kind === "import" ? "上次用备份覆盖没有成功" : "上次恢复没有成功"}，历史保持原样。</p>
+        <p class="banner error">{snapshots.restored.kind === "import" ? "上次用备份覆盖没有成功" : "上次没回去成"}，东西都还在。</p>
       {:else}
-        <p class="banner">{snapshots.restored.kind === "import" ? "已用备份覆盖了历史。" : "已恢复到所选存档。"}恢复前的历史另存成了“恢复前”存档{restoredItem ? `（${time(restoredItem.created_ms)}）` : ""}，需要时可以在“全部存档”里恢复回去。</p>
+        <p class="banner">{snapshots.restored.kind === "import" ? "已换成备份里的内容。" : "已回到所选存档。"}回去之前的内容另存成了“回去之前”存档{restoredItem ? `（${time(restoredItem.created_ms)}）` : ""}，需要时可以在“全部存档”里再回去。</p>
       {/if}
     {/if}
     {#if loadError}<p class="banner error">{loadError}</p>{/if}
@@ -128,7 +143,7 @@
       {#if !overview}
         <p class="note">正在统计…</p>
       {:else}
-        <div class="usage-top"><strong>{size(total)}</strong><span>历史库 {size(overview.database_bytes)} · 存档 {size(overview.snapshots.bytes)}{overview.exports.bytes + overview.leftovers.bytes ? ` · 临时文件 ${size(overview.exports.bytes + overview.leftovers.bytes)}` : ""}</span></div>
+        <div class="usage-top"><strong>{size(total)}</strong><span>存东西的文件 {size(overview.database_bytes)} · 存档 {size(overview.snapshots.bytes)}{overview.exports.bytes + overview.leftovers.bytes ? ` · 临时文件 ${size(overview.exports.bytes + overview.leftovers.bytes)}` : ""}</span></div>
         <div class="meter" aria-hidden="true">{#each parts as part}{#if part.bytes}<i class={part.tone} style={`width:${(part.bytes / partsTotal) * 100}%`}></i>{/if}{/each}</div>
         <div class="legend">
           {#each kinds as kind}
@@ -141,9 +156,9 @@
       {/if}
     </div></div>
 
-    <div class="group"><span class="group-title split">垃圾清理<em>清理的条目先进回收站，7 天内可以恢复；常用的不会被清理</em></span><div class="card">
+    <div class="group"><span class="group-title split">整理空间<em>清掉的先进回收站，7 天内能拿回来；收藏不会被清</em></span><div class="card">
       <div class="setting">
-        <span class="setting-copy"><strong>失效的文件条目</strong><small>原文件已移走或删除的条目。{overview?.files.checked_ms ? `上次检查：${shortTime(overview.files.checked_ms)}` : "还没检查过"}{overview?.files.partial ? `；另有 ${overview.files.partial} 条部分失效，其余文件还能用，不清理` : ""}</small>
+        <span class="setting-copy"><strong>原文件已经不在的</strong><small>文件被挪走或删了，这些贴不出去。{overview?.files.checked_ms ? `上次检查：${shortTime(overview.files.checked_ms)}` : "还没检查过"}{overview?.files.partial ? `；另有 ${overview.files.partial} 张部分失效，其余文件还能用，不清` : ""}</small>
           {#if notices.missing}<small class="ok">{notices.missing}</small>{/if}{#if errors.missing}<small class="error">{errors.missing}</small>{/if}</span>
         <span class="num"><RollingNumber value={overview?.files.missing ?? 0} /> 条</span>
         <button type="button" class="ghost" disabled={!!busy || disabled || !overview} onclick={() => act("missing", async () => { await ipc.checkFiles(); return "检查完了"; })}>{busy === "missing" ? "正在检查…" : "重新检查"}</button>
@@ -152,7 +167,7 @@
       </div>
 
       <div class="setting">
-        <span class="setting-copy"><strong>截图类图片</strong><small>没有源文件、存在历史库里的图片，共 {count(overview?.images.all.count ?? 0)} 张 · {size(overview?.images.all.bytes ?? 0)}</small>
+        <span class="setting-copy"><strong>截图类图片</strong><small>没有原文件、存在拈来里的图片，共 {count(overview?.images.all.count ?? 0)} 张 · {size(overview?.images.all.bytes ?? 0)}</small>
           {#if notices.images}<small class="ok">{notices.images}</small>{/if}{#if errors.images}<small class="error">{errors.images}</small>{/if}</span>
         <select bind:value={imageRange} disabled={!overview}>
           <option value="30">30 天前的（{count(overview?.images.older_30.count ?? 0)} 张 · {size(overview?.images.older_30.bytes ?? 0)}）</option>
@@ -173,7 +188,7 @@
 
       {#if overview?.leftovers.count}
         <div class="setting">
-          <span class="setting-copy"><strong>恢复时留下的旧库副本</strong><small>从存档恢复时，原来的历史库另存了一份；确认恢复后的历史没问题就可以删除</small>
+          <span class="setting-copy"><strong>恢复时留下的旧副本</strong><small>回到某天的存档时，原来的内容另存了一份；确认现在的内容没问题就可以删除</small>
             {#if errors.leftovers}<small class="error">{errors.leftovers}</small>{/if}</span>
           <span class="num">{count(overview.leftovers.count)} 个<small>{size(overview.leftovers.bytes)}</small></span>
           <button type="button" disabled={!!busy || disabled} onclick={() => act("leftovers", async () => { const removed = await ipc.cleanLeftovers(); return `已删除 ${removed.count} 个`; })}>删除</button>
@@ -181,30 +196,30 @@
       {/if}
 
       <div class="setting">
-        <span class="setting-copy"><strong>压缩历史库</strong><small>{compactBlocked ? `磁盘剩余空间不够：压缩需要约 ${size(compactNeeds)}` : `删除过的内容占的空间要压缩后才还给磁盘。需要约 ${size(compactNeeds)} 剩余空间，期间暂停记录几秒`}</small>
+        <span class="setting-copy"><strong>把空出来的地方还给磁盘</strong><small>{compactBlocked ? `磁盘剩余空间不够：需要约 ${size(compactNeeds)}` : `删过的东西还占着地方。需要约 ${size(compactNeeds)} 剩余空间，要几秒，这几秒复制的不记`}</small>
           {#if notices.compact}<small class="ok">{notices.compact}</small>{/if}{#if errors.compact}<small class="error">{errors.compact}</small>{/if}</span>
-        <span class="num">约 {size(overview?.reclaimable_bytes ?? 0)}<small>可回收</small></span>
-        <button type="button" disabled={!!busy || disabled || !overview || compactBlocked} onclick={() => act("compact", async () => `已压缩，省下 ${size(await ipc.compactHistory())}`)}>{busy === "compact" ? "正在压缩…" : "压缩"}</button>
+        <span class="num">约 {size(overview?.reclaimable_bytes ?? 0)}<small>可还给磁盘</small></span>
+        <button type="button" disabled={!!busy || disabled || !overview || compactBlocked} onclick={() => act("compact", async () => `已收拾好，省下 ${size(await ipc.compactHistory())}`)}>{busy === "compact" ? "正在收拾…" : "收拾"}</button>
       </div>
     </div></div>
 
-    <div class="group"><span class="group-title split">回收站<em>保留 7 天</em></span><div class="card">
+    <div class="group"><span class="group-title split">回收站<em>保留 7 天</em></span><div class="card trash-card-wrap">
+      <div class="setting trash-summary">
+        <span class="setting-copy"><strong><span class="trash-count" bind:this={trashTarget}><RollingNumber bind:this={trashNumber} value={overview?.trashed.count ?? 0} /></span> 张</strong><small>完整列表里也能拿回；彻底删除和清空只在那里做。</small></span>
+      </div>
+      <TrashFan bind:this={trashFan} {disabled} onchange={() => load(true)} onviewall={() => { view = "trash"; }} />
+    </div></div>
+
+    <div class="group"><span class="group-title split">每天自动存档<em>留最近 {snapshots?.keep ?? 7} 份 · 最多 {limitLabel(maxMb)}</em></span><div class="card">
       <div class="setting">
-        <span class="setting-copy"><strong><span class="trash-count" bind:this={trashTarget}><RollingNumber bind:this={trashNumber} value={overview?.trashed.count ?? 0} /></span> 条</strong><small>删除和清理的条目先放在这里，7 天后彻底删除。面板页脚的“回收站”也能打开这里</small></span>
-        <button type="button" onclick={() => { view = "trash"; }}>查看</button>
+        <span class="setting-copy"><strong>{latestSnapshot ? `最近一份：${shortTime(latestSnapshot.created_ms)}` : "还没有存档"}</strong><small>{snapshots?.items.length ?? 0} 份，共 {size(overview?.snapshots.bytes ?? 0)}。出了问题，可以回到其中任何一天</small></span>
+        <button type="button" onclick={() => { view = "snapshots"; }}>查看存档</button>
       </div>
     </div></div>
 
-    <div class="group"><span class="group-title split">自动存档<em>保留 {snapshots?.keep ?? 7} 份 · 上限 {limitLabel(maxMb)}</em></span><div class="card">
+    <div class="group"><span class="group-title split">备份<em>换电脑前导出一份</em></span><div class="card">
       <div class="setting">
-        <span class="setting-copy"><strong>{latestSnapshot ? `最近一份：${shortTime(latestSnapshot.created_ms)}` : "还没有存档"}</strong><small>{snapshots?.items.length ?? 0} 份，共 {size(overview?.snapshots.bytes ?? 0)}。出问题时可以把历史恢复到其中任何一份</small></span>
-        <button type="button" onclick={() => { view = "snapshots"; }}>全部存档</button>
-      </div>
-    </div></div>
-
-    <div class="group"><span class="group-title split">备份<em>换电脑或重装前导出一份</em></span><div class="card">
-      <div class="setting">
-        <span class="setting-copy"><strong>导出 / 导入备份</strong><small>历史库、来源图标和清单打成一个文件，不加密；导入前先校验，可以合并或覆盖</small></span>
+        <span class="setting-copy"><strong>导出 / 导入备份</strong><small>文件没加密，里面有你复制过的东西，放在自己信得过的地方。导入时会先检查，有问题就什么都不动。</small></span>
         <button type="button" onclick={() => { view = "export"; }}>导出…</button><button type="button" onclick={() => { view = "import"; }}>导入…</button>
       </div>
     </div></div>
@@ -214,23 +229,23 @@
 <style>
   .crumb { display: grid; gap: 4px; }
   .crumb h2 { margin: 0; }
-  .back { justify-self: start; min-height: 0; padding: 0; border: 0; background: transparent; color: var(--settings-accent); font-size: 11px; }
-  .banner { margin: 0; padding: 10px 14px; border: 1px solid var(--settings-accent); border-radius: var(--radius-sm); background: var(--settings-selected); font-size: 11px; line-height: 1.6; }
+  .back { justify-self: start; min-height: 0; padding: 0; border: 0; background: transparent; color: var(--settings-accent); font-size: 12px; }
+  .banner { margin: 0; padding: 10px 14px; border: 1px solid var(--settings-accent); border-radius: var(--radius-sm); background: var(--settings-selected); font-size: 12px; line-height: 1.6; }
   .banner.error { border-color: var(--state-critical); color: var(--state-critical); }
   .split { display: flex; justify-content: space-between; gap: 12px; }
-  .split em { font-style: normal; font-weight: 400; font-size: 10px; letter-spacing: 0; }
-  .note { margin: 0; color: var(--settings-muted); font-size: 11px; }
+  .split em { font-style: normal; font-weight: 400; font-size: 12px; letter-spacing: 0; }
+  .note { margin: 0; color: var(--settings-muted); font-size: 12px; }
   .usage { display: grid; gap: 12px; padding: 16px; }
   .usage-top { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
   .usage-top strong { font: 600 20px var(--font-ui); }
-  .usage-top span { color: var(--settings-muted); font-size: 11px; text-align: right; }
+  .usage-top span { color: var(--settings-muted); font-size: 12px; text-align: right; }
   .meter { height: 10px; display: flex; overflow: hidden; border-radius: var(--radius-sm); background: var(--settings-selected); }
   .meter i { display: block; height: 100%; min-width: 2px; }
-  .legend { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px 14px; font-size: 11px; }
+  .legend { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px 14px; font-size: 12px; }
   .legend div { display: grid; grid-template-columns: 10px minmax(0, 1fr); column-gap: 7px; align-items: center; }
   .legend i { width: 10px; height: 10px; border-radius: var(--radius-sm); }
   .legend b { font-weight: 600; }
-  .legend small { grid-column: 2; color: var(--settings-muted); font-size: 10px; }
+  .legend small { grid-column: 2; color: var(--settings-muted); font-size: 12px; }
   .text { background: var(--settings-accent); }
   .rich { background: color-mix(in srgb, var(--settings-accent) 55%, var(--settings-card)); }
   .image { background: var(--state-caution); }
@@ -239,11 +254,11 @@
   .snap { background: color-mix(in srgb, var(--settings-muted) 45%, var(--settings-card)); }
   .temp { background: var(--state-critical); }
   .num { min-width: 70px; color: var(--settings-text); font: 600 13px var(--font-mono); text-align: right; white-space: nowrap; }
-  .num small { display: block; color: var(--settings-muted); font: 10px var(--font-ui); }
+  .num small { display: block; color: var(--settings-muted); font: 12px var(--font-ui); }
   .setting-copy small.ok { color: var(--settings-accent); }
   .setting-copy small.error { color: var(--state-critical); }
   .setting select { min-width: 0; max-width: 220px; }
-  button { min-height: 28px; flex: none; padding: 3px 12px; border: 1px solid var(--settings-line); border-radius: var(--radius-sm); background: var(--settings-selected); font-size: 11px; white-space: nowrap; }
+  button { min-height: 28px; flex: none; padding: 3px 12px; border: 1px solid var(--settings-line); border-radius: var(--radius-sm); background: var(--settings-selected); font-size: 12px; white-space: nowrap; }
   button.ghost { background: transparent; }
   button:disabled { opacity: .6; }
   .trash-count { display: inline-block; }
