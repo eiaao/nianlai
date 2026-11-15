@@ -141,7 +141,7 @@
     </div>
   {:else}
     <div class="preview-eyebrow">
-      <span>{item.guide_id ? "新手牌 · Delete 扔掉" : `${sourceName(item)} · ${relativeTime(item.copied_ms)}`}</span>
+      <span>{item.action ? "操作 · ↵ 执行" : item.guide_id ? "新手牌 · Delete 扔掉" : `${sourceName(item)} · ${relativeTime(item.copied_ms)}`}</span>
     </div>
     {#if item.favorite && (item.title || item.note)}
       <!-- M2-6：常用的标题和备注在设置“整理”页里编辑，这里只显示。 -->
@@ -151,7 +151,10 @@
       </div>
     {/if}
 
-    {#if item.guide_id}
+    {#if item.action}
+      <h2 class="preview-title">{item.title}</h2>
+      <p class="preview-text">{item.preview}</p>
+    {:else if item.guide_id}
       <h2 class="preview-title">{item.title}</h2>
       <p class="preview-text">{guideText}</p>
       <p class="preview-note">新手牌是说明，贴不出去</p>

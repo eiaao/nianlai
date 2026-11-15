@@ -6,6 +6,7 @@
   import type { PanelState } from "../state.svelte";
   import { type Box, type CardKind, colorValue, fileExt, firstLine, imageSize, KIND_NAME, linkParts, mailParts, relativeTime, sourceName } from "../cards";
   import { displayHotkey, GUIDE_CARD_COPY } from "../guideCards";
+  import { PANEL_ACTION_COPY } from "../panelActions";
 
   let { panel, item, index, kind, box, flat, selected, keycap, clip, delay, duration, inside }: {
     panel: PanelState; item: HistoryItem; index: number; kind: CardKind; box: Box; flat: boolean; selected: boolean;
@@ -17,6 +18,7 @@
 
   const text = $derived(item.preview ?? "");
   const guide = $derived(item.guide_id ? { id: item.guide_id, ...GUIDE_CARD_COPY[item.guide_id] } : null);
+  const action = $derived(item.action ? PANEL_ACTION_COPY[item.action] : null);
   const link = $derived(kind === "link" ? linkParts(text) : null);
   const color = $derived(kind === "color" ? colorValue(text) : null);
   const mail = $derived(kind === "mail" ? mailParts(text) : null);
@@ -183,7 +185,9 @@
     <!-- 摊开的行面：单行；选中时展开 3–4 行 -->
     <div class="row">
       <span class="ks"></span>
-      {#if kind === "image"}
+      {#if action}
+        <span class="tm t-action"><svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1"/></svg></span>
+      {:else if kind === "image"}
         <span class="tm thumb">{#if image}<img src={image.url} alt="" draggable="false" />{/if}</span>
       {:else if kind === "color" && color}
         <span class="tm swatch" style={`background:${color.hex}`}></span>
@@ -199,7 +203,9 @@
         <span class="tm t-{kind}">{kind === "short" ? "Aa" : kind === "code" ? "{ }" : "#"}</span>
       {/if}
       <div class="rb">
-        {#if guide}
+        {#if action}
+          <div class="guide-row action-row"><b>{action.title}</b><span>{action.body}</span></div>
+        {:else if guide}
           <div class="guide-row" class:has-error={guide.id === "t4" && !!panel.autostartError}><b>{guide.title}</b><span>{guide.id === "t3" ? displayHotkey(panel.hotkey) : guide.id === "t4" ? (panel.autostart ? "电脑开机后，拈来就在托盘里等着。" : "要用时从开始菜单打开拈来。") : guide.body}</span>
             {#if selected && flat}
               {#if guide.id === "t3"}<button type="button" data-guide-hotkey onpointerdown={(event) => event.stopPropagation()} onclick={(event) => { event.preventDefault(); event.stopPropagation(); void panel.openGuideHotkeySettings(item); }}>换一个</button>{/if}
@@ -238,7 +244,7 @@
         {/if}
         {/if}
       </div>
-      <span class="mt">{#if guide}<span class="src">新手牌 · Delete 扔掉</span>{:else}{#if showSeal}<i class="sl">藏</i>{/if}<span class="src">{meta}</span>{/if}</span>
+      <span class="mt">{#if action}<span class="src">操作 · ↵ 执行</span>{:else if guide}<span class="src">新手牌 · Delete 扔掉</span>{:else}{#if showSeal}<i class="sl">藏</i>{/if}<span class="src">{meta}</span>{/if}</span>
     </div>
 
     {#if holding}<i class="hold" style={`animation-duration:${holding.duration}ms`}></i>{/if}
@@ -332,6 +338,7 @@
   .kc.wide { min-width: 52px; }
   /* 行的类型标记：二级墨色，靠外形区分，不用朱砂。 */
   .tm { position: relative; flex: none; width: 36px; height: 26px; display: grid; place-items: center; overflow: hidden; border-radius: 5px; color: var(--hand-ink-2); font: 600 12px/1 var(--font-mono); }
+  .t-action { background: var(--hand-card-back); color: var(--hand-seal); }
   .tm svg { display: block; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
   .t-short { background: var(--hand-card-back); box-shadow: inset 0 0 0 1px var(--hand-line); font: 600 13px/1 var(--font-ui); }
   .t-long { background: var(--hand-card-back); box-shadow: inset 0 0 0 1px var(--hand-line); }

@@ -18,7 +18,10 @@ export type HistoryItem = {
   note?: string;
   /** 仅前端合成的新手牌；负数保留 ID 绝不送入内容、历史或队列 IPC。 */
   guide_id?: GuideCardId;
+  /** 仅前端合成的面板动作牌（搜索“设置”时置顶）；同样使用负数保留 ID，不进任何后端集合。 */
+  action?: PanelActionId;
 };
+export type PanelActionId = "open_settings";
 export type FileMark = { state: "missing" | "partial" | "unknown"; missing: number; unknown: number; total: number; checked_ms: number };
 export type PathCheck = { path: string; state: "present" | "missing" | "unknown" };
 export type StorageFiles = { count: number; bytes: number };

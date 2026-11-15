@@ -31,7 +31,7 @@
     <footer>
       <span><kbd>←</kbd><kbd>→</kbd> 换一张</span><span><kbd>↑</kbd><kbd>↓</kbd> 滚动</span>
       {#if kind === "image"}<span><kbd>Z</kbd> {panel.previewZoom === "fit" ? "查看原图" : "适应窗口"}</span>{/if}
-      {#if panel.currentItem?.guide_id}<span>说明只读，贴不出去</span>{:else}
+      {#if panel.currentItem?.action}<span><kbd>↵</kbd> 打开设置</span>{:else if panel.currentItem?.guide_id}<span>说明只读，贴不出去</span>{:else}
         {#if kind && kind !== "image"}<span>选中文字后 <kbd>Ctrl+C</kbd> 复制</span>{/if}
         <span><kbd>↵</kbd> 粘贴</span>
       {/if}

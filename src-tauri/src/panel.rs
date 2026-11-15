@@ -3042,6 +3042,15 @@ impl Panel {
                         json!({"hotkeyToShowMs":first,"showToPaintMs":second}),
                     );
                 }
+                // 管理员前台下的受限激活发生在呼出瞬间，WebView 刚从挂起恢复、还没画出第一帧，
+                // 那时的 MoveFocus 可能落空（窗口已在前台，但网页里 document 没有焦点，打字没反应）。
+                // 第一帧画出后再给一次网页焦点；前端收到 window focus 会重新聚焦搜索框。
+                if self.interaction == Interaction::Activated
+                    && window::foreground() == window::handle(&self.window)?
+                {
+                    let refocused = webview::focus(&self.window).is_ok();
+                    self.log(logger, "activated_refocus", json!({"ok":refocused}));
+                }
             }
             Action::Resuspend { interval, reply }
                 if self.mode == Mode::Hidden && self.ready && !self.pasting =>

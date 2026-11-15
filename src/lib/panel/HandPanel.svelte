@@ -126,21 +126,22 @@
 {#snippet keys(list: string[], label: string)}<span>{#each list as key}<kbd>{key}</kbd>{/each}{label}</span>{/snippet}
 
 <section class="hand-view" class:spread class:searching={panel.searching} aria-label="手牌" onwheel={wheel}>
+  <!-- 真实输入框始终在 DOM 里（焦点和输入法要靠它），扇面时看不见。放在 interactive 判断之外：
+       激活式面板（管理员前台）准备焦点期间 interactive 还是 false，输入框也必须已经挂载、且之后不再换。 -->
+  {#if panel.inputSurface}
+    <div class="search-float" class:show={spread} data-hit={spread || matHit ? "" : undefined} style={`translate:${ORIGIN_X + ROW_X}px ${ORIGIN_Y + 8}px`}><SearchBox {panel} /></div>
+  {/if}
   {#if panel.interactive || (panel.warming && !panel.visible)}
     <div class="banner-float"><RecordBanner {panel} /></div>
 
     <!-- 摊开时垫的纸色底板（616 × 514）；姿态切换的那一帧就成为命中区域。 -->
     <div class="mat" class:show={spread} data-hit={spread || matHit ? "" : undefined} style={`translate:${ORIGIN_X}px ${ORIGIN_Y}px;width:${SPREAD_W}px;height:${COMP_H}px`}></div>
 
-    <!-- 真实输入框始终在 DOM 里（焦点和输入法要靠它），扇面时看不见。 -->
-    {#if panel.inputSurface}
-      <div class="search-float" class:show={spread} data-hit={spread || matHit ? "" : undefined} style={`translate:${ORIGIN_X + ROW_X}px ${ORIGIN_Y + 8}px`}><SearchBox {panel} /></div>
-    {/if}
 
     {#if spread}
       <div class="position top" data-hit style={`right:${WINDOW_W - ORIGIN_X - SPREAD_W + 12}px;top:${ORIGIN_Y + 12}px`}>
         {#if !panel.handSource.length}{panel.searching ? `没找到“${panel.query}”` : "还没复制过东西"}
-        {:else if panel.searching}找到 <b>{panel.handSource.length}</b> 张 · 第 {panel.selected + 1} 张
+        {:else if panel.searching}找到 <b>{panel.filtered.length}</b> 张{#if !panel.currentItem?.action} · 第 {panel.selected + 1 - panel.searchActions.length} 张{/if}
         {:else}第 <b>{panel.selected + 1}</b> 张，共 {panel.handSource.length} 张{/if}
       </div>
       {#each heads as head (`${head.name}:${head.index}`)}
@@ -203,6 +204,8 @@
         {#if panel.stack.length}
           {#if panel.heldModifier === "ctrl"}{@render keys(["Ctrl", "↵"], "按纯文本一起粘贴")}{@render keys(["Ctrl", "Shift", "↵"], "逐张放")}
           {:else}{@render keys(["↵"], "一起粘贴")}{@render keys(["Ctrl", "Shift", "↵"], "逐张放")}{#if !panel.searching}{@render keys(["Backspace"], "放回一张")}{/if}{/if}
+        {:else if panel.currentItem?.action}
+          {@render keys(["↵"], "打开设置")}{@render keys(["↓"], "看搜索结果")}{@render keys(["Esc"], "清空搜索")}
         {:else if panel.currentItem?.guide_id}
           {#if spread}{@render keys(["↑", "↓"], "上一张 / 下一张")}{:else}{@render keys(["←", "→"], "换一张")}{/if}
           {@render keys(["Delete"], "扔掉")}{@render keys(["Tab"], "看全")}{@render keys(["Esc"], panel.searching ? "清空搜索" : "收回")}

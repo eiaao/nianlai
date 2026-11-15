@@ -25,11 +25,12 @@ async function compilePanel() {
   const preferencesPath = join(temporary, "preferences.mjs");
   const cardsPath = join(temporary, "cards.mjs");
   const guideCardsPath = join(temporary, "guideCards.mjs");
+  const panelActionsPath = join(temporary, "panelActions.mjs");
   const cleanup = () => {
     assert.equal(dirname(temporary), temporaryBase);
     assert.ok(basename(temporary).startsWith("nianlai-panel-key-repeat-"));
     // 只删除本次创建的几个文件和空目录，不递归清理任何路径。
-    for (const path of [compiledPath, preferencesPath, cardsPath, guideCardsPath, ipcPath]) if (existsSync(path)) unlinkSync(path);
+    for (const path of [compiledPath, preferencesPath, cardsPath, guideCardsPath, panelActionsPath, ipcPath]) if (existsSync(path)) unlinkSync(path);
     rmdirSync(temporary);
     assert.equal(existsSync(temporary), false);
   };
@@ -106,7 +107,7 @@ export async function searchHistory(query, requestId) {
 }
 // 面板里的其余 IPC 调用不再用 ?. 兜底，替身补全为无副作用的空实现。
 export async function getSettings() { return null; }
-export async function openSettings() {}
+export async function openSettings(page) { calls.push({ command: "openSettings", ...(page ? { page } : {}) }); }
 export async function getFilePaths() { return null; }
 export async function getImage() { return null; }
 export async function getFullText() { return null; }
@@ -141,15 +142,17 @@ export function emit(name, payload) { return handlers.get(name)?.(payload); }
       ["./preferences", pathToFileURL(preferencesPath).href],
       ["./cards", pathToFileURL(cardsPath).href],
       ["./guideCards", pathToFileURL(guideCardsPath).href],
+      ["./panelActions", pathToFileURL(panelActionsPath).href],
     ]);
     writeFileSync(cardsPath, transpile("src/lib/cards.ts"));
     writeFileSync(guideCardsPath, transpile("src/lib/guideCards.ts"));
+    writeFileSync(panelActionsPath, transpile("src/lib/panelActions.ts"));
     // 真实的 preferences.ts 一并转译，面板与设置页用同一份偏好映射。
     writeFileSync(preferencesPath, ts.transpileModule(readFileSync(join(root, "src/lib/preferences.ts"), "utf8"), {
       compilerOptions: { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.ESNext },
     }).outputText);
     const compiled = compileModule(stripped, { filename: "state.svelte.js", generate: "client", dev: false }).js.code
-      .replace(/(from\s+)(["'])(svelte\/internal\/client|svelte|\.\/ipc|\.\/preferences|\.\/cards|\.\/guideCards)\2/g,
+      .replace(/(from\s+)(["'])(svelte\/internal\/client|svelte|\.\/ipc|\.\/preferences|\.\/cards|\.\/guideCards|\.\/panelActions)\2/g,
         (_, prefix, _quote, specifier) => prefix + JSON.stringify(imports.get(specifier)));
     writeFileSync(compiledPath, compiled);
     const { PanelState } = await import(pathToFileURL(compiledPath).href);
@@ -428,6 +431,22 @@ test("Activated DOM 快速取用、焦点准备与自然搜索输入", async (su
     assert.deepEqual(ipc.calls, []);
   });
 
+  await suite.test("管理员前台：网页晚一步拿到系统焦点时自动重新聚焦，不用再点“点这里继续”", async (context) => {
+    const harness = await createPanel(context, PanelState, ipc, { interaction: "activation_pending" });
+    let documentFocused = false;
+    document.hasFocus = () => documentFocused;
+    ipc.emit("interaction", { session: 37, interaction: "activated" });
+    await flush(); await harness.runFrame(); await harness.runFrame();
+    assert.equal(harness.panel.domFocus, "failed");
+    // 后端在第一帧后再次 MoveFocus，网页收到 window focus。
+    documentFocused = true;
+    harness.panel.windowFocus();
+    await flush(); await harness.runFrame(); await harness.runFrame();
+    assert.equal(harness.panel.domFocus, "ready");
+    assert.equal(harness.panel.interactive, true);
+    assert.deepEqual(ipc.calls.filter((call) => call.command === "retryActivation"), []);
+  });
+
   await suite.test("文档失焦时即使 activeElement 为 input 也不能报本地就绪", async (context) => {
     const harness = await createPanel(context, PanelState, ipc, { interaction: "activation_pending" });
     document.hasFocus = () => false;
@@ -501,6 +520,53 @@ test("Activated DOM 快速取用、焦点准备与自然搜索输入", async (su
       assert.deepEqual(ipc.calls, [{ command: "startSearch", session: 37 }]);
     });
   }
+
+  await suite.test("搜索“设置”等关键词时置顶打开设置的动作牌，↵ 收起面板并打开设置", async (context) => {
+    const { panel } = await createPanel(context, PanelState, ipc);
+    for (const query of ["设置", "Settings", "sett", "shezhi"]) {
+      panel.query = query;
+      await flush();
+      assert.equal(panel.handSource[0]?.action, "open_settings", query);
+      assert.equal(panel.handSource.length, panel.filtered.length + 1, "动作牌不计入真实结果");
+    }
+    for (const query of ["se", "合成", "设"]) {
+      panel.query = query;
+      await flush();
+      assert.equal(panel.handSource.some((item) => item.action), false, query);
+    }
+    panel.query = "设置";
+    await flush();
+    panel.selected = 0;
+    ipc.calls.length = 0;
+    keydown(panel, { key: "Enter" });
+    keyup(panel, { key: "Enter" });
+    await flush();
+    assert.deepEqual(ipc.calls.map((call) => call.command).sort(), ["hidePanel", "openSettings"]);
+    assert.deepEqual(ipc.calls.find((call) => call.command === "openSettings"), { command: "openSettings" });
+  });
+
+  await suite.test("动作牌不能收藏、多选、删除或粘贴，负数 ID 不进内容 IPC", async (context) => {
+    const { panel } = await createPanel(context, PanelState, ipc);
+    panel.query = "设置";
+    await flush();
+    panel.selected = 0;
+    ipc.calls.length = 0;
+    await panel.toggleFavorite(panel.currentItem.id);
+    panel.takeCurrent();
+    panel.pressDelete();
+    await panel.startStackQueue(false, "paste");
+    await flush();
+    assert.deepEqual(panel.stack, []);
+    assert.deepEqual(ipc.calls.filter((call) => ["setFavorite", "deleteItem", "pasteItem", "startQueue"].includes(call.command)), []);
+    // 往下仍是普通搜索结果，照常粘贴。
+    panel.selected = 1;
+    assert.equal(panel.currentItem?.action, undefined);
+    keydown(panel, { key: "Enter" });
+    keyup(panel, { key: "Enter" });
+    await flush();
+    assert.equal(ipc.calls.filter((call) => call.command === "pasteItem").length, 1);
+    assert.ok(ipc.calls.find((call) => call.command === "pasteItem").id > 0);
+  });
 
   await suite.test("搜索切换 IPC 失败或超时可见，不回退 Quick 误选", async (context) => {
     const { panel } = await activatedPanel(context, PanelState, ipc);
@@ -2427,7 +2493,7 @@ const v11CopySources = {
   "src/lib/cards.ts": ['item.source || "来源不明"'],
   "src/lib/panel/SearchBox.svelte": ['placeholder="搜文字和文件名"', '>拼完再搜</span>'],
   "src/lib/panel/HandPanel.svelte": [
-    '没找到“${panel.query}”', '找到 <b>{panel.handSource.length}</b> 张 · 第 {panel.selected + 1} 张',
+    '没找到“${panel.query}”', '找到 <b>{panel.filtered.length}</b> 张{#if !panel.currentItem?.action} · 第 {panel.selected + 1 - panel.searchActions.length} 张{/if}', '"打开设置"',
     '第 <b>{panel.selected + 1}</b> 张，共 {panel.handSource.length} 张', '{head.count} 张',
     '换个短点的词试试。按 Esc 回到全部。', '还没复制过东西', '粘贴对应一张', '上一张 / 下一张', '<b>＋</b>', '设为收藏', '取消收藏',
   ],
