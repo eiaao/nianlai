@@ -208,6 +208,19 @@ async function capture(name) {
   shots.push(name);
 }
 
+test("激活式（管理员前台）面板：搜索框拿到焦点后保持挂载，打字能进搜索框", async () => {
+  await openPanel("two=1", { interaction: "activated" });
+  await waitFor(async () => (await cdp.evaluate("document.activeElement?.matches?.('.search-box input') === true")) === true, "搜索框持有焦点");
+  // 准备完成后不能换成另一个输入框：焦点仍在同一个输入框上，提示层消失。
+  await settle();
+  assert.equal(await cdp.evaluate("document.activeElement?.matches?.('.search-box input') === true"), true);
+  assert.equal(await cdp.evaluate("document.querySelectorAll('.search-box input').length"), 1);
+  assert.equal(await cdp.evaluate("document.querySelector('.activation') === null"), true);
+  await cdp.send("Input.insertText", { text: "abc" });
+  await settle();
+  assert.equal(await cdp.evaluate("document.querySelector('.search-box input').value"), "abc");
+});
+
 test("新手牌只插在最近第一张真实牌之后，空库从第一张开始，dismissed/搜索/常用均隔离", async () => {
   let shown = await openPanel("two=1");
   assert.deepEqual(await cardIds(), [101, -1, -2, -3, -4, 102]);

@@ -126,16 +126,17 @@
 {#snippet keys(list: string[], label: string)}<span>{#each list as key}<kbd>{key}</kbd>{/each}{label}</span>{/snippet}
 
 <section class="hand-view" class:spread class:searching={panel.searching} aria-label="手牌" onwheel={wheel}>
+  <!-- 真实输入框始终在 DOM 里（焦点和输入法要靠它），扇面时看不见。放在 interactive 判断之外：
+       激活式面板（管理员前台）准备焦点期间 interactive 还是 false，输入框也必须已经挂载、且之后不再换。 -->
+  {#if panel.inputSurface}
+    <div class="search-float" class:show={spread} data-hit={spread || matHit ? "" : undefined} style={`translate:${ORIGIN_X + ROW_X}px ${ORIGIN_Y + 8}px`}><SearchBox {panel} /></div>
+  {/if}
   {#if panel.interactive || (panel.warming && !panel.visible)}
     <div class="banner-float"><RecordBanner {panel} /></div>
 
     <!-- 摊开时垫的纸色底板（616 × 514）；姿态切换的那一帧就成为命中区域。 -->
     <div class="mat" class:show={spread} data-hit={spread || matHit ? "" : undefined} style={`translate:${ORIGIN_X}px ${ORIGIN_Y}px;width:${SPREAD_W}px;height:${COMP_H}px`}></div>
 
-    <!-- 真实输入框始终在 DOM 里（焦点和输入法要靠它），扇面时看不见。 -->
-    {#if panel.inputSurface}
-      <div class="search-float" class:show={spread} data-hit={spread || matHit ? "" : undefined} style={`translate:${ORIGIN_X + ROW_X}px ${ORIGIN_Y + 8}px`}><SearchBox {panel} /></div>
-    {/if}
 
     {#if spread}
       <div class="position top" data-hit style={`right:${WINDOW_W - ORIGIN_X - SPREAD_W + 12}px;top:${ORIGIN_Y + 12}px`}>

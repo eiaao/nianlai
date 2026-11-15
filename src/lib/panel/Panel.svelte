@@ -2,7 +2,6 @@
   import { onMount } from "svelte";
   import { PanelState } from "../state.svelte";
   import HandPanel from "./HandPanel.svelte";
-  import SearchBox from "./SearchBox.svelte";
 
   const panel = new PanelState();
   panel.watch();
@@ -111,32 +110,35 @@
       <p role="status">{panel.message || "这次没贴。收起再呼出一次"}</p>
       <button type="button" onclick={panel.close}>关闭面板</button>
     </section>
-  {:else if !panel.interactive && !panel.warming && panel.interaction !== "passive"}
-    {#if panel.inputSurface}<div class="focus-search" data-hit><SearchBox {panel} /></div>{/if}
+  {:else if !panel.interactive && !panel.warming && panel.interaction !== "passive" && !panel.inputSurface}
     <section class="activation" data-hit aria-label="面板激活状态">
-      {#if panel.interaction === "activated"}
-        <p role="status">{panel.searchStartFailed ? "没能开始搜，收起再呼出一次" : panel.searchStarting ? "正在进入搜索…" : panel.domFocus === "failed" ? "打字没反应？点一下这里" : "稍等…"}</p>
-        {#if panel.domFocus === "failed" && !panel.searchStarting && !panel.searchStartFailed}
-          <button type="button" onclick={(event) => panel.retryDomFocus(event)}>点这里继续</button>
-        {/if}
-      {:else}
-        <p role="status">{panel.interaction === "activation_pending" || panel.activationRetrying ? "稍等…" : "按键没反应？点一下这里"}</p>
-      {/if}
+      <p role="status">{panel.interaction === "activation_pending" || panel.activationRetrying ? "稍等…" : "按键没反应？点一下这里"}</p>
       {#if panel.interaction === "activation_failed"}
         <button type="button" disabled={panel.activationRetrying} onclick={(event) => panel.retryActivation(event)}>点这里继续</button>
       {/if}
       <button type="button" onclick={panel.close}>关闭面板</button>
     </section>
   {:else}
+    <!-- 手牌只有一个真实输入框：激活式（管理员前台）准备焦点、进入搜索期间也保持 HandPanel 挂载，
+         不能换成另一个 SearchBox，否则拿到焦点的输入框被卸载，焦点掉到 body，打字没反应。 -->
     <HandPanel {panel} />
+    {#if !panel.interactive && !panel.warming && panel.inputSurface}
+      <section class="activation" data-hit aria-label="面板激活状态">
+        <p role="status">{panel.searchStartFailed ? "没能开始搜，收起再呼出一次" : panel.searchStarting ? "正在进入搜索…" : panel.domFocus === "failed" ? "打字没反应？点一下这里" : "稍等…"}</p>
+        {#if panel.domFocus === "failed" && !panel.searchStarting && !panel.searchStartFailed}
+          <button type="button" onclick={(event) => panel.retryDomFocus(event)}>点这里继续</button>
+        {/if}
+        <button type="button" onclick={panel.close}>关闭面板</button>
+      </section>
+    {/if}
   {/if}
 </div>
 
 <style>
   .panel-shell { position: relative; width: 100%; height: 100%; overflow: hidden; background: transparent; }
   .panel-shell.warming { visibility: hidden; }
-  .focus-search { position: absolute; z-index: 160; left: 50%; top: 30px; width: 420px; height: 38px; transform: translateX(-50%); }
   .activation, .terminal-feedback { position: absolute; left: 50%; top: 50%; width: 460px; min-height: 180px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 24px; transform: translate(-50%,-50%); border: 1px solid var(--hand-line); border-radius: 12px; background: var(--hand-card); color: var(--hand-muted); box-shadow: var(--hand-pop); text-align: center; }
+  .activation { z-index: 400; }
   .activation p, .terminal-feedback p { margin: 0; font-size: 13px; line-height: 1.8; }
   .activation button, .terminal-feedback button { min-height: 32px; padding: 5px 12px; border: 1px solid var(--hand-line); border-radius: 6px; background: var(--hand-paper); color: var(--hand-ink); font-size: 12px; }
   .terminal-mark { color: var(--state-critical); font-size: 20px; }
