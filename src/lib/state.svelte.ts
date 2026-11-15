@@ -6,6 +6,7 @@ import type { GuideSettings, HistoryItem, HistorySnapshot, HitRegion, Outline, P
 import { applyPreferences, DEFAULT_PREFERENCES, normalizePreferences, type Preferences } from "./preferences";
 import { cardKind, FAN, outlineFor, pageStep, spreadLayout, timeGroup, type SpreadLayout } from "./cards";
 import { dealtGuideItems, defaultGuideSettings, GUIDE_CARD_IDS, normalizePanelGuide } from "./guideCards";
+import { matchedActionItems } from "./panelActions";
 
 const HOLD_HINT_MS = 300;
 /** 后端 start_queue 一次最多接受的条数。 */
@@ -205,8 +206,11 @@ export class PanelState {
     return real.length ? [real[0], ...guides, ...real.slice(1)] : guides;
   });
   // selected 始终相对当前来源：搜索时是实时结果，否则是冻结的最近 / 常用。
+  // 搜索命中“设置”等关键词时，动作牌置顶在结果最前（默认选中，↵ 直接执行）。
+  searchActions = $derived(this.searching ? matchedActionItems(this.query) : []);
+  private searchWithActions = $derived(this.searchActions.length ? [...this.searchActions, ...this.filtered] : this.filtered);
   handSource = $derived(this.interaction === "passive" ? []
-    : this.searching ? this.filtered : this.handList === "favorites" ? this.favoriteItems : this.recentWithGuides);
+    : this.searching ? this.searchWithActions : this.handList === "favorites" ? this.favoriteItems : this.recentWithGuides);
   visibleItems = $derived(this.interaction === "passive" ? this.visibleOrder.items : this.handSource);
   /** 扇面上的牌（最多 7 张）。 */
   fanItems = $derived(this.handSource.slice(0, FAN));
@@ -219,7 +223,8 @@ export class PanelState {
     const known = new Set([...this.recentIds, ...this.pinnedIds]);
     return this.history.items.filter((item) => !known.has(item.id)).length;
   });
-  groupOf = (item: HistoryItem): string => this.searching && item.favorite ? "收藏" : timeGroup(item.copied_ms, this.openedAt);
+  groupOf = (item: HistoryItem): string => item.action ? "操作"
+    : this.searching && item.favorite ? "收藏" : timeGroup(item.copied_ms, this.openedAt);
   /**
    * 摊开的版面（行位置、分组标题、滚动、看得见的行）。滚动只由选中项推动，
    * 所以这里顺手记下新的滚动量；同样的输入重复计算结果不变。
@@ -411,9 +416,19 @@ export class PanelState {
   };
 
   private guideNotice(item: HistoryItem) {
+    if (item.action) { this.showNotice("这是操作：按 ↵ 或点一下执行"); return true; }
     if (!item.guide_id) return false;
     this.showNotice("新手牌是说明，贴不出去");
     return true;
+  }
+
+  /** 执行动作牌：与页脚回收站入口一样，先收起面板再打开设置窗口。 */
+  private runAction(item: HistoryItem) {
+    if (item.action !== "open_settings" || !this.visible) return;
+    const session = this.session;
+    this.clearDomChoice();
+    void this.command(() => ipc.hidePanel(session), session);
+    void ipc.openSettings().catch(() => {});
   }
 
   private dismissGuide = async (item: HistoryItem) => {
@@ -519,6 +534,7 @@ export class PanelState {
   pressDelete = () => {
     const item = this.currentItem;
     if (!this.visible || !this.interactive || this.busy || !item || this.deleting || this.holdDelete?.phase === "holding") return;
+    if (item.action) return;
     if (item.guide_id) { void this.dismissGuide(item); return; }
     if (!item.favorite) { void this.deleteCurrent(); return; }
     const session = this.session;
@@ -558,7 +574,7 @@ export class PanelState {
 
   private deleteCurrent = async () => {
     const item = this.currentItem;
-    if (!this.visible || !this.interactive || this.busy || !item || this.deleting) return;
+    if (!this.visible || !this.interactive || this.busy || !item || this.deleting || item.action) return;
     if (item.guide_id) { await this.dismissGuide(item); return; }
     const session = this.session;
     const index = this.selected;
@@ -591,7 +607,7 @@ export class PanelState {
     if (!this.visible) return;
     // 有意为之：选中新手牌时 Ctrl+Z 不撤销真实删除（刚删完新手牌按 Ctrl+Z，不能意外恢复别的真实牌）。
     const item = this.currentItem;
-    if (item && this.guideNotice(item)) return;
+    if (item?.guide_id && this.guideNotice(item)) return;
     const session = this.session;
     this.clearUndo();
     try {
@@ -1065,6 +1081,13 @@ export class PanelState {
   choose = async (index = this.selected, pasteMode: PasteMode = "paste", event?: KeyboardEvent | MouseEvent) => {
     const item = this.handSource[index];
     if (!this.visible || !this.interactive || this.busy || this.pendingDom || !item) return;
+    if (item.action) {
+      this.selected = index;
+      // activated 模式只认真实的用户事件，和普通取牌同一道门。
+      if (this.interaction === "activated" && (!event || event.isTrusted !== true)) return;
+      this.runAction(item);
+      return;
+    }
     if (item.guide_id) { this.selected = index; this.guideNotice(item); return; }
     // 已选的牌只跟着已选一起粘贴，不响应数字或单击单独取用。
     if (this.isTaken(item.id)) { this.takenNotice(); return; }
@@ -1168,7 +1191,7 @@ export class PanelState {
 
   /** Ctrl+Shift+Enter 只负责逐张放；Shift+Enter 永远只复制当前一张，不再按上下文换义。 */
   startStackQueue = async (automatic: boolean, pasteMode: "paste" | "text", event?: KeyboardEvent) => {
-    const guarded = this.stack.find((item) => item.guide_id);
+    const guarded = this.stack.find((item) => item.guide_id || item.action);
     if (guarded) { this.guideNotice(guarded); return; }
     if (!this.visible || !this.interactive || this.busy || this.pendingDom || !this.stack.length) {
       if (!this.stack.length) this.message = "先按空格多选几张，再按 Ctrl+Shift+Enter 逐张放";

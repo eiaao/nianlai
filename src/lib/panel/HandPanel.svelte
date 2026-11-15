@@ -140,7 +140,7 @@
     {#if spread}
       <div class="position top" data-hit style={`right:${WINDOW_W - ORIGIN_X - SPREAD_W + 12}px;top:${ORIGIN_Y + 12}px`}>
         {#if !panel.handSource.length}{panel.searching ? `没找到“${panel.query}”` : "还没复制过东西"}
-        {:else if panel.searching}找到 <b>{panel.handSource.length}</b> 张 · 第 {panel.selected + 1} 张
+        {:else if panel.searching}找到 <b>{panel.filtered.length}</b> 张{#if !panel.currentItem?.action} · 第 {panel.selected + 1 - panel.searchActions.length} 张{/if}
         {:else}第 <b>{panel.selected + 1}</b> 张，共 {panel.handSource.length} 张{/if}
       </div>
       {#each heads as head (`${head.name}:${head.index}`)}
@@ -203,6 +203,8 @@
         {#if panel.stack.length}
           {#if panel.heldModifier === "ctrl"}{@render keys(["Ctrl", "↵"], "按纯文本一起粘贴")}{@render keys(["Ctrl", "Shift", "↵"], "逐张放")}
           {:else}{@render keys(["↵"], "一起粘贴")}{@render keys(["Ctrl", "Shift", "↵"], "逐张放")}{#if !panel.searching}{@render keys(["Backspace"], "放回一张")}{/if}{/if}
+        {:else if panel.currentItem?.action}
+          {@render keys(["↵"], "打开设置")}{@render keys(["↓"], "看搜索结果")}{@render keys(["Esc"], "清空搜索")}
         {:else if panel.currentItem?.guide_id}
           {#if spread}{@render keys(["↑", "↓"], "上一张 / 下一张")}{:else}{@render keys(["←", "→"], "换一张")}{/if}
           {@render keys(["Delete"], "扔掉")}{@render keys(["Tab"], "看全")}{@render keys(["Esc"], panel.searching ? "清空搜索" : "收回")}
