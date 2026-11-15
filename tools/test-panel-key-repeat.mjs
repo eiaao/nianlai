@@ -431,6 +431,22 @@ test("Activated DOM 快速取用、焦点准备与自然搜索输入", async (su
     assert.deepEqual(ipc.calls, []);
   });
 
+  await suite.test("管理员前台：网页晚一步拿到系统焦点时自动重新聚焦，不用再点“点这里继续”", async (context) => {
+    const harness = await createPanel(context, PanelState, ipc, { interaction: "activation_pending" });
+    let documentFocused = false;
+    document.hasFocus = () => documentFocused;
+    ipc.emit("interaction", { session: 37, interaction: "activated" });
+    await flush(); await harness.runFrame(); await harness.runFrame();
+    assert.equal(harness.panel.domFocus, "failed");
+    // 后端在第一帧后再次 MoveFocus，网页收到 window focus。
+    documentFocused = true;
+    harness.panel.windowFocus();
+    await flush(); await harness.runFrame(); await harness.runFrame();
+    assert.equal(harness.panel.domFocus, "ready");
+    assert.equal(harness.panel.interactive, true);
+    assert.deepEqual(ipc.calls.filter((call) => call.command === "retryActivation"), []);
+  });
+
   await suite.test("文档失焦时即使 activeElement 为 input 也不能报本地就绪", async (context) => {
     const harness = await createPanel(context, PanelState, ipc, { interaction: "activation_pending" });
     document.hasFocus = () => false;

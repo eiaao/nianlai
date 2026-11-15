@@ -832,6 +832,11 @@ export class PanelState {
 
   windowBlur = () => { this.setModifiers(false, false); this.inputBlur(); };
 
+  /** 激活式面板（管理员前台）网页晚一步拿到焦点时，自动重新聚焦搜索框，不必再点“点这里继续”。 */
+  windowFocus = () => {
+    if (this.visible && this.interaction === "activated" && this.domFocus === "failed" && !this.busy && !this.searchStartFailed) this.prepareDomFocus();
+  };
+
   private domCode(event: KeyboardEvent) {
     return event.code || `${event.key}:${event.location}`;
   }
@@ -1700,6 +1705,8 @@ export class PanelState {
         else this.input?.blur();
         frame(() => frame(() => {
           if (this.visible && this.session === current) void this.command(() => ipc.reportPainted(current));
+          // 第一帧之前的聚焦可能因 WebView 刚恢复而落空；画出后再试一次。
+          if (this.visible && this.session === current) this.windowFocus();
         }));
       });
       await subscribe(ipc.onPanelInteraction, (payload) => {

@@ -87,7 +87,7 @@
   });
 </script>
 
-<svelte:window onkeydown={panel.keydown} onkeyup={panel.keyup} onblur={panel.windowBlur} oncontextmenu={(event) => event.preventDefault()} />
+<svelte:window onkeydown={panel.keydown} onkeyup={panel.keyup} onblur={panel.windowBlur} onfocus={panel.windowFocus} oncontextmenu={(event) => event.preventDefault()} />
 
 <div bind:this={stage} class="panel-shell" class:warming={panel.warming && !panel.visible} data-mode={panel.mode} data-list={panel.handList} data-pose={panel.pose} role="dialog" tabindex="-1" aria-label="拈来手牌">
   {#if panel.queue && !panel.visible}
