@@ -279,7 +279,8 @@ impl Service {
     pub fn write_for_capture(&self, content: Arc<Content>) -> Result<()> {
         let _lock = self.lock();
         objc2::rc::autoreleasepool(|_| {
-            publish(&NSPasteboard::generalPasteboard(), &prepare(&content)?).map(|_| ())
+            let objects = prepare(&content)?;
+            publish(&NSPasteboard::generalPasteboard(), &objects).map(|_| ())
         })
     }
     // macOS 没有剪贴板消息窗口，这里不需要。
