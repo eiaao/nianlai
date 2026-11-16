@@ -140,7 +140,7 @@ struct CaptureState {
     paused: bool,
     ignore_next: bool,
     rules: &'static [capture::sensitive::Rule],
-    default_excluded_apps: [&'static str; 6],
+    default_excluded_apps: [&'static str; settings::DEFAULT_EXCLUDED_APPS.len()],
 }
 
 #[tauri::command]

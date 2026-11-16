@@ -6,4 +6,5 @@ pub mod image;
 mod misc;
 pub mod paste;
 pub mod window;
+pub use hook::Hooks;
 pub use misc::*;

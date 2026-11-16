@@ -7,7 +7,9 @@ pub mod storage;
 
 use crate::log::{Logger, now_ms};
 use content::{Content, Fingerprint, Hash};
-pub use nianlai_store::{CopyEvent, Ingest, older};
+#[cfg(any(windows, test))]
+pub use nianlai_store::older;
+pub use nianlai_store::{CopyEvent, Ingest};
 use nianlai_store::{MemoryOptions, Metadata, Store};
 use serde::Serialize;
 use serde_json::json;

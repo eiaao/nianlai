@@ -1,8 +1,7 @@
 use super::*;
 use crate::{
-    history::content::{Content, Data, FILES, HTML, PNG, RTF, TEXT},
+    history::content::Content,
     paste::{
-        as_text,
         capture_access::{AccessGuard, CaptureAccess},
         native,
         native_access::{self, Budget, Environment, Probe, Publication},
@@ -11,8 +10,15 @@ use crate::{
     },
     platform::{Target, hash::sha256},
 };
+#[cfg(windows)]
+use crate::{
+    history::content::{Data, FILES, HTML, PNG, RTF, TEXT},
+    paste::as_text,
+};
+#[cfg(windows)]
+use std::collections::BTreeMap;
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::VecDeque,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
