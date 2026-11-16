@@ -110,7 +110,7 @@ jobs:
 
   macos:
     name: macOS 检查
-    runs-on: macos-15
+    runs-on: macos-15-intel
     timeout-minutes: 45
     steps:
       - name: 检出代码
