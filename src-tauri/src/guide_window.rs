@@ -408,6 +408,7 @@ mod tests {
         thread,
         time::Duration,
     };
+    #[cfg(windows)]
     use windows::Win32::UI::WindowsAndMessaging::WS_EX_NOACTIVATE;
 
     fn outcome(result: PasteResult) -> Outcome {
@@ -601,6 +602,7 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
     #[test]
     fn task11_window_spec_is_transparent_topmost_unfocused_and_taskbarless() {
         assert_eq!(GUIDE_SIZE, (360.0, 360.0));
@@ -668,6 +670,7 @@ mod tests {
         assert_eq!((small.x, small.y), (26, 36));
     }
 
+    #[cfg(windows)]
     #[test]
     fn task11_guide_hit_regions_use_independent_dpi_conversion() {
         let regions = [platform::HitRegion {
@@ -831,6 +834,7 @@ mod tests {
         main_thread.join().unwrap();
     }
 
+    #[cfg(windows)]
     #[test]
     fn task11_fix_initial_layout_uses_target_monitor_dpi_not_creation_monitor() {
         struct CreatedWindow {

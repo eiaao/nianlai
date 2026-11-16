@@ -800,11 +800,13 @@ fn record(app: &AppHandle, message: &'static str) {
 mod tests {
     use super::*;
     use crate::health::{CaptureHealth, StoreHealth};
+    #[cfg(windows)]
     use platform::theme::{
         PERSONALIZE_KEY, PERSONALIZE_KEY_WIDE, small_icon_width_from_dpi,
         small_icon_width_from_rect, taskbar_theme_from_registry,
     };
     use tauri::{Position, Rect, Size};
+    #[cfg(windows)]
     use windows::Win32::{
         Foundation::LPARAM,
         UI::WindowsAndMessaging::{WM_CLIPBOARDUPDATE, WM_DPICHANGED, WM_SETTINGCHANGE},
@@ -840,6 +842,7 @@ mod tests {
         assert_eq!(select_tray_bitmap(i32::MAX), 32);
     }
 
+    #[cfg(windows)]
     #[test]
     fn monitor_dpi_drives_metrics_and_failures_fall_back_to_16() {
         for (dpi, px, expected) in [(96, 16, 16), (120, 20, 16), (144, 24, 24), (192, 32, 32)] {
@@ -946,6 +949,7 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
     #[test]
     fn every_metric_read_uses_the_new_live_rect_without_mouse_position_cache() {
         let probes = std::cell::RefCell::new(Vec::new());
@@ -978,6 +982,7 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
     #[test]
     fn registry_path_constant_is_the_exact_personalize_key() {
         assert_eq!(
@@ -989,6 +994,7 @@ mod tests {
         assert_eq!(PERSONALIZE_KEY_WIDE[expected.len()], 0);
     }
 
+    #[cfg(windows)]
     #[test]
     fn registry_theme_only_explicit_zero_is_dark() {
         assert!(taskbar_theme_from_registry(None), "读取失败回浅色版");
@@ -997,6 +1003,7 @@ mod tests {
         assert!(!taskbar_theme_from_registry(Some(0)));
     }
 
+    #[cfg(windows)]
     #[test]
     fn setting_and_dpi_messages_refresh_without_consuming_or_reading_lparam() {
         let _guard = MESSAGE_TEST_LOCK.lock().unwrap();
@@ -1291,6 +1298,7 @@ mod tests {
         assert_ne!(RECORDING_24, RECORDING_32);
     }
 
+    #[cfg(windows)]
     #[test]
     fn taskbar_theme_registry_read_defaults_to_light() {
         // 真机 / CI 上注册表多半存在；无论哪种，都不应 panic。

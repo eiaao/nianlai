@@ -489,6 +489,7 @@ fn generic_final_lightweight_guard_can_refuse_after_a_ready_probe() {
         assert_eq!(script.sends, 0);
     }
 }
+#[cfg(windows)]
 #[test]
 fn generic_production_override_preserves_rich_files_images_and_explicit_text() {
     let plain = Content::text("synthetic-format-marker", sha256).unwrap();

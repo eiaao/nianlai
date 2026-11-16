@@ -1,1 +1,9 @@
-// macOS 平台实现按移植阶段接入。
+pub mod apps;
+pub mod capture;
+pub mod clipboard;
+pub mod hook;
+pub mod image;
+mod misc;
+pub mod paste;
+pub mod window;
+pub use misc::*;

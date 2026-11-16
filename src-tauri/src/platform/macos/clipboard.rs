@@ -1,0 +1,289 @@
+use crate::{
+    history::{
+        History,
+        content::{Content, Data, FILES, Fingerprint, HTML, PNG, RTF, TEXT},
+    },
+    log::Logger,
+    paste::queue,
+    platform::Result,
+};
+use objc2::{rc::Retained, runtime::ProtocolObject};
+use objc2_app_kit::{NSPasteboard, NSPasteboardItem, NSPasteboardWriting};
+use objc2_foundation::{NSArray, NSData, NSString, NSURL};
+use std::{
+    collections::BTreeMap,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicIsize, Ordering},
+    },
+    time::Instant,
+};
+
+const TYPES: [(&str, &str); 6] = [
+    ("public.utf8-plain-text", TEXT),
+    ("public.html", HTML),
+    ("public.rtf", RTF),
+    ("public.png", PNG),
+    ("public.tiff", PNG),
+    ("public.file-url", FILES),
+];
+fn format_name(uti: &str) -> Option<&'static str> {
+    TYPES
+        .iter()
+        .find(|(name, _)| *name == uti)
+        .map(|(_, format)| *format)
+}
+fn html_header(html: &[u8]) -> Vec<u8> {
+    let header = |start: usize, end: usize| {
+        format!(
+            "Version:1.0\r\nStartHTML:{start:010}\r\nEndHTML:{end:010}\r\nStartFragment:{start:010}\r\nEndFragment:{end:010}\r\n"
+        )
+    };
+    let start = header(0, 0).len();
+    let mut bytes = header(start, start + html.len()).into_bytes();
+    bytes.extend_from_slice(html);
+    bytes
+}
+fn html_body(bytes: &[u8]) -> Result<&[u8]> {
+    if !bytes.starts_with(b"Version:") {
+        return Ok(bytes);
+    }
+    let text = String::from_utf8_lossy(bytes);
+    let offset = |name| {
+        text.lines()
+            .find_map(|line| line.strip_prefix(name))
+            .and_then(|value| value.trim().parse::<usize>().ok())
+    };
+    let (Some(start), Some(end)) = (offset("StartHTML:"), offset("EndHTML:")) else {
+        return Err("invalid_html_header".into());
+    };
+    bytes
+        .get(start..end)
+        .ok_or_else(|| "invalid_html_range".into())
+}
+
+pub(super) fn read(board: &NSPasteboard) -> Result<BTreeMap<String, Data>> {
+    let mut formats = BTreeMap::new();
+    let types = board.types().ok_or("clipboard_read_denied")?;
+    for uti in types.iter().map(|value| value.to_string()) {
+        let Some(name) = format_name(&uti) else {
+            continue;
+        };
+        if name == FILES
+            || (uti == "public.tiff" && types.containsObject(&NSString::from_str("public.png")))
+        {
+            continue;
+        }
+        let data = if name == TEXT {
+            board
+                .stringForType(&NSString::from_str(&uti))
+                .ok_or("clipboard_read_failed")?
+                .to_string()
+                .encode_utf16()
+                .flat_map(u16::to_le_bytes)
+                .collect()
+        } else {
+            let data = board
+                .dataForType(&NSString::from_str(&uti))
+                .ok_or("clipboard_read_failed")?
+                .to_vec();
+            match uti.as_str() {
+                "public.html" => html_header(&data),
+                "public.tiff" => super::image::png(&data, 0)?.png,
+                _ => data,
+            }
+        };
+        formats.insert(name.to_owned(), Data::Bytes(data.into()));
+    }
+    if let Some(items) = board.pasteboardItems() {
+        let mut paths = Vec::new();
+        for item in items {
+            if let Some(url) = item.stringForType(&NSString::from_str("public.file-url")) {
+                let path = NSURL::URLWithString(&url)
+                    .and_then(|url| url.path())
+                    .ok_or("invalid_file_url")?;
+                paths.push(path.to_string());
+            }
+        }
+        if !paths.is_empty() {
+            formats.insert(FILES.to_owned(), Data::Files(paths.into()));
+        }
+    }
+    Ok(formats)
+}
+
+fn publish(board: &NSPasteboard, content: &Content) -> Result<()> {
+    let first = NSPasteboardItem::new();
+    let mut items = vec![first];
+    for (name, format) in &content.formats {
+        if let Data::Files(paths) = &format.data {
+            for (index, path) in paths.iter().enumerate() {
+                if index > 0 {
+                    items.push(NSPasteboardItem::new());
+                }
+                let url = NSURL::fileURLWithPath(&NSString::from_str(path))
+                    .absoluteString()
+                    .ok_or("invalid_file_url")?;
+                if !items[index].setString_forType(&url, &NSString::from_str("public.file-url")) {
+                    return Err("clipboard_write_failed".into());
+                }
+            }
+        } else if let Some((uti, _)) = TYPES.iter().find(|(_, stored)| *stored == name) {
+            let bytes = content.raw(name).ok_or("clipboard_format_failed")?;
+            let ok = if name == TEXT {
+                items[0].setString_forType(
+                    &NSString::from_str(&content.text_value().ok_or("clipboard_format_failed")?),
+                    &NSString::from_str(uti),
+                )
+            } else {
+                let bytes = if name == HTML {
+                    html_body(bytes)?
+                } else {
+                    bytes
+                };
+                items[0].setData_forType(&NSData::with_bytes(bytes), &NSString::from_str(uti))
+            };
+            if !ok {
+                return Err("clipboard_write_failed".into());
+            }
+        }
+    }
+    let objects: Vec<Retained<ProtocolObject<dyn NSPasteboardWriting>>> = items
+        .into_iter()
+        .map(ProtocolObject::from_retained)
+        .collect();
+    board.clearContents();
+    if !board.writeObjects(&NSArray::from_retained_slice(&objects)) {
+        return Err("clipboard_write_failed".into());
+    }
+    Ok(())
+}
+
+pub struct Record {
+    pub id: usize,
+    pub fingerprint: Fingerprint,
+}
+pub struct Observation;
+pub type Watcher = Box<dyn Fn(queue::Stamp) + Send>;
+struct Inner {
+    history: History,
+    pub lock: Mutex<()>,
+    own_change: AtomicIsize,
+    watcher: Mutex<Option<Watcher>>,
+}
+#[derive(Clone)]
+pub struct Service(Arc<Inner>);
+impl Service {
+    pub fn start(_: Logger, history: History) -> Result<Self> {
+        Ok(Self(Arc::new(Inner {
+            history,
+            lock: Mutex::new(()),
+            own_change: AtomicIsize::new(-1),
+            watcher: Mutex::new(None),
+        })))
+    }
+    pub fn owner(&self) -> usize {
+        std::process::id() as usize
+    }
+    pub fn stamp(&self) -> queue::Stamp {
+        self.sample(NSPasteboard::generalPasteboard().changeCount())
+    }
+    fn sample(&self, count: isize) -> queue::Stamp {
+        queue::Stamp {
+            owner: if self.is_own(count) { self.owner() } else { 0 },
+            sequence: count as u32,
+        }
+    }
+    pub(super) fn is_own(&self, count: isize) -> bool {
+        self.0.own_change.load(Ordering::Acquire) == count
+    }
+    pub(super) fn lock(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.0.lock.lock().unwrap()
+    }
+    pub(super) fn changed(&self, count: isize) {
+        if let Some(watcher) = self.0.watcher.lock().unwrap().as_ref() {
+            watcher(self.sample(count));
+        }
+    }
+    pub fn set_clipboard_watcher(&self, watcher: Option<Watcher>) -> Result<()> {
+        *self.0.watcher.lock().unwrap() = watcher;
+        Ok(())
+    }
+    pub fn write(
+        &self,
+        record: Record,
+        content: Arc<Content>,
+        _: u32,
+        _: bool,
+    ) -> Result<Arc<Mutex<Observation>>> {
+        if !self.0.history.before_write(
+            record.id,
+            record.fingerprint,
+            content.fingerprint,
+            Instant::now(),
+        ) {
+            return Err("record_missing".into());
+        }
+        let _lock = self.lock();
+        let board = NSPasteboard::generalPasteboard();
+        publish(&board, &content)?;
+        self.0
+            .own_change
+            .store(board.changeCount(), Ordering::Release);
+        Ok(Arc::new(Mutex::new(Observation)))
+    }
+    pub fn write_guarded(
+        &self,
+        record: Record,
+        content: Arc<Content>,
+        target: u32,
+        delayed: bool,
+        guard: Arc<queue::Guard>,
+    ) -> Result<Arc<Mutex<Observation>>> {
+        let mut lease = guard.lease();
+        lease
+            .begin(self.stamp())
+            .map_err(|reason| reason.name().to_owned())?;
+        let result = self.write(record, content, target, delayed)?;
+        lease.published(self.stamp());
+        Ok(result)
+    }
+    pub fn write_for_capture(&self, content: Arc<Content>) -> Result<()> {
+        let _lock = self.lock();
+        publish(&NSPasteboard::generalPasteboard(), &content)
+    }
+    // macOS 没有剪贴板消息窗口，这里不需要。
+    pub fn shutdown(&self) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn uti_uses_existing_storage_names() {
+        assert_eq!(
+            TYPES.map(|(uti, _)| format_name(uti)),
+            [
+                Some(TEXT),
+                Some(HTML),
+                Some(RTF),
+                Some(PNG),
+                Some(PNG),
+                Some(FILES)
+            ]
+        );
+    }
+    #[test]
+    fn unknown_uti_is_not_recorded() {
+        assert_eq!(format_name("org.example.unknown"), None);
+    }
+    #[test]
+    fn html_offsets_count_utf8_bytes() {
+        let html = "<b>会议</b>".as_bytes();
+        assert_eq!(html_body(&html_header(html)), Ok(html));
+    }
+    #[test]
+    fn raw_html_stays_unchanged() {
+        assert_eq!(html_body(b"<p>hello</p>"), Ok(b"<p>hello</p>".as_slice()));
+    }
+}

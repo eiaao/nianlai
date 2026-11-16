@@ -1526,6 +1526,7 @@ mod startup_tests {
         }
     }
 
+    #[cfg(windows)]
     #[test]
     fn full_text_comes_in_chunks_and_images_render_with_original_size() {
         let directory = Directory::new();

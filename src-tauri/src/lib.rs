@@ -718,6 +718,8 @@ pub fn run() {
             guide_window::set_guide_hit_regions
         ])
         .setup(|app| {
+            #[cfg(target_os = "macos")]
+            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             let settings_file = settings::settings_path();
             let (store, issues) = settings::Store::load(settings_file.clone());
             let resolved = settings::Resolved::new(store.get(), settings_file);
