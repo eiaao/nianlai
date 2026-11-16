@@ -1,7 +1,7 @@
 use super::{apps, clipboard};
 use crate::{
     capture::rules,
-    history::{CopyEvent, History, content::Content},
+    history::{Captured, CopyEvent, History, content::Content},
     log::Logger,
     platform::Result,
 };
@@ -114,7 +114,7 @@ fn capture(board: &NSPasteboard, count: isize, history: &History, logger: &Logge
     }
     let content = Content::new(data, super::hash::sha256)?;
     let now = Instant::now();
-    history.capture(
+    let captured = history.capture(
         content,
         CopyEvent {
             time_ms: crate::log::now_ms(),
@@ -128,6 +128,9 @@ fn capture(board: &NSPasteboard, count: isize, history: &History, logger: &Logge
         false,
         now,
     )?;
-    history.refresh_source_app(bundle);
-    Ok(true)
+    let recorded = matches!(captured, Captured::Stored(result) if result.record_id.is_some());
+    if recorded {
+        history.refresh_source_app(bundle);
+    }
+    Ok(recorded)
 }

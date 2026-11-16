@@ -16,6 +16,7 @@ use std::{
 };
 
 // macOS 没有 Windows 原生编辑控件直投，这里不需要。
+#[allow(dead_code)]
 pub fn native_candidate(_: &Request, _: &Content, _: bool) -> bool {
     false
 }

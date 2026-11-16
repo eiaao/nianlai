@@ -154,6 +154,8 @@ impl Snapshot {
 }
 
 #[derive(Debug)]
+// Mac 保留纯运输选择测试；字段只由 Windows 提交端消费。
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub enum NativeTransport {
     WmPaste { style: Style },
     ReplaceSel { text: Text, snapshot: Snapshot },

@@ -304,6 +304,7 @@ impl Permit {
                 || state.returning.as_ref().is_some_and(|ret| ret.observed))
     }
     // 原生提交在面板仍为前台时完成，不能借用要求目标前台的发键许可。
+    #[cfg(any(windows, test))]
     pub fn can_submit_native(
         &self,
         session: u64,

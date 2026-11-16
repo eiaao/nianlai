@@ -31,6 +31,8 @@ pub struct Layout {
     pub y: i32,
     pub width: i32,
     pub height: i32,
+    // M2 按目标屏幕缩放定位。
+    #[allow(dead_code)]
     pub scale: f64,
     pub fit: Fit,
 }

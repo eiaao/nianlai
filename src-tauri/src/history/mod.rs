@@ -277,6 +277,7 @@ impl History {
             .expect("记录健康迁移总是产生新状态");
     }
     /// 读取线程 panic、协调失败或意外返回是持久事实，监听重挂不能把它擦掉。
+    #[cfg(windows)]
     pub fn fail_capture_reader(&self) {
         self.recording.store(false, Ordering::Release);
         self.capture
@@ -345,6 +346,7 @@ impl History {
         }
         failed
     }
+    #[cfg(windows)]
     pub fn last_write(&self) -> Option<Instant> {
         *self.last_write.lock().unwrap()
     }
@@ -763,6 +765,8 @@ impl History {
         }
         found
     }
+    // M3 的 macOS 粘贴成功后接回历史复用。
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     pub fn reuse(&self, id: usize) {
         if !REUSE_TO_TOP.load(Ordering::Acquire) {
             return;
@@ -774,6 +778,7 @@ impl History {
             );
         }
     }
+    #[cfg(any(windows, test))]
     pub fn latest_sequence(&self) -> Option<u32> {
         self.db().latest_sequence()
     }
@@ -918,7 +923,7 @@ impl History {
 
 #[cfg(test)]
 mod gate_tests;
-#[cfg(all(test, windows))]
+#[cfg(test)]
 mod tests;
 
 #[cfg(test)]

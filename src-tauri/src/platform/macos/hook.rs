@@ -6,6 +6,10 @@ use std::time::Instant;
 use tauri_plugin_global_shortcut::Shortcut;
 
 pub struct Hooks;
+impl Drop for Hooks {
+    // M1 没有安装监听；M2 在此释放面板失焦监听。
+    fn drop(&mut self) {}
+}
 // macOS 没有 Windows 预览键钩子，这里不需要。
 pub fn set_preview_keys(_: bool) {}
 pub fn supported(_: &Shortcut) -> bool {

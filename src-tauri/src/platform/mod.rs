@@ -1,12 +1,16 @@
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
+#[cfg(any(windows, test))]
 pub(crate) mod focus_restore;
+// macOS 不吞键；保留 Counts 接口和纯状态机测试。
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub mod key_state;
 
 // 切到搜索模式时补发首键的总等待上限。前端聚焦后还要等两帧让输入法接管，
 // 实测最慢的一次补发已到 464 ms，500 ms 不够余量，超时整批按键会被丢弃。
 pub const REPLAY_WAIT: Duration = Duration::from_millis(800);
+#[cfg(windows)]
 pub const REPLAY_CAPACITY: usize = 32;
 
 /// 面板呼出位置（设置 interaction.placement）。
@@ -32,6 +36,7 @@ impl PlacementMode {
 pub type Result<T> = std::result::Result<T, String>;
 
 #[derive(Clone, Copy, Debug, Deserialize)]
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub struct HitRegion {
     pub left: f64,
     pub top: f64,
@@ -39,6 +44,7 @@ pub struct HitRegion {
     pub bottom: f64,
 }
 
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub struct HookOptions {
     pub monitor: std::sync::Arc<crate::paste::permit::Monitor>,
     pub restricted: bool,
@@ -51,13 +57,16 @@ pub struct Target {
     pub focus: usize,
     pub thread: u32,
     pub process: u32,
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     pub caret: Option<Caret>,
     pub process_name: String,
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     pub window_class: String,
     pub focus_class: String,
 }
 
 #[derive(Clone, Copy)]
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub struct Caret {
     pub left: i32,
     pub top: i32,
@@ -72,6 +81,7 @@ pub struct ReplayBatch {
 }
 
 #[derive(Clone, Copy)]
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub struct ReplayKey {
     pub vk: u16,
     pub scan: u16,
@@ -79,6 +89,7 @@ pub struct ReplayKey {
     pub shift: bool,
 }
 
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub enum HookEvent {
     Key(&'static str),
     ForegroundRevision(u64),
@@ -95,6 +106,7 @@ pub enum HookEvent {
 
 // 管理员提示停留时面板所处的模式，决定停留期间按键是放行给目标还是吞掉（M0-6b）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(windows)]
 pub enum HintMode {
     // 快速模式：面板不激活，目标仍有焦点。带 Ctrl / Alt / Win 的组合键放行给目标，普通键吞掉。
     Quick,
@@ -104,6 +116,7 @@ pub enum HintMode {
 
 // 停留被按键提前结束的原因，写进 elevated_hint_hidden 的 ended_by。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub enum HintEnd {
     Escape,
     // 这个键放行给了目标：快速模式下带 Ctrl / Alt / Win 的组合键（例如 Ctrl+V 里的 V），或搜索模式下面板已被切走。

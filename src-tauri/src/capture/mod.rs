@@ -38,11 +38,13 @@ pub fn blocking_marker<'a>(
     None
 }
 
+#[cfg(any(windows, test))]
 pub struct SelfCheck {
     last_notified: u32,
     suspicious: bool,
 }
 
+#[cfg(any(windows, test))]
 impl SelfCheck {
     pub fn new(sequence: u32) -> Self {
         Self {

@@ -131,6 +131,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: macos-check
+          cache-on-failure: true
       - name: 安装前端依赖
         run: pnpm install --frozen-lockfile
       - name: 检查前端

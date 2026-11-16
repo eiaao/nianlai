@@ -44,6 +44,7 @@ pub(crate) fn generic_outcome(
 }
 
 // 只用于已选择原生策略的结果；锁前/写入错误也结束旧选择，不能重新开放已卸监听的面板。
+#[cfg(any(windows, test))]
 pub(crate) fn native_outcome(
     result: Result<super::native::Completion, String>,
     report: &mut serde_json::Value,

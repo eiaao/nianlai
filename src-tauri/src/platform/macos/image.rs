@@ -10,6 +10,8 @@ pub struct Rendered {
     pub width: u32,
     pub height: u32,
 }
+// M3 的图片转路径粘贴使用此导出结果。
+#[allow(dead_code)]
 pub struct Saved {
     pub path: PathBuf,
     pub reused: bool,
@@ -41,6 +43,7 @@ pub fn render(content: &Content, limit: u32) -> Result<Rendered, &'static str> {
 pub fn thumbnail(content: &Content, limit: u32) -> Result<Vec<u8>, &'static str> {
     render(content, limit).map(|image| image.png)
 }
+#[allow(dead_code)]
 pub fn save_png(content: &Content, directory: &Path) -> Result<Saved, &'static str> {
     let started = Instant::now();
     let bytes = content.raw(PNG).ok_or("no_image")?;

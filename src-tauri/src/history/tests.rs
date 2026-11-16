@@ -737,6 +737,7 @@ fn storage_errors_become_plain_chinese_messages() {
 // cargo test --release image_preview_timing -- --ignored --nocapture
 #[test]
 #[ignore = "测量用"]
+#[cfg(windows)]
 fn image_preview_timing() {
     use content::{DIB, PNG};
     let (w, h) = (3840usize, 2160usize);
@@ -792,6 +793,7 @@ fn image_preview_timing() {
 }
 
 #[test]
+#[cfg(windows)]
 fn thumbnails_are_cached_per_id_and_size_and_dropped_when_content_is_purged() {
     use content::DIB;
     let mut dib = Vec::new();
@@ -821,6 +823,7 @@ fn thumbnails_are_cached_per_id_and_size_and_dropped_when_content_is_purged() {
 }
 
 #[test]
+#[cfg(windows)]
 fn merging_into_an_existing_record_drops_its_cached_thumbnails() {
     use content::DIB;
     let mut dib = Vec::new();
