@@ -648,6 +648,7 @@ fn dedup_keeps_every_event_moves_content_to_front_and_reuse_keeps_order() {
 
 // A06：来源应用行随事件写入并被列表引用；同进程同路径只建一行，最近一次复制决定列表来源。
 #[test]
+#[cfg(windows)]
 fn source_apps_upsert_with_events_and_lists_latest_source() {
     let temp = Temp::new();
     let store = temp.store();

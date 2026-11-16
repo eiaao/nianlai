@@ -1278,6 +1278,7 @@ mod startup_tests {
 
     // 命令层（lib.rs）拿到的就是这个 History 句柄，磁盘与内存模式行为一致（M1-S）。
     #[test]
+    #[cfg(windows)]
     fn history_serves_favorites_for_stored_and_memory_modes() {
         for persistent in [false, true] {
             let directory = Directory::new();

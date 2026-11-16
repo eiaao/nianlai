@@ -423,6 +423,7 @@ fn favorites_are_ordered_stable_and_survive_eviction() {
 
 // A06：内存模式记来源路径；显示名退回文件名去扩展名，无路径时用进程名。
 #[test]
+#[cfg(windows)]
 fn source_names_fall_back_to_file_stem_then_process() {
     let directory = Directory::new();
     let history = memory_history(&directory);
