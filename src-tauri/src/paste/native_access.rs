@@ -14,10 +14,12 @@ pub struct Publication {
 }
 
 impl Publication {
+    #[cfg(windows)]
     pub fn owner(self) -> usize {
         self.owner
     }
 
+    #[cfg(windows)]
     pub fn sequence(self) -> u32 {
         self.sequence
     }
@@ -117,6 +119,7 @@ impl Budget {
         }
     }
 
+    #[cfg(windows)]
     pub fn probes(&self) -> u32 {
         self.probes
     }

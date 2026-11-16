@@ -112,7 +112,9 @@ pub(super) fn read(board: &NSPasteboard) -> Result<BTreeMap<String, Data>> {
     Ok(formats)
 }
 
-fn publish(board: &NSPasteboard, content: &Content) -> Result<()> {
+fn prepare(
+    content: &Content,
+) -> Result<Retained<NSArray<ProtocolObject<dyn NSPasteboardWriting>>>> {
     let first = NSPasteboardItem::new();
     let mut items = vec![first];
     for (name, format) in &content.formats {
@@ -152,18 +154,31 @@ fn publish(board: &NSPasteboard, content: &Content) -> Result<()> {
         .into_iter()
         .map(ProtocolObject::from_retained)
         .collect();
-    board.clearContents();
-    if !board.writeObjects(&NSArray::from_retained_slice(&objects)) {
+    Ok(NSArray::from_retained_slice(&objects))
+}
+
+fn publish(
+    board: &NSPasteboard,
+    objects: &NSArray<ProtocolObject<dyn NSPasteboardWriting>>,
+) -> Result<isize> {
+    let count = board.clearContents();
+    if !board.writeObjects(objects) {
         return Err("clipboard_write_failed".into());
     }
-    Ok(())
+    // 外部写入的代数不能记成自己的发布。
+    if board.changeCount() != count {
+        return Err("generic_clipboard_changed".into());
+    }
+    Ok(count)
 }
 
 pub struct Record {
     pub id: usize,
     pub fingerprint: Fingerprint,
 }
-pub struct Observation;
+pub struct Observation {
+    pub stamp: queue::Stamp,
+}
 pub type Watcher = Box<dyn Fn(queue::Stamp) + Send>;
 struct Inner {
     history: History,
@@ -216,6 +231,24 @@ impl Service {
         _: u32,
         _: bool,
     ) -> Result<Arc<Mutex<Observation>>> {
+        self.write_inner(record, content, None)
+    }
+    pub fn write_guarded(
+        &self,
+        record: Record,
+        content: Arc<Content>,
+        _: u32,
+        _: bool,
+        guard: Arc<queue::Guard>,
+    ) -> Result<Arc<Mutex<Observation>>> {
+        self.write_inner(record, content, Some(guard))
+    }
+    fn write_inner(
+        &self,
+        record: Record,
+        content: Arc<Content>,
+        guard: Option<Arc<queue::Guard>>,
+    ) -> Result<Arc<Mutex<Observation>>> {
         if !self.0.history.before_write(
             record.id,
             record.fingerprint,
@@ -227,32 +260,27 @@ impl Service {
         let _lock = self.lock();
         objc2::rc::autoreleasepool(|_| {
             let board = NSPasteboard::generalPasteboard();
-            publish(&board, &content)?;
-            self.0
-                .own_change
-                .store(board.changeCount(), Ordering::Release);
-            Ok(Arc::new(Mutex::new(Observation)))
+            let objects = prepare(&content)?;
+            let mut lease = guard.as_ref().map(|guard| guard.lease());
+            if let Some(lease) = lease.as_mut() {
+                lease
+                    .begin(self.sample(board.changeCount()))
+                    .map_err(|reason| reason.name().to_owned())?;
+            }
+            let count = publish(&board, &objects)?;
+            self.0.own_change.store(count, Ordering::Release);
+            let stamp = self.sample(count);
+            if let Some(lease) = lease.as_mut() {
+                lease.published(stamp);
+            }
+            Ok(Arc::new(Mutex::new(Observation { stamp })))
         })
-    }
-    pub fn write_guarded(
-        &self,
-        record: Record,
-        content: Arc<Content>,
-        target: u32,
-        delayed: bool,
-        guard: Arc<queue::Guard>,
-    ) -> Result<Arc<Mutex<Observation>>> {
-        let mut lease = guard.lease();
-        lease
-            .begin(self.stamp())
-            .map_err(|reason| reason.name().to_owned())?;
-        let result = self.write(record, content, target, delayed)?;
-        lease.published(self.stamp());
-        Ok(result)
     }
     pub fn write_for_capture(&self, content: Arc<Content>) -> Result<()> {
         let _lock = self.lock();
-        objc2::rc::autoreleasepool(|_| publish(&NSPasteboard::generalPasteboard(), &content))
+        objc2::rc::autoreleasepool(|_| {
+            publish(&NSPasteboard::generalPasteboard(), &prepare(&content)?).map(|_| ())
+        })
     }
     // macOS 没有剪贴板消息窗口，这里不需要。
     pub fn shutdown(&self) {}

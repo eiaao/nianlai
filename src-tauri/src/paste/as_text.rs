@@ -67,6 +67,7 @@ fn quote(path: &str) -> String {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Separator {
     Newline,
+    #[cfg(any(windows, test))]
     Space,
 }
 
@@ -74,6 +75,7 @@ impl Separator {
     pub fn name(self) -> &'static str {
         match self {
             Self::Newline => "newline",
+            #[cfg(any(windows, test))]
             Self::Space => "space",
         }
     }
@@ -81,6 +83,7 @@ impl Separator {
 
 /// 按目标焦点控件决定分隔。`style` 是焦点窗口的 GWL_STYLE（读不到为 None）。
 /// 判断不了（浏览器、Office、终端、自绘控件……）一律换行。
+#[cfg(any(windows, test))]
 pub fn separator_for(focus_class: &str, style: Option<u32>) -> Separator {
     const ES_MULTILINE: u32 = 0x0004;
     let class = focus_class.to_ascii_lowercase();
@@ -173,6 +176,7 @@ pub fn append_separator(content: &Arc<Content>, separator: Separator, hash: Hash
     };
     let (plain, html, rtf): (&str, &[u8], &[u8]) = match separator {
         Separator::Newline => ("\r\n", b"<br>", b"\\par "),
+        #[cfg(any(windows, test))]
         Separator::Space => (" ", b" ", b"{ }"),
     };
     let mut formats = std::collections::BTreeMap::new();

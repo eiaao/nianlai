@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { keyLabel } from "../platform";
+  import { isMac, keyLabel } from "../platform";
   // 手牌的唯一摆放入口：按姿态（扇面 / 摊开）算出每张牌的目标位置和尺寸，同一个以 id 为 key 的元素在两种姿态之间补间。
   import { untrack } from "svelte";
   import type { PanelState } from "../state.svelte";
@@ -203,8 +203,8 @@
     {#if showHint}
       <div class="hint" class:flat={spread} data-hit bind:clientWidth={hintWidth} style={`translate:${hintPlace.x}px ${hintPlace.y}px`}>
         {#if panel.stack.length}
-          {#if panel.heldModifier === "ctrl"}{@render keys(["Ctrl", "↵"], "按纯文本一起粘贴")}{@render keys(["Ctrl", "Shift", "↵"], "逐张放")}
-          {:else}{@render keys(["↵"], "一起粘贴")}{@render keys(["Ctrl", "Shift", "↵"], "逐张放")}{#if !panel.searching}{@render keys(["Backspace"], "放回一张")}{/if}{/if}
+          {#if panel.heldModifier === "ctrl"}{@render keys(["Ctrl", "↵"], "按纯文本一起粘贴")}{#if !isMac}{@render keys(["Ctrl", "Shift", "↵"], "逐张放")}{/if}
+          {:else}{@render keys(["↵"], "一起粘贴")}{#if !isMac}{@render keys(["Ctrl", "Shift", "↵"], "逐张放")}{/if}{#if !panel.searching}{@render keys(["Backspace"], "放回一张")}{/if}{/if}
         {:else if panel.currentItem?.action}
           {@render keys(["↵"], "打开设置")}{@render keys(["↓"], "看搜索结果")}{@render keys(["Esc"], "清空搜索")}
         {:else if panel.currentItem?.guide_id}

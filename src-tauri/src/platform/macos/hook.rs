@@ -10,15 +10,25 @@ use std::{
 use tauri::{WebviewWindow, WindowEvent};
 use tauri_plugin_global_shortcut::Shortcut;
 
-type OutsideCallback = Box<dyn Fn(HookEvent) + Send>;
+type OutsideCallback = (u64, Box<dyn Fn(HookEvent) + Send>);
 static OUTSIDE: Mutex<Option<OutsideCallback>> = Mutex::new(None);
+
+fn clear(session: u64) {
+    let mut outside = OUTSIDE.lock().unwrap();
+    if outside
+        .as_ref()
+        .is_some_and(|(current, _)| *current == session)
+    {
+        outside.take();
+    }
+}
 
 pub(super) fn initialize(window: &WebviewWindow) {
     window.on_window_event(|event| {
         if matches!(event, WindowEvent::Focused(false)) {
             // 回调会收起面板并释放 Hooks，不能持锁调用。
             let callback = OUTSIDE.lock().unwrap().take();
-            if let Some(callback) = callback {
+            if let Some((_, callback)) = callback {
                 callback(HookEvent::Outside {
                     point: [0; 2],
                     bounds: [0; 4],
@@ -31,10 +41,11 @@ pub(super) fn initialize(window: &WebviewWindow) {
 
 pub struct Hooks {
     monitor: Arc<Monitor>,
+    session: u64,
 }
 impl Drop for Hooks {
     fn drop(&mut self) {
-        OUTSIDE.lock().unwrap().take();
+        clear(self.session);
         self.monitor.stopped();
     }
 }
@@ -50,14 +61,15 @@ impl Hooks {
         _: &Target,
         _: Option<Shortcut>,
         _: Logger,
-        _: u64,
+        session: u64,
         options: HookOptions,
         callback: impl Fn(HookEvent) + Send + 'static,
     ) -> Result<Self> {
-        *OUTSIDE.lock().unwrap() = Some(Box::new(callback));
+        *OUTSIDE.lock().unwrap() = Some((session, Box::new(callback)));
         options.monitor.started();
         Ok(Self {
             monitor: options.monitor,
+            session,
         })
     }
     pub fn switched_to(&self) -> usize {
@@ -73,6 +85,8 @@ impl Hooks {
     }
     // macOS 没有吞键，这里不需要。
     pub fn stop_inputs(&self, _: bool) -> Result<bool> {
+        // 粘贴开始后的主动收窗/归还不再当作外部点击。
+        clear(self.session);
         Ok(true)
     }
     pub fn input_release_evidence(&self) -> &'static str {

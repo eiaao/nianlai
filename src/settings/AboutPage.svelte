@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
   import * as ipc from "../lib/ipc";
+  import { isMac } from "../lib/platform";
   import type { AppSettings, GuideSettings, LicenseNotices, SettingsUpdate } from "../lib/ipc";
   import appIcon from "../../src-tauri/icons/128x128.png?url";
   import { message } from "./format";
@@ -29,11 +30,18 @@
   let licenseButton = $state<HTMLButtonElement>();
   let actionPending = $state<"replay" | "deal" | "open" | null>(null);
   let actionNotice = $state("");
+  let accessibility = $state("正在读取权限…");
   const inFirstRun = $derived(guide.phase === "await_copy" || guide.phase === "await_show" || guide.phase === "await_paste");
   const actionDisabled = $derived(disabled || inFirstRun || dealPending || actionPending !== null || saveState("about.guide").phase === "saving");
 
   onMount(() => {
     let alive = true;
+    const refreshAccessibility = () => {
+      void ipc.macAccessibilityStatus()
+        .then((enabled) => { if (alive) accessibility = enabled ? "已打开，可以直接贴进去" : "还没打开，只能先复制"; })
+        .catch(() => { if (alive) accessibility = "权限没读到，请重新打开这页"; });
+    };
+    if (isMac) { refreshAccessibility(); window.addEventListener("focus", refreshAccessibility); }
     void ipc.appVersion()
       .then((value) => { if (alive) version = value; })
       .catch(() => { if (alive) version = "版本没读到，重新打开这页试试"; });
@@ -41,7 +49,7 @@
       .then((value) => { if (alive) dataDir = value; })
       .catch(() => { if (alive) dataDir = "目录没读到，重新打开这页试试"; });
     void loadNotices();
-    return () => { alive = false; };
+    return () => { alive = false; if (isMac) window.removeEventListener("focus", refreshAccessibility); };
   });
 
   async function loadNotices() {
@@ -116,6 +124,12 @@
   </div>
 
   <div class="card about-rows">
+    {#if isMac}
+      <div class="setting">
+        <span class="setting-copy"><strong>辅助功能</strong><small>{accessibility}</small></span>
+        <button type="button" onclick={() => { if (isMac) void ipc.macOpenAccessibilitySettings().catch(() => { accessibility = "系统设置没打开，请手动打开辅助功能设置"; }); }}>去设置</button>
+      </div>
+    {/if}
     <div class="setting">
       <span class="setting-copy"><strong>版本 <span data-about-version>{version}</span></strong><small>东西都存在这台电脑上，不联网。</small></span>
     </div>

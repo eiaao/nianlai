@@ -126,6 +126,7 @@ impl Table {
         }
         unreachable!("内置表总有末尾默认规则")
     }
+    #[cfg(any(windows, test))]
     pub fn is_builtin_default_ctrl_v(&self, selected: Match) -> bool {
         self.builtin.last().is_some_and(|rule| {
             rule.process.is_none()

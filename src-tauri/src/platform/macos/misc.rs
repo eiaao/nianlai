@@ -213,13 +213,16 @@ pub mod queue_hook {
     pub struct QueueHooks;
 
     impl QueueHooks {
-        // macOS Beta 没有手动逐张粘贴钩子，这里不需要。
+        // 只启用已有自动队列；macOS Beta 不拦截全局 ⌘V。
         pub fn install(
             _cancelled: Arc<AtomicBool>,
             _expired: impl Fn() -> bool + Send + 'static,
             _callback: impl Fn(QueueEvent) + Send + 'static,
         ) -> Result<Self> {
-            Err("macOS 版暂不支持逐张粘贴".into())
+            if !super::super::ax::accessibility_status() {
+                return Err("mac_accessibility_required".into());
+            }
+            Ok(Self)
         }
 
         // macOS Beta 没有手动逐张粘贴钩子，这里不需要。

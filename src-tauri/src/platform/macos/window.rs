@@ -1,11 +1,13 @@
 use crate::platform::{
     FocusResult, ForegroundResult, HitRegion, PlacementMode, Result as PlatformResult, Target,
 };
-use objc2_app_kit::{NSPopUpMenuWindowLevel, NSWindowCollectionBehavior, NSWindowStyleMask};
+use objc2::rc::autoreleasepool;
+use objc2_app_kit::{
+    NSPopUpMenuWindowLevel, NSScreen, NSWindowCollectionBehavior, NSWindowStyleMask,
+};
 use serde::Deserialize;
-use std::sync::LazyLock;
-use std::time::Instant;
-use tauri::{LogicalPosition, LogicalSize, PhysicalSize, WebviewWindow};
+use std::sync::mpsc;
+use tauri::{AppHandle, LogicalPosition, LogicalSize, PhysicalSize, WebviewWindow};
 use tauri_nspanel::{ManagerExt, WebviewWindowExt};
 
 tauri_nspanel::tauri_panel! {
@@ -137,10 +139,6 @@ pub fn handle(_: &WebviewWindow) -> PlatformResult<usize> {
 pub fn foreground() -> usize {
     super::apps::frontmost().map_or(0, |app| app.pid as usize)
 }
-pub fn tick_count() -> u32 {
-    static START: LazyLock<Instant> = LazyLock::new(Instant::now);
-    START.elapsed().as_millis() as u32
-}
 pub fn capture() -> Target {
     match super::apps::frontmost() {
         Some(app) => Target {
@@ -157,7 +155,7 @@ pub fn capture() -> Target {
 pub fn no_activate(_: &WebviewWindow, _: bool) -> PlatformResult<()> {
     Ok(())
 }
-fn layout(mouse: NSPoint, work: NSRect, scale: f64, mode: PlacementMode) -> Layout {
+fn layout(anchor: [f64; 4], work: NSRect, scale: f64, mode: PlacementMode) -> Layout {
     let width = 960.0_f64.min(work.size.width);
     let height = 540.0_f64.min(work.size.height);
     let (x, y, fit) = if mode == PlacementMode::Center {
@@ -167,13 +165,13 @@ fn layout(mouse: NSPoint, work: NSRect, scale: f64, mode: PlacementMode) -> Layo
             Fit("center"),
         )
     } else {
-        let below = mouse.y + 6.0;
+        let below = anchor[3] + 6.0;
         let (y, fit) = if below + height <= work.origin.y + work.size.height {
             (below, Fit("below"))
         } else {
-            (mouse.y - height - 6.0, Fit("above"))
+            (anchor[1] - height - 6.0, Fit("above"))
         };
-        (mouse.x + 6.0, y, fit)
+        (anchor[0] + 6.0, y, fit)
     };
     Layout {
         x: (x.clamp(work.origin.x, work.origin.x + work.size.width - width) * scale).round() as i32,
@@ -186,9 +184,40 @@ fn layout(mouse: NSPoint, work: NSRect, scale: f64, mode: PlacementMode) -> Layo
     }
 }
 
-pub fn show(panel: &WebviewWindow, _: &Target, mode: PlacementMode) -> PlatformResult<Shown> {
+fn placement(target: &Target, mode: PlacementMode) -> PlatformResult<Layout> {
+    if mode == PlacementMode::Caret
+        && let Some(rect) = super::ax::caret_bounds(target.process as i32)
+    {
+        let anchor = super::ax::ax_rect_to_logical(rect);
+        let mtm = MainThreadMarker::new().ok_or("显示器查询需要在主线程执行")?;
+        let screens = NSScreen::screens(mtm);
+        let primary = screens.firstObject().ok_or("没有可用的显示器")?;
+        let primary_top = primary.frame().origin.y + primary.frame().size.height;
+        let screen = screens.iter().find(|screen| {
+            let frame = screen.frame();
+            let top = primary_top - frame.origin.y - frame.size.height;
+            anchor[0] >= frame.origin.x
+                && anchor[0] < frame.origin.x + frame.size.width
+                && anchor[1] >= top
+                && anchor[1] < top + frame.size.height
+        });
+        if let Some(screen) = screen {
+            let mut work = screen.visibleFrame();
+            // 只转换 AppKit 的屏幕边界；AX 光标已经是左上原点逻辑点。
+            work.origin.y = primary_top - work.origin.y - work.size.height;
+            return Ok(layout(anchor, work, screen.backingScaleFactor(), mode));
+        }
+    }
     let (mouse, work, scale) = super::monitor::current_target_screen()?;
-    let layout = layout(mouse, work, scale, mode);
+    Ok(layout(
+        [mouse.x, mouse.y, mouse.x, mouse.y],
+        work,
+        scale,
+        mode,
+    ))
+}
+
+fn position(panel: &WebviewWindow, layout: &Layout) -> PlatformResult<()> {
     panel
         .set_size(LogicalSize::new(
             f64::from(layout.width) / layout.scale,
@@ -201,19 +230,54 @@ pub fn show(panel: &WebviewWindow, _: &Target, mode: PlacementMode) -> PlatformR
             f64::from(layout.x) / layout.scale,
             f64::from(layout.y) / layout.scale,
         ))
-        .map_err(|error| error.to_string())?;
-    native(panel)?.order_front_regardless();
-    focus(panel)?;
-    Ok(Shown {
-        cursor_known: true,
-        layout,
+        .map_err(|error| error.to_string())
+}
+
+pub fn show(panel: &WebviewWindow, target: &Target, mode: PlacementMode) -> PlatformResult<Shown> {
+    autoreleasepool(|_| {
+        let layout = placement(target, mode)?;
+        position(panel, &layout)?;
+        let native = native(panel)?;
+        native.set_becomes_key_only_if_needed(false);
+        native.order_front_regardless();
+        focus(panel)?;
+        Ok(Shown {
+            cursor_known: true,
+            layout,
+        })
     })
 }
 pub fn show_auto(panel: &WebviewWindow) -> PlatformResult<()> {
     show(panel, &Target::default(), PlacementMode::Center).map(|_| ())
 }
 pub fn show_queue(panel: &WebviewWindow, target: &Target) -> PlatformResult<bool> {
-    show(panel, target, PlacementMode::Mouse).map(|shown| shown.cursor_known)
+    autoreleasepool(|_| {
+        position(panel, &placement(target, PlacementMode::Mouse)?)?;
+        let native = native(panel)?;
+        native.set_becomes_key_only_if_needed(true);
+        native.resign_key_window();
+        native.order_front_regardless();
+        Ok(true)
+    })
+}
+
+pub fn resign_queue(app: &AppHandle) -> PlatformResult<()> {
+    let panel = app
+        .get_webview_panel("panel")
+        .map_err(|error| format!("面板读取失败：{error:?}"))?;
+    let resign = move || autoreleasepool(|_| panel.resign_key_window());
+    if MainThreadMarker::new().is_some() {
+        resign();
+        return Ok(());
+    }
+    // 点击进度可能重新接收键盘，工作线程发键前须等主线程退让完成。
+    let (reply, receiver) = mpsc::sync_channel(1);
+    app.run_on_main_thread(move || {
+        resign();
+        let _ = reply.send(());
+    })
+    .map_err(|error| error.to_string())?;
+    receiver.recv().map_err(|error| error.to_string())
 }
 pub fn move_to(panel: &WebviewWindow, x: i32, y: i32) -> PlatformResult<()> {
     let scale = panel.scale_factor().map_err(|error| error.to_string())?;
@@ -263,10 +327,12 @@ pub fn activate(window: usize) -> ForegroundResult {
     }
 }
 pub fn valid(target: &Target) -> bool {
-    objc2_app_kit::NSRunningApplication::runningApplicationWithProcessIdentifier(
-        target.process as i32,
-    )
-    .is_some()
+    autoreleasepool(|_| {
+        objc2_app_kit::NSRunningApplication::runningApplicationWithProcessIdentifier(
+            target.process as i32,
+        )
+        .is_some()
+    })
 }
 pub fn confirm(target: &Target) -> FocusResult {
     FocusResult {
@@ -281,13 +347,6 @@ pub fn confirm_strict(target: &Target) -> FocusResult {
 pub fn restore(target: &Target) -> FocusResult {
     confirm(target)
 }
-pub fn restore_for_paste(
-    target: &Target,
-    _: &crate::paste::permit::Permit,
-    _: bool,
-) -> FocusResult {
-    confirm(target)
-}
 
 #[cfg(test)]
 mod tests {
@@ -296,7 +355,7 @@ mod tests {
     #[test]
     fn mouse_placement_keeps_left_screen_coordinates_at_retina_scale() {
         let placed = layout(
-            NSPoint::new(-1700.0, 250.0),
+            [-1700.0, 250.0, -1700.0, 250.0],
             NSRect::new(NSPoint::new(-1920.0, 0.0), NSSize::new(1920.0, 1080.0)),
             2.0,
             PlacementMode::Mouse,
@@ -307,7 +366,7 @@ mod tests {
     #[test]
     fn center_placement_keeps_upper_screen_coordinates() {
         let placed = layout(
-            NSPoint::new(400.0, -500.0),
+            [400.0, -500.0, 400.0, -500.0],
             NSRect::new(NSPoint::new(0.0, -1080.0), NSSize::new(1920.0, 1056.0)),
             1.0,
             PlacementMode::Center,
@@ -318,7 +377,7 @@ mod tests {
     #[test]
     fn panel_fits_small_visible_work_area() {
         let placed = layout(
-            NSPoint::new(799.0, 470.0),
+            [799.0, 470.0, 799.0, 470.0],
             NSRect::new(NSPoint::new(0.0, 24.0), NSSize::new(800.0, 450.0)),
             1.0,
             PlacementMode::Mouse,

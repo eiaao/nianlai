@@ -71,7 +71,10 @@ pub(crate) fn native_outcome(
 pub enum RestorePolicy {
     LegacyBeforeSubmit,
     GenericBeforeInput,
-    NativeAfterSubmit { unknown: bool },
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    NativeAfterSubmit {
+        unknown: bool,
+    },
 }
 
 pub struct Callbacks<'a> {
@@ -95,6 +98,7 @@ pub fn conclude(mode: Mode, sent: bool, confirmed: bool, degraded: bool) -> Past
 pub struct Request {
     pub session: u64,
     pub target: Target,
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     pub panel: usize,
     pub record_id: usize,
     pub content: Arc<Content>,

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { keyLabel } from "../lib/platform";
+  import { isMac, keyLabel } from "../lib/platform";
   import { onMount } from "svelte";
   import * as ipc from "../lib/ipc";
   import {
@@ -19,6 +19,7 @@
   let loaded = $state(false);
   let loadError = $state("");
   let runtimeError = $state("");
+  let accessibilityNeeded = $state(false);
   let systemReduced = $state(false);
   let flyVisible = $state(false);
   let animationCount = $state(0);
@@ -73,6 +74,7 @@
     const previous = flow;
     const transition = GuideFlow.reduce(previous, event);
     flow = transition.state;
+    if (flow.notice?.kind !== "paste_failed") accessibilityNeeded = false;
     markFirstRecord(previous, event);
     for (const effect of transition.effects) execute(effect);
   }
@@ -249,7 +251,15 @@
       if (acceptEvents) dispatch({ type: "panel_hidden", session });
     });
     bind(ipc.onGuidePasteResult, ({ session, id, result }) => {
-      if (acceptEvents) dispatch({ type: "paste_result", session, id, result });
+      if (!acceptEvents) return;
+      const previousSession = flow.session;
+      dispatch({ type: "paste_result", session, id, result });
+      if (isMac && result === "copied_only" && previousSession !== null && previousSession === session
+        && flow.session === null && flow.notice?.kind === "paste_failed") {
+        void ipc.macAccessibilityStatus()
+          .then((enabled) => { if (!destroyed && flow.lastSession === session && flow.notice?.kind === "paste_failed") accessibilityNeeded = !enabled; })
+          .catch(() => { if (!destroyed && flow.lastSession === session && flow.notice?.kind === "paste_failed") runtimeError = "辅助功能权限没读到，请重新呼出试试"; });
+      }
     });
     bind(ipc.onCaptureChanged, ({ paused }) => {
       if (!acceptEvents) return;
@@ -367,7 +377,8 @@
       {/if}
       {#if flow.notice}
         <div class:problem={flow.notice.kind !== "info"} class="notice" role={flow.notice.kind === "info" ? "status" : "alert"}>
-          <p>{flow.notice.message}</p>
+          <p>{accessibilityNeeded ? "在‘系统设置 › 隐私与安全性 › 辅助功能’里打开拈来，就能直接贴进去" : flow.notice.message}</p>
+          {#if accessibilityNeeded}<button type="button" class="text-button" onclick={() => { if (isMac) void ipc.macOpenAccessibilitySettings().catch(() => { runtimeError = "系统设置没打开，请手动打开辅助功能设置"; }); }}>去设置</button>{/if}
           {#if flow.notice.settingsPage}
             <button type="button" class="text-button" data-action={`settings-${flow.notice.settingsPage}`} onclick={() => openSettings(flow.notice!.settingsPage!)}>
               打开{flow.notice.settingsPage === "data" ? "数据与备份" : flow.notice.settingsPage === "privacy" ? "记录与隐私" : "通用"}设置

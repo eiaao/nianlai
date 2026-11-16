@@ -41,6 +41,7 @@ function normalizeMouseActions(interaction: import("./ipc").AppSettings["interac
 
 export type PasteFeedback = {
   kind: "copied" | "failed"; title: string; detail: string; duration: number; startedAt: number;
+  accessibility?: boolean;
 };
 
 // 缺少后端确认时不猜权限或原输入控件是否恢复。
@@ -678,6 +679,13 @@ export class PanelState {
     this.feedbackTimer = setTimeout(() => { this.clearFeedback(); }, 5000);
   }
 
+  openAccessibilitySettings = async () => {
+    if (!isMac) return;
+    const feedback = this.feedback;
+    try { await ipc.macOpenAccessibilitySettings(); }
+    catch { if (feedback && this.feedback === feedback) feedback.detail = `${feedback.kind === "copied" ? "按 Ctrl+V 贴上。" : ""}系统设置没打开，请手动打开辅助功能设置`; }
+  };
+
   search = async (value: string) => {
     const requestId = ++this.searchRequest;
     const currentSession = this.session;
@@ -852,7 +860,7 @@ export class PanelState {
     if (this.pendingDom) return;
     this.pendingDom = choice;
     this.awaitingRelease = true;
-    this.message = choice.id === null ? "松开就收起" : choice.queueIds ? "松开就开始逐张放" : "松开就贴";
+    this.message = choice.id === null ? "松开就收起" : choice.queueIds && !isMac ? "松开就开始逐张放" : "松开就贴";
     this.releaseDomChoice();
   }
 
@@ -1144,7 +1152,16 @@ export class PanelState {
   private submitQueue(session: number, ids: number[], automatic: boolean, call: () => Promise<unknown>): Promise<void> {
     const submission: QueueSubmission = { session, ids: [...ids], automatic };
     this.queueSubmission = submission;
-    return this.command(call, session, true).then((started) => {
+    return this.command(isMac && automatic ? async () => {
+      const enabled = await ipc.macAccessibilityStatus();
+      if (this.queueSubmission !== submission || session !== this.session || !this.visible) return;
+      if (this.pendingDom || !this.interactive || ids.length !== this.stack.length || ids.some((id, index) => id !== this.stack[index].id)) {
+        this.queueSubmission = null; this.busy = false; return;
+      }
+      if (enabled) { await call(); return; }
+      this.queueSubmission = null; this.busy = false; this.clearFeedback();
+      this.feedback = { kind: "failed", title: "还没一起粘贴", detail: "打开辅助功能后，就能一起贴进去", accessibility: true, duration: 5000, startedAt: Date.now() };
+    } : call, session, true).then((started) => {
       // IPC 失败表示没有可等待的入队确认；保留 stack，不能让后续无关事件误清。
       if (!started && this.queueSubmission === submission) this.queueSubmission = null;
     });
@@ -1203,10 +1220,11 @@ export class PanelState {
 
   /** Ctrl+Shift+Enter 只负责逐张放；Shift+Enter 永远只复制当前一张，不再按上下文换义。 */
   startStackQueue = async (automatic: boolean, pasteMode: "paste" | "text", event?: KeyboardEvent) => {
+    if (isMac && !automatic) { this.message = "macOS 版暂不支持逐张粘贴"; return; }
     const guarded = this.stack.find((item) => item.guide_id || item.action);
     if (guarded) { this.guideNotice(guarded); return; }
     if (!this.visible || !this.interactive || this.busy || this.pendingDom || !this.stack.length) {
-      if (!this.stack.length) this.message = "先按空格多选几张，再按 Ctrl+Shift+Enter 逐张放";
+      if (!this.stack.length) this.message = isMac ? "先按空格多选几张，再按 Enter 一起粘贴" : "先按空格多选几张，再按 Ctrl+Shift+Enter 逐张放";
       return;
     }
     const session = this.session;
@@ -1309,7 +1327,7 @@ export class PanelState {
       case "Enter": if (this.stack.length) void this.startStackQueue(true, "paste", event); else void this.choose(this.selected, "paste", event); break;
       case "Shift+Enter":
         // 有已选时不执行：不能悄悄丢掉已选的牌。
-        if (this.stack.length) this.showNotice(`已选 ${this.stack.length} 张，Shift+↵ 不会丢掉它们：↵ 一起粘贴，Ctrl+Shift+↵ 逐张放`, 3600);
+        if (this.stack.length) this.showNotice(`已选 ${this.stack.length} 张，Shift+↵ 不会丢掉它们：↵ 一起粘贴${isMac ? "" : "，Ctrl+Shift+↵ 逐张放"}`, 3600);
         else void this.choose(this.selected, "copy", event);
         break;
       case "Ctrl+Shift+Enter": void this.startStackQueue(false, "paste", event); break;
@@ -1851,6 +1869,16 @@ export class PanelState {
         if (payload.session !== this.session || this.interaction === "close_only") return;
         // 粘贴成功不出声：结果就在目标程序里，用户看得到。下面只说需要用户知道的偏差。
         if (!this.visible) return;
+        if (isMac) this.clearFeedback();
+        if (isMac && payload.paste_result === "copied_only" && payload.reason === "mac_accessibility_required") {
+          this.busy = false;
+          if (payload.hint_dwell_ms) this.setInteraction("passive");
+          this.feedback = {
+            kind: "copied", title: "已复制", detail: "按 Ctrl+V 贴上。打开辅助功能，就能直接贴进去", accessibility: true,
+            duration: payload.hint_dwell_ms ?? 5000, startedAt: Date.now(),
+          };
+          return;
+        }
         if (payload.paste_result === "native_submission_unknown") {
           this.clearFeedback();
           this.setInteraction("passive");

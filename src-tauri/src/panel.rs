@@ -751,6 +751,11 @@ fn run_paste(job: PasteJob) {
                 hooks.synchronize();
             }
             let passive = matches!(policy, RestorePolicy::NativeAfterSubmit { unknown: true });
+            #[cfg(target_os = "macos")]
+            let passive = passive
+                || (mode != PasteMode::Copy
+                    && policy == RestorePolicy::LegacyBeforeSubmit
+                    && !platform::ax::accessibility_status());
             return_for_paste(&app, session, permit.clone(), passive, policy)
         };
         match loaded {
@@ -862,6 +867,8 @@ fn run_paste(job: PasteJob) {
 }
 
 struct QueueJob {
+    #[cfg(target_os = "macos")]
+    target: Target,
     app: AppHandle,
     logger: Logger,
     session: u64,
@@ -889,6 +896,8 @@ fn queue_target_rejected(target: &Target, own_process: u32) -> bool {
 // 不留宽限（modifier_grace=0），其余条件仍按原 300ms 确认。
 fn run_queue_item(job: QueueJob) {
     let QueueJob {
+        #[cfg(target_os = "macos")]
+        target,
         app,
         logger,
         session,
@@ -904,7 +913,12 @@ fn run_queue_item(job: QueueJob) {
     } = job;
     let cancel = guard.cancelled.clone();
     let started = Instant::now();
+    #[cfg(windows)]
     let target = window::capture();
+    #[cfg(target_os = "macos")]
+    if window::foreground() != target.window {
+        guard.stop(Stop::Cancelled);
+    }
     let cancelled = || cancel.load(Ordering::Acquire) || stopping.load(Ordering::Acquire);
     let mut files_skipped = 0;
     let mut result = if cancelled() {
@@ -923,7 +937,10 @@ fn run_queue_item(job: QueueJob) {
                 let permit = permits.quick(id, mode);
                 let restore = |_| Some(window::confirm(&target));
                 let sent = || {};
+                #[cfg(windows)]
                 let synchronize = || true;
+                #[cfg(target_os = "macos")]
+                let synchronize = || window::resign_queue(&app).is_ok();
                 paste::execute(
                     Request {
                         session,
@@ -938,7 +955,10 @@ fn run_queue_item(job: QueueJob) {
                         permit: Some(permit),
                         copy_only_reason: None,
                         text_separator,
+                        #[cfg(windows)]
                         modifier_grace: Duration::ZERO,
+                        #[cfg(target_os = "macos")]
+                        modifier_grace: MODIFIER_GRACE,
                         clipboard_guard: Some(guard.clone()),
                         cancelled: cancel.clone(),
                     },
@@ -1098,6 +1118,11 @@ impl Panel {
             mode,
             selection,
         } = command;
+        #[cfg(target_os = "macos")]
+        if !automatic {
+            self.emit("panel:error", json!({"message":"macOS 版暂不支持逐张粘贴"}));
+            return Ok(());
+        }
         if let Err(message) = crate::paste::queue::validate_ids(&ids) {
             // 不走 Err：dispatch 的通用错误会收起面板并只显示“操作未完成”。
             self.log(
@@ -1116,6 +1141,7 @@ impl Panel {
             );
             return Ok(());
         }
+        #[cfg(windows)]
         if self.interaction == Interaction::Activated {
             // 主路径这种目标（可能以管理员运行）只复制；低权限的键盘钩子也收不到发往它的
             // Ctrl+V，逐张放必然失效，所以直接拒绝。
@@ -1351,6 +1377,8 @@ impl Panel {
         self.emit_queue();
         let controller = app.state::<Controller>();
         let job = QueueJob {
+            #[cfg(target_os = "macos")]
+            target: self.target.clone(),
             app: app.clone(),
             logger: logger.clone(),
             session: self.session,
@@ -2445,10 +2473,12 @@ impl Panel {
                 self.set_interaction(Interaction::Passive);
             }
             window::no_activate(&self.window, true)?;
+            #[cfg(windows)]
             let armed_at = window::tick_count();
             if !can_restore && let Some(permit) = permit.as_ref() {
                 permit.revoke();
             }
+            #[cfg(windows)]
             if can_restore
                 && permit
                     .as_ref()
@@ -2485,8 +2515,28 @@ impl Panel {
                 self.mode = Mode::Hidden;
                 self.awaiting_search = false;
                 self.emit_hidden();
+                #[cfg(windows)]
                 self.conceal(logger, None)?;
+                #[cfg(target_os = "macos")]
+                if let Err(error) = self.conceal(logger, None) {
+                    focus.foreground.success = false;
+                    let _ = reply.send(focus);
+                    return Err(error);
+                }
                 self.log(logger, "hidden", json!({"source":"paste"}));
+            }
+            #[cfg(target_os = "macos")]
+            {
+                if passive {
+                    window::resign_queue(app)?;
+                }
+                focus = window::confirm(&self.target);
+                focus.foreground.success &= can_restore;
+                if !focus.foreground.success
+                    && let Some(permit) = permit.as_ref()
+                {
+                    permit.revoke();
+                }
             }
         }
         let _ = reply.send(focus);
@@ -2509,7 +2559,10 @@ impl Panel {
         let owner = window::handle(&self.window)?;
         let foreground = window::foreground();
         let search = self.mode == Mode::Search;
+        #[cfg(windows)]
         let restricted = self.interaction == Interaction::Activated;
+        #[cfg(target_os = "macos")]
+        let restricted = false;
         let external_switch = !search
             && self
                 .hooks
@@ -2541,6 +2594,7 @@ impl Panel {
             Some(permits.quick(id, mode))
         };
         let mut copy_only_reason = None;
+        #[cfg(windows)]
         if search && !reliable_control(&self.target) && copy_only_reason.is_none() {
             copy_only_reason = Some("target_control_unverified");
         }
@@ -2665,7 +2719,10 @@ impl Panel {
                 self.set_interaction(Interaction::Passive);
             }
             // 预判时没收起的面板：按实际结论决定是停留提示还是现在收起。
+            #[cfg(windows)]
             let deferred = self.hint.take().is_some() && self.current(session);
+            #[cfg(target_os = "macos")]
+            let deferred = result.passive_hint && self.current(session);
             let dwell = if deferred {
                 dwell_after_paste(&result)
             } else {
@@ -2695,7 +2752,14 @@ impl Panel {
                         if native_unknown {
                             "native_submission_unknown"
                         } else {
-                            "target_may_be_elevated"
+                            #[cfg(windows)]
+                            {
+                                "target_may_be_elevated"
+                            }
+                            #[cfg(target_os = "macos")]
+                            {
+                                "mac_accessibility_required"
+                            }
                         },
                     )?,
                     None => {

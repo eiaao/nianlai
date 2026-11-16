@@ -8,13 +8,14 @@ use serde_json::{Map, Value};
 /// 日志和前端里的 `paste_result` 取值。
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub enum PasteResult {
     Copied,
     Sent,
     Confirmed,
     CopiedOnly,
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     NativeSubmissionUnknown,
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     NativeNotSubmitted,
     GenericSubmissionUnknown,
     GenericNotSubmitted,

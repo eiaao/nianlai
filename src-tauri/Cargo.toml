@@ -71,6 +71,8 @@ windows = { version = "0.62", features = [
 objc2 = "0.6.5"
 objc2-foundation = "0.3.2"
 objc2-app-kit = "0.3.2"
+objc2-application-services = { version = "0.3.2", default-features = false, features = ["std", "HIServices", "AXUIElement", "AXValue", "AXError", "libc", "objc2"] }
+core-graphics = "0.25"
 tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", rev = "3ffa93ed14e0f8e857e43619b4157f2a685d35a4" }
 image = { version = "0.25.10", default-features = false, features = ["png", "tiff"] }
 sha2 = "0.10.9"

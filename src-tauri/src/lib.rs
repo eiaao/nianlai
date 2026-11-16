@@ -43,6 +43,18 @@ fn get_license_notices() -> LicenseNotices {
     license_notices()
 }
 
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn mac_accessibility_status() -> bool {
+    platform::ax::accessibility_status()
+}
+
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn mac_open_accessibility_settings() -> Result<(), String> {
+    platform::ax::open_accessibility_settings()
+}
+
 #[tauri::command]
 fn get_data_dir(app: AppHandle) -> String {
     app.state::<Controller>()
@@ -652,6 +664,10 @@ pub fn run() {
             get_settings,
             set_settings,
             get_license_notices,
+            #[cfg(target_os = "macos")]
+            mac_accessibility_status,
+            #[cfg(target_os = "macos")]
+            mac_open_accessibility_settings,
             get_data_dir,
             open_data_dir,
             tray::get_autostart,
