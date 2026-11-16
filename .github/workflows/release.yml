@@ -1,6 +1,6 @@
 name: 发布
 
-# 推送 v* 标签即发布：标签须与 src-tauri/Cargo.toml 的版本一致（v0.1.0-alpha.3 ↔ 0.1.0-alpha.3）。
+# 推送 v* 标签即发布：标签须与 src-tauri/Cargo.toml 的版本一致（v0.1.0 ↔ 0.1.0）。
 # 先跑完整的检查与构建，再核对产物并创建 GitHub Release；带 - 的版本标为预发布。
 on:
   push:
