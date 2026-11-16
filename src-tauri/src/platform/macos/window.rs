@@ -1,4 +1,6 @@
-use crate::platform::{FocusResult, ForegroundResult, HitRegion, PlacementMode, Result, Target};
+use crate::platform::{
+    FocusResult, ForegroundResult, HitRegion, PlacementMode, Result as PlatformResult, Target,
+};
 use objc2_app_kit::{NSPopUpMenuWindowLevel, NSWindowCollectionBehavior, NSWindowStyleMask};
 use serde::Deserialize;
 use std::sync::LazyLock;
@@ -12,7 +14,7 @@ tauri_nspanel::tauri_panel! {
     })
 }
 
-pub(super) fn initialize(window: &WebviewWindow) -> Result<()> {
+pub(super) fn initialize(window: &WebviewWindow) -> PlatformResult<()> {
     MainThreadMarker::new().ok_or("面板初始化需要在主线程执行")?;
     let panel = window
         .to_panel::<NianlaiPanel>()
@@ -33,14 +35,14 @@ pub(super) fn initialize(window: &WebviewWindow) -> Result<()> {
     Ok(())
 }
 
-fn native(window: &WebviewWindow) -> Result<tauri_nspanel::PanelHandle<tauri::Wry>> {
+fn native(window: &WebviewWindow) -> PlatformResult<tauri_nspanel::PanelHandle<tauri::Wry>> {
     MainThreadMarker::new().ok_or("面板操作需要在主线程执行")?;
     window
         .get_webview_panel(window.label())
         .map_err(|error| format!("面板读取失败：{error:?}"))
 }
 
-pub(super) fn focus(window: &WebviewWindow) -> Result<()> {
+pub(super) fn focus(window: &WebviewWindow) -> PlatformResult<()> {
     native(window)?.make_key_window();
     // Window::set_focus 会激活整个 App；这里只让 WKWebView 接收输入。
     let webview: &tauri::Webview = window.as_ref();
@@ -90,7 +92,7 @@ pub struct Shown {
     pub cursor_known: bool,
     pub layout: Layout,
 }
-pub fn convert_avoid(avoid: Avoid, scale: f64) -> Result<NativeRegion> {
+pub fn convert_avoid(avoid: Avoid, scale: f64) -> PlatformResult<NativeRegion> {
     Ok(NativeRegion {
         left: (avoid.left * scale) as i32,
         top: (avoid.top * scale) as i32,
@@ -99,7 +101,7 @@ pub fn convert_avoid(avoid: Avoid, scale: f64) -> Result<NativeRegion> {
     })
 }
 // macOS 没有 Windows 命中区域，这里不需要。
-pub fn validate_hit_regions(_: &[HitRegion]) -> Result<()> {
+pub fn validate_hit_regions(_: &[HitRegion]) -> PlatformResult<()> {
     Ok(())
 }
 // macOS 没有 Windows 命中区域，这里不需要。
@@ -107,7 +109,7 @@ pub fn set_hit_regions(
     _: &WebviewWindow,
     _: &[HitRegion],
     _: bool,
-) -> Result<Option<NativeRegion>> {
+) -> PlatformResult<Option<NativeRegion>> {
     Ok(None)
 }
 // macOS 没有 Windows 命中区域，这里不需要。
@@ -129,7 +131,7 @@ pub fn default_avoid(layout: &Layout) -> NativeRegion {
         bottom: layout.height,
     }
 }
-pub fn handle(_: &WebviewWindow) -> Result<usize> {
+pub fn handle(_: &WebviewWindow) -> PlatformResult<usize> {
     Ok(std::process::id() as usize)
 }
 pub fn foreground() -> usize {
@@ -152,7 +154,7 @@ pub fn capture() -> Target {
     }
 }
 // macOS 没有 WS_EX_NOACTIVATE，这里不需要。
-pub fn no_activate(_: &WebviewWindow, _: bool) -> Result<()> {
+pub fn no_activate(_: &WebviewWindow, _: bool) -> PlatformResult<()> {
     Ok(())
 }
 fn layout(mouse: NSPoint, work: NSRect, scale: f64, mode: PlacementMode) -> Layout {
@@ -184,7 +186,7 @@ fn layout(mouse: NSPoint, work: NSRect, scale: f64, mode: PlacementMode) -> Layo
     }
 }
 
-pub fn show(panel: &WebviewWindow, _: &Target, mode: PlacementMode) -> Result<Shown> {
+pub fn show(panel: &WebviewWindow, _: &Target, mode: PlacementMode) -> PlatformResult<Shown> {
     let (mouse, work, scale) = super::monitor::current_target_screen()?;
     let layout = layout(mouse, work, scale, mode);
     panel
@@ -207,13 +209,13 @@ pub fn show(panel: &WebviewWindow, _: &Target, mode: PlacementMode) -> Result<Sh
         layout,
     })
 }
-pub fn show_auto(panel: &WebviewWindow) -> Result<()> {
+pub fn show_auto(panel: &WebviewWindow) -> PlatformResult<()> {
     show(panel, &Target::default(), PlacementMode::Center).map(|_| ())
 }
-pub fn show_queue(panel: &WebviewWindow, target: &Target) -> Result<bool> {
+pub fn show_queue(panel: &WebviewWindow, target: &Target) -> PlatformResult<bool> {
     show(panel, target, PlacementMode::Mouse).map(|shown| shown.cursor_known)
 }
-pub fn move_to(panel: &WebviewWindow, x: i32, y: i32) -> Result<()> {
+pub fn move_to(panel: &WebviewWindow, x: i32, y: i32) -> PlatformResult<()> {
     let scale = panel.scale_factor().map_err(|error| error.to_string())?;
     panel
         .set_position(LogicalPosition::new(
@@ -222,14 +224,20 @@ pub fn move_to(panel: &WebviewWindow, x: i32, y: i32) -> Result<()> {
         ))
         .map_err(|error| error.to_string())
 }
-pub fn hide(panel: &WebviewWindow) -> Result<()> {
+pub fn hide(panel: &WebviewWindow) -> PlatformResult<()> {
     native(panel)?.hide();
     Ok(())
 }
-pub fn show_no_activate(panel: &WebviewWindow) -> Result<()> {
+pub fn show_no_activate(panel: &WebviewWindow) -> PlatformResult<()> {
     panel.show().map_err(|error| error.to_string())
 }
-pub fn present_guide(panel: &WebviewWindow, x: i32, y: i32, width: i32, height: i32) -> Result<()> {
+pub fn present_guide(
+    panel: &WebviewWindow,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+) -> PlatformResult<()> {
     panel
         .set_size(PhysicalSize::new(width as u32, height as u32))
         .map_err(|error| error.to_string())?;
@@ -245,7 +253,7 @@ pub fn present_guide_initial(
     height: i32,
     _: &[HitRegion],
     _: f64,
-) -> Result<()> {
+) -> PlatformResult<()> {
     present_guide(panel, x, y, width, height)
 }
 pub fn activate(window: usize) -> ForegroundResult {
