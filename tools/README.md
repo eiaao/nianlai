@@ -9,6 +9,10 @@
 - `check_ps1_encoding.py`：已跟踪的 `*.ps1` 只要含非 ASCII 字符（如中文）就必须带 UTF-8 BOM，否则 Windows PowerShell 5.1 会按系统代码页读成乱码；新增脚本带中文时先加 BOM。
 - `test-panel-key-repeat.mjs`：面板状态机回归（键位、收藏、删除撤销、修饰键提示等），`node tools/test-panel-key-repeat.mjs`。
 
+## README 配图
+
+- `readme-media.mjs`：重新生成 `docs/images/` 下的截图和演示 GIF。用真实生产组件（面板、设置、引导）配内存 IPC 替身和虚构演示数据（`readme-media/demoIpc.mjs`），在无头 Edge 里截图；GIF 逐帧截图后交给 ffmpeg 合成，需要 PATH 里有 `ffmpeg`。不碰系统剪贴板、按键和真实窗口。`node tools\readme-media.mjs [hero|spread|favorites|preview|demoFan|demoSearch|settings|guide …]`，不带参数全部重做。界面改版后跑一遍，再看一眼图是否需要换。
+
 ## 图标
 
 - `build_icons.py`：从 `src-tauri/icons/source/` 的 SVG 源重新生成全部程序图标（ico、png、Square*、StoreLogo、icns）和 `src-tauri/icons/tray/` 的托盘三态资源。只用 Python 标准库和本机 Edge（矢量档的光栅化）；16/24 手绘档逐像素转换，不经缩放；托盘 32 由 16 最近邻放大；ICO 固定为 16/24/32/48/256 五档。`python -X utf8 -I tools/build_icons.py [--output <目录>]`，默认输出 `src-tauri/icons`，自定义输出目录时仍只读取生产 `source/`，重复运行输出逐字节一致。
