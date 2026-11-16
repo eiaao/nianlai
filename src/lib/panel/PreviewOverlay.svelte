@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { keyLabel } from "../platform";
   import type { PanelState } from "../state.svelte";
   import Preview from "./Preview.svelte";
   import { cardKind, KIND_NAME } from "../cards";
@@ -25,17 +26,17 @@
           <button type="button" tabindex="-1" class:on={panel.previewZoom === "original"} onpointerdown={(event) => event.preventDefault()} onclick={() => { panel.previewZoom = "original"; }}>原图</button>
         </span>
       {/if}
-      <button class="close" type="button" tabindex="-1" aria-label="合上看全" title="合上（Tab / Esc）" onpointerdown={(event) => event.preventDefault()} onclick={() => { panel.previewOpen = false; }}>×</button>
+      <button class="close" type="button" tabindex="-1" aria-label="合上看全" title={keyLabel("合上（Tab / Esc）")} onpointerdown={(event) => event.preventDefault()} onclick={() => { panel.previewOpen = false; }}>×</button>
     </header>
     <div class="overlay-scroll"><Preview {panel} item={panel.currentItem} expanded /></div>
     <footer>
       <span><kbd>←</kbd><kbd>→</kbd> 换一张</span><span><kbd>↑</kbd><kbd>↓</kbd> 滚动</span>
       {#if kind === "image"}<span><kbd>Z</kbd> {panel.previewZoom === "fit" ? "查看原图" : "适应窗口"}</span>{/if}
-      {#if panel.currentItem?.action}<span><kbd>↵</kbd> 打开设置</span>{:else if panel.currentItem?.guide_id}<span>说明只读，贴不出去</span>{:else}
-        {#if kind && kind !== "image"}<span>选中文字后 <kbd>Ctrl+C</kbd> 复制</span>{/if}
-        <span><kbd>↵</kbd> 粘贴</span>
+      {#if panel.currentItem?.action}<span><kbd>{keyLabel("↵")}</kbd> 打开设置</span>{:else if panel.currentItem?.guide_id}<span>说明只读，贴不出去</span>{:else}
+        {#if kind && kind !== "image"}<span>选中文字后 <kbd>{keyLabel("Ctrl+C")}</kbd> 复制</span>{/if}
+        <span><kbd>{keyLabel("↵")}</kbd> 粘贴</span>
       {/if}
-      <span><kbd>Tab</kbd> 合上</span>
+      <span><kbd>{keyLabel("Tab")}</kbd> 合上</span>
     </footer>
   </div>
 {/if}

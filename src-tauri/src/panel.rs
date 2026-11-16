@@ -210,6 +210,7 @@ struct Hint {
 // 粘贴前的预判：面板要不要先别收起。判断顺序和 paste::perform 一致——复制模式、目标失效、用户切走
 // 都排在完整性比较前面，这些情况照旧立即收起；只有走到完整性比较且目标不是 allowed（比样机高，或查不到、
 // 按高处理）时，结论必然是 copied_only / target_may_be_elevated，此时面板留着等结论。
+#[cfg(any(windows, test))]
 fn defers_hide_for_elevated(
     mode: PasteMode,
     target_valid: bool,
@@ -1775,6 +1776,7 @@ impl Panel {
             }
         };
         let webview_started = Instant::now();
+        #[cfg(windows)]
         let restricted = automatic.is_none()
             && defers_hide_for_elevated(
                 PasteMode::Paste,
@@ -1782,7 +1784,11 @@ impl Panel {
                 false,
                 &paste::compare_integrity(&self.target),
             );
-        self.interaction = if restricted {
+        #[cfg(target_os = "macos")]
+        let restricted = false;
+        self.interaction = if cfg!(target_os = "macos") {
+            Interaction::Activated
+        } else if restricted {
             Interaction::ActivationPending
         } else {
             Interaction::Quick

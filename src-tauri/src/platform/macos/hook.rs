@@ -1,14 +1,42 @@
 use crate::{
     log::Logger,
+    paste::permit::Monitor,
     platform::{HookEvent, HookOptions, ReplayBatch, Result, Target},
 };
-use std::time::Instant;
+use std::{
+    sync::{Arc, Mutex},
+    time::Instant,
+};
+use tauri::{WebviewWindow, WindowEvent};
 use tauri_plugin_global_shortcut::Shortcut;
 
-pub struct Hooks;
+type OutsideCallback = Box<dyn Fn(HookEvent) + Send>;
+static OUTSIDE: Mutex<Option<OutsideCallback>> = Mutex::new(None);
+
+pub(super) fn initialize(window: &WebviewWindow) {
+    window.on_window_event(|event| {
+        if matches!(event, WindowEvent::Focused(false)) {
+            // 回调会收起面板并释放 Hooks，不能持锁调用。
+            let callback = OUTSIDE.lock().unwrap().take();
+            if let Some(callback) = callback {
+                callback(HookEvent::Outside {
+                    point: [0; 2],
+                    bounds: [0; 4],
+                    current: [0; 4],
+                });
+            }
+        }
+    });
+}
+
+pub struct Hooks {
+    monitor: Arc<Monitor>,
+}
 impl Drop for Hooks {
-    // M1 没有安装监听；M2 在此释放面板失焦监听。
-    fn drop(&mut self) {}
+    fn drop(&mut self) {
+        OUTSIDE.lock().unwrap().take();
+        self.monitor.stopped();
+    }
 }
 // macOS 没有 Windows 预览键钩子，这里不需要。
 pub fn set_preview_keys(_: bool) {}
@@ -16,17 +44,21 @@ pub fn supported(_: &Shortcut) -> bool {
     true
 }
 impl Hooks {
-    // macOS 没有 Windows 键盘钩子，这里不需要。
+    // 面板直接接收键盘输入，只记录当前会话的失焦回调。
     pub fn install(
         _: usize,
         _: &Target,
         _: Option<Shortcut>,
         _: Logger,
         _: u64,
-        _: HookOptions,
-        _: impl Fn(HookEvent) + Send + 'static,
+        options: HookOptions,
+        callback: impl Fn(HookEvent) + Send + 'static,
     ) -> Result<Self> {
-        Ok(Self)
+        *OUTSIDE.lock().unwrap() = Some(Box::new(callback));
+        options.monitor.started();
+        Ok(Self {
+            monitor: options.monitor,
+        })
     }
     pub fn switched_to(&self) -> usize {
         0

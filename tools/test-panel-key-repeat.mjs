@@ -26,11 +26,12 @@ async function compilePanel() {
   const cardsPath = join(temporary, "cards.mjs");
   const guideCardsPath = join(temporary, "guideCards.mjs");
   const panelActionsPath = join(temporary, "panelActions.mjs");
+  const platformPath = join(temporary, "platform.mjs");
   const cleanup = () => {
     assert.equal(dirname(temporary), temporaryBase);
     assert.ok(basename(temporary).startsWith("nianlai-panel-key-repeat-"));
     // 只删除本次创建的几个文件和空目录，不递归清理任何路径。
-    for (const path of [compiledPath, preferencesPath, cardsPath, guideCardsPath, panelActionsPath, ipcPath]) if (existsSync(path)) unlinkSync(path);
+    for (const path of [compiledPath, preferencesPath, cardsPath, guideCardsPath, panelActionsPath, platformPath, ipcPath]) if (existsSync(path)) unlinkSync(path);
     rmdirSync(temporary);
     assert.equal(existsSync(temporary), false);
   };
@@ -143,16 +144,18 @@ export function emit(name, payload) { return handlers.get(name)?.(payload); }
       ["./cards", pathToFileURL(cardsPath).href],
       ["./guideCards", pathToFileURL(guideCardsPath).href],
       ["./panelActions", pathToFileURL(panelActionsPath).href],
+      ["./platform", pathToFileURL(platformPath).href],
     ]);
     writeFileSync(cardsPath, transpile("src/lib/cards.ts"));
     writeFileSync(guideCardsPath, transpile("src/lib/guideCards.ts"));
     writeFileSync(panelActionsPath, transpile("src/lib/panelActions.ts"));
+    writeFileSync(platformPath, transpile("src/lib/platform.ts"));
     // 真实的 preferences.ts 一并转译，面板与设置页用同一份偏好映射。
     writeFileSync(preferencesPath, ts.transpileModule(readFileSync(join(root, "src/lib/preferences.ts"), "utf8"), {
       compilerOptions: { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.ESNext },
     }).outputText);
     const compiled = compileModule(stripped, { filename: "state.svelte.js", generate: "client", dev: false }).js.code
-      .replace(/(from\s+)(["'])(svelte\/internal\/client|svelte|\.\/ipc|\.\/preferences|\.\/cards|\.\/guideCards|\.\/panelActions)\2/g,
+      .replace(/(from\s+)(["'])(svelte\/internal\/client|svelte|\.\/ipc|\.\/preferences|\.\/cards|\.\/guideCards|\.\/panelActions|\.\/platform)\2/g,
         (_, prefix, _quote, specifier) => prefix + JSON.stringify(imports.get(specifier)));
     writeFileSync(compiledPath, compiled);
     const { PanelState } = await import(pathToFileURL(compiledPath).href);

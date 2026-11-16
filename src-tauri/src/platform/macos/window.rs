@@ -1,8 +1,51 @@
 use crate::platform::{FocusResult, ForegroundResult, HitRegion, PlacementMode, Result, Target};
+use objc2_app_kit::{NSPopUpMenuWindowLevel, NSWindowCollectionBehavior, NSWindowStyleMask};
 use serde::Deserialize;
 use std::sync::LazyLock;
 use std::time::Instant;
-use tauri::{PhysicalPosition, PhysicalSize, WebviewWindow};
+use tauri::{LogicalPosition, LogicalSize, PhysicalSize, WebviewWindow};
+use tauri_nspanel::{ManagerExt, WebviewWindowExt};
+
+tauri_nspanel::tauri_panel! {
+    panel!(NianlaiPanel {
+        config: { can_become_key_window: true, can_become_main_window: false }
+    })
+}
+
+pub(super) fn initialize(window: &WebviewWindow) -> Result<()> {
+    MainThreadMarker::new().ok_or("面板初始化需要在主线程执行")?;
+    let panel = window
+        .to_panel::<NianlaiPanel>()
+        .map_err(|error| error.to_string())?;
+    panel
+        .add_style_mask(NSWindowStyleMask::NonactivatingPanel)
+        .map_err(|error| error.to_string())?;
+    panel.set_level(NSPopUpMenuWindowLevel as i64);
+    panel.set_collection_behavior(
+        NSWindowCollectionBehavior::CanJoinAllSpaces
+            | NSWindowCollectionBehavior::FullScreenAuxiliary,
+    );
+    panel.set_floating_panel(true);
+    panel.set_hides_on_deactivate(false);
+    panel.set_becomes_key_only_if_needed(false);
+    // 保留 Tao 的 delegate，由它继续转发面板失焦事件。
+    super::hook::initialize(window);
+    Ok(())
+}
+
+fn native(window: &WebviewWindow) -> Result<tauri_nspanel::PanelHandle<tauri::Wry>> {
+    MainThreadMarker::new().ok_or("面板操作需要在主线程执行")?;
+    window
+        .get_webview_panel(window.label())
+        .map_err(|error| format!("面板读取失败：{error:?}"))
+}
+
+pub(super) fn focus(window: &WebviewWindow) -> Result<()> {
+    native(window)?.make_key_window();
+    // Window::set_focus 会激活整个 App；这里只让 WKWebView 接收输入。
+    let webview: &tauri::Webview = window.as_ref();
+    webview.set_focus().map_err(|error| error.to_string())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NativeRegion {
@@ -19,10 +62,10 @@ pub struct Avoid {
     pub height: f64,
 }
 #[derive(Debug, Clone, Copy)]
-pub struct Fit;
+pub struct Fit(&'static str);
 impl Fit {
     pub fn name(self) -> &'static str {
-        "center"
+        self.0
     }
 }
 #[derive(Debug, Clone, Copy)]
@@ -31,8 +74,6 @@ pub struct Layout {
     pub y: i32,
     pub width: i32,
     pub height: i32,
-    // M2 按目标屏幕缩放定位。
-    #[allow(dead_code)]
     pub scale: f64,
     pub fit: Fit,
 }
@@ -114,30 +155,56 @@ pub fn capture() -> Target {
 pub fn no_activate(_: &WebviewWindow, _: bool) -> Result<()> {
     Ok(())
 }
-pub fn show(panel: &WebviewWindow, _: &Target, _: PlacementMode) -> Result<Shown> {
-    let monitor = panel
-        .current_monitor()
-        .map_err(|error| error.to_string())?
-        .ok_or("monitor_missing")?;
-    let scale = monitor.scale_factor();
-    let width = (960.0 * scale) as i32;
-    let height = (540.0 * scale) as i32;
+fn layout(mouse: NSPoint, work: NSRect, scale: f64, mode: PlacementMode) -> Layout {
+    let width = 960.0_f64.min(work.size.width);
+    let height = 540.0_f64.min(work.size.height);
+    let (x, y, fit) = if mode == PlacementMode::Center {
+        (
+            work.origin.x + (work.size.width - width) / 2.0,
+            work.origin.y + (work.size.height - height) / 2.0,
+            Fit("center"),
+        )
+    } else {
+        let below = mouse.y + 6.0;
+        let (y, fit) = if below + height <= work.origin.y + work.size.height {
+            (below, Fit("below"))
+        } else {
+            (mouse.y - height - 6.0, Fit("above"))
+        };
+        (mouse.x + 6.0, y, fit)
+    };
+    Layout {
+        x: (x.clamp(work.origin.x, work.origin.x + work.size.width - width) * scale).round() as i32,
+        y: (y.clamp(work.origin.y, work.origin.y + work.size.height - height) * scale).round()
+            as i32,
+        width: (width * scale).round() as i32,
+        height: (height * scale).round() as i32,
+        scale,
+        fit,
+    }
+}
+
+pub fn show(panel: &WebviewWindow, _: &Target, mode: PlacementMode) -> Result<Shown> {
+    let (mouse, work, scale) = super::monitor::current_target_screen()?;
+    let layout = layout(mouse, work, scale, mode);
     panel
-        .set_size(PhysicalSize::new(width as u32, height as u32))
+        .set_size(LogicalSize::new(
+            f64::from(layout.width) / layout.scale,
+            f64::from(layout.height) / layout.scale,
+        ))
         .map_err(|error| error.to_string())?;
-    panel.center().map_err(|error| error.to_string())?;
-    panel.show().map_err(|error| error.to_string())?;
-    let position = panel.outer_position().map_err(|error| error.to_string())?;
+    // 跨 Retina / 非 Retina 屏时，物理坐标会被 Tao 按旧屏缩放换算。
+    panel
+        .set_position(LogicalPosition::new(
+            f64::from(layout.x) / layout.scale,
+            f64::from(layout.y) / layout.scale,
+        ))
+        .map_err(|error| error.to_string())?;
+    native(panel)?.order_front_regardless();
+    focus(panel)?;
     Ok(Shown {
-        cursor_known: false,
-        layout: Layout {
-            x: position.x,
-            y: position.y,
-            width,
-            height,
-            scale,
-            fit: Fit,
-        },
+        cursor_known: true,
+        layout,
     })
 }
 pub fn show_auto(panel: &WebviewWindow) -> Result<()> {
@@ -147,12 +214,17 @@ pub fn show_queue(panel: &WebviewWindow, target: &Target) -> Result<bool> {
     show(panel, target, PlacementMode::Mouse).map(|shown| shown.cursor_known)
 }
 pub fn move_to(panel: &WebviewWindow, x: i32, y: i32) -> Result<()> {
+    let scale = panel.scale_factor().map_err(|error| error.to_string())?;
     panel
-        .set_position(PhysicalPosition::new(x, y))
+        .set_position(LogicalPosition::new(
+            f64::from(x) / scale,
+            f64::from(y) / scale,
+        ))
         .map_err(|error| error.to_string())
 }
 pub fn hide(panel: &WebviewWindow) -> Result<()> {
-    panel.hide().map_err(|error| error.to_string())
+    native(panel)?.hide();
+    Ok(())
 }
 pub fn show_no_activate(panel: &WebviewWindow) -> Result<()> {
     panel.show().map_err(|error| error.to_string())
@@ -207,4 +279,45 @@ pub fn restore_for_paste(
     _: bool,
 ) -> FocusResult {
     confirm(target)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mouse_placement_keeps_left_screen_coordinates_at_retina_scale() {
+        let placed = layout(
+            NSPoint::new(-1700.0, 250.0),
+            NSRect::new(NSPoint::new(-1920.0, 0.0), NSSize::new(1920.0, 1080.0)),
+            2.0,
+            PlacementMode::Mouse,
+        );
+        assert_eq!((placed.x, placed.y), (-3388, 512));
+    }
+
+    #[test]
+    fn center_placement_keeps_upper_screen_coordinates() {
+        let placed = layout(
+            NSPoint::new(400.0, -500.0),
+            NSRect::new(NSPoint::new(0.0, -1080.0), NSSize::new(1920.0, 1056.0)),
+            1.0,
+            PlacementMode::Center,
+        );
+        assert_eq!((placed.x, placed.y), (480, -822));
+    }
+
+    #[test]
+    fn panel_fits_small_visible_work_area() {
+        let placed = layout(
+            NSPoint::new(799.0, 470.0),
+            NSRect::new(NSPoint::new(0.0, 24.0), NSSize::new(800.0, 450.0)),
+            1.0,
+            PlacementMode::Mouse,
+        );
+        assert_eq!(
+            (placed.x, placed.y, placed.width, placed.height),
+            (0, 24, 800, 450)
+        );
+    }
 }

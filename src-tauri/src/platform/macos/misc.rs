@@ -175,12 +175,11 @@ pub mod webview {
     }
 
     pub fn focus(panel: &WebviewWindow) -> Result<()> {
-        panel.set_focus().map_err(|error| error.to_string())
+        super::super::window::focus(panel)
     }
 
-    // macOS 没有 WebView2 初始化选项，这里不需要。
-    pub fn initialize(_panel: &WebviewWindow) -> Result<()> {
-        Ok(())
+    pub fn initialize(panel: &WebviewWindow) -> Result<()> {
+        super::super::window::initialize(panel)
     }
 }
 
@@ -243,6 +242,7 @@ pub mod theme {
 pub mod monitor {
     use objc2::MainThreadMarker;
     use objc2_app_kit::{NSEvent, NSScreen};
+    use objc2_foundation::{NSPoint, NSRect};
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub(crate) struct WorkArea {
@@ -259,6 +259,19 @@ pub mod monitor {
     }
 
     pub(crate) fn current_target_monitor() -> Result<TargetMonitor, String> {
+        let (_, work, scale) = current_target_screen()?;
+        Ok(TargetMonitor {
+            work: WorkArea {
+                left: (work.origin.x * scale).round() as i32,
+                top: (work.origin.y * scale).round() as i32,
+                right: ((work.origin.x + work.size.width) * scale).round() as i32,
+                bottom: ((work.origin.y + work.size.height) * scale).round() as i32,
+            },
+            scale,
+        })
+    }
+
+    pub(crate) fn current_target_screen() -> Result<(NSPoint, NSRect, f64), String> {
         let mtm = MainThreadMarker::new().ok_or("显示器查询需要在主线程执行")?;
         let screens = NSScreen::screens(mtm);
         let primary = screens.firstObject().ok_or("没有可用的显示器")?;
@@ -274,17 +287,10 @@ pub mod monitor {
                     && mouse.y < frame.origin.y + frame.size.height
             })
             .unwrap_or(primary);
-        let work = screen.visibleFrame();
+        let mut work = screen.visibleFrame();
         let scale = screen.backingScaleFactor();
-        // 与 Tauri 一致：左上角为原点，再按目标屏缩放为物理坐标。
-        Ok(TargetMonitor {
-            work: WorkArea {
-                left: (work.origin.x * scale).round() as i32,
-                top: ((primary_top - work.origin.y - work.size.height) * scale).round() as i32,
-                right: ((work.origin.x + work.size.width) * scale).round() as i32,
-                bottom: ((primary_top - work.origin.y) * scale).round() as i32,
-            },
-            scale,
-        })
+        // AppKit 为左下原点；只在平台边界转为左上原点的逻辑坐标。
+        work.origin.y = primary_top - work.origin.y - work.size.height;
+        Ok((NSPoint::new(mouse.x, primary_top - mouse.y), work, scale))
     }
 }

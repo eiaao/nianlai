@@ -719,7 +719,10 @@ pub fn run() {
         ])
         .setup(|app| {
             #[cfg(target_os = "macos")]
-            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            {
+                app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+                app.handle().plugin(tauri_nspanel::init())?;
+            }
             let settings_file = settings::settings_path();
             let (store, issues) = settings::Store::load(settings_file.clone());
             let resolved = settings::Resolved::new(store.get(), settings_file);

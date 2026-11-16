@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { keyLabel } from "../lib/platform";
   import { onDestroy, onMount, untrack } from "svelte";
   import * as ipc from "../lib/ipc";
   import type {
@@ -44,7 +45,7 @@
   function displayHotkey(value: string) {
     const order = ["control", "ctrl", "alt", "shift", "super", "win"];
     const parts = (value.trim() || "Ctrl+`").split("+").filter(Boolean);
-    return parts.sort((a, b) => {
+    return keyLabel(parts.sort((a, b) => {
       const ai = order.indexOf(a.toLowerCase());
       const bi = order.indexOf(b.toLowerCase());
       return (ai < 0 ? 99 : ai) - (bi < 0 ? 99 : bi);
@@ -53,7 +54,7 @@
       .replace(/^shift$/i, "Shift").replace(/^alt$/i, "Alt")
       .replace(/^Key([A-Z])$/, "$1").replace(/^Digit([0-9])$/, "$1")
       .replace(/^Backquote$/, "`"))
-      .join(" + ");
+      .join(" + "), true);
   }
 
   // 预览只持有自己的演示次数。设置改变会重播，但不写存储，也不调用任何面板命令。

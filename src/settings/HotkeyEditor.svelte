@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { keyLabel } from "../lib/platform";
   // 呼出快捷键：点一下录制框，直接按下想要的组合键；校验通过即保存并即时生效，Esc 取消。
   // 录制期间请后端暂时注销当前呼出键，否则按到同一组合会被系统拦走去呼出面板。
   import { onMount } from "svelte";
@@ -48,11 +49,11 @@
   const MODIFIER_ORDER = ["control", "ctrl", "alt", "shift", "super", "win"];
   const rank = (part: string) => { const at = MODIFIER_ORDER.indexOf(part.toLowerCase()); return at < 0 ? 99 : at; };
   // 后端规范化后的顺序是 shift+control+…；显示统一成 Ctrl、Alt、Shift、Win、主键。
-  const display = (value: string) => value.split("+").sort((a, b) => rank(a) - rank(b)).map((part) => part
+  const display = (value: string) => keyLabel(value.split("+").sort((a, b) => rank(a) - rank(b)).map((part) => part
     .replace(/^control$/i, "Ctrl").replace(/^super$/i, "Win").replace(/^shift$/i, "Shift").replace(/^alt$/i, "Alt")
     .replace(/^Key([A-Z])$/, "$1").replace(/^Digit([0-9])$/, "$1").replace(/^Backquote$/, "`")
     .replace(/^Numpad(.+)$/, "小键盘 $1").replace(/^Arrow(Up|Down|Left|Right)$/, (_, side: string) => ({ Up: "↑", Down: "↓", Left: "←", Right: "→" })[side] ?? side))
-    .join(" + ");
+    .join(" + "), true);
   const modifiersOf = (event: KeyboardEvent) => [
     ...(event.ctrlKey ? ["Ctrl"] : []), ...(event.altKey ? ["Alt"] : []),
     ...(event.shiftKey ? ["Shift"] : []), ...(event.metaKey ? ["Super"] : []),
@@ -168,20 +169,20 @@
         onclick={() => { if (recording) void stop(); else void start(); }}
       >
         {#if recording}
-          <span class="live">{held.length ? `${held.map(display).join(" + ")} + …` : "按下新的组合键…"}</span>
+          <span class="live">{held.length ? keyLabel(`${held.map(display).join(" + ")} + …`, true) : "按下新的组合键…"}</span>
         {:else}
           <kbd>{display(hotkey)}</kbd>
         {/if}
       </button>
-      <span id="hotkey-help" class="help">{recording ? "Esc 取消" : "点一下，再按想用的键"}</span>
+      <span id="hotkey-help" class="help">{recording ? keyLabel("Esc 取消") : "点一下，再按想用的键"}</span>
       <SaveMark state={saveState} />
     </div>
-    {#if error}<p class="error" role="alert">{error}</p>{/if}
-    {#if warning && !recording}<p class="hint">{warning}</p>{/if}
-    {#if runtimeError}<p class="error">{runtimeError}</p>{/if}
+    {#if error}<p class="error" role="alert">{keyLabel(error, true)}</p>{/if}
+    {#if warning && !recording}<p class="hint">{keyLabel(warning, true)}</p>{/if}
+    {#if runtimeError}<p class="error">{keyLabel(runtimeError, true)}</p>{/if}
     {#if runtime && !recording}
       {#if runtime.error}
-        <p class="error">{runtime.error}{#if runtime.detail}（{runtime.detail}）{/if}</p>
+        <p class="error">{keyLabel(runtime.error, true)}{#if runtime.detail}（{keyLabel(runtime.detail, true)}）{/if}</p>
       {/if}
       {#if runtime.overridden}<p class="hint">本进程由 NIANLAI_HOTKEY 测试覆盖为 {display(runtime.requested)}；保存值下次启动使用。</p>{/if}
       {#if runtime.disabled}<p class="hint">自动循环测试已暂停呼出键。</p>{/if}

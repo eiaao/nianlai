@@ -6,9 +6,9 @@ use crate::{
         outcome::{Outcome, PasteResult},
         request::{Callbacks, Mode, Request},
     },
-    platform::{ReplayKey, Target, key_state},
+    platform::{ReplayKey, key_state},
 };
-use serde_json::{Value, json};
+use serde_json::json;
 use std::{
     path::Path,
     sync::atomic::{AtomicBool, Ordering},
@@ -33,10 +33,6 @@ pub fn keys_released() -> bool {
 }
 pub fn key_state_counts() -> key_state::Counts {
     key_state::Counts::default()
-}
-// macOS 没有 UIPI，这里不需要。
-pub fn compare_integrity(_: &Target) -> Value {
-    json!({"target_higher":false})
 }
 pub fn execute(
     request: Request,

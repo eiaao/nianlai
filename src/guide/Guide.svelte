@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { keyLabel } from "../lib/platform";
   import { onMount } from "svelte";
   import * as ipc from "../lib/ipc";
   import {
@@ -318,7 +319,7 @@
       {#if visibleGuide.phase === "await_copy"}
         <p class="eyebrow">第一拍 · 复制</p>
         <h1>先复制一句话</h1>
-        <p>选中能打字的地方的一句话，按 <kbd>Ctrl</kbd> + <kbd>C</kbd>。拈来真实记下后，才会进入下一拍。</p>
+        <p>选中能打字的地方的一句话，按 <kbd>{keyLabel("Ctrl")}</kbd> + <kbd>C</kbd>。拈来真实记下后，才会进入下一拍。</p>
         <div class="actions">
           <button type="button" class="primary" data-action="copy-sample" disabled={!loaded} onclick={() => dispatch({ type: "copy_sample" })}>帮我复制一句</button>
         </div>
@@ -327,7 +328,7 @@
         <h1>这句已经记下</h1>
         {#if sample}<blockquote data-sample>{sample.preview || "这条没有文字摘要"}</blockquote>{/if}
         <p><strong>先点一下能打字的地方，再呼出拈来。</strong>比如点一下记事本里要写文字的位置。</p>
-        <p class="hint">确认后打开面板；你的呼出键是 <kbd>{hotkey}</kbd>。</p>
+        <p class="hint">确认后打开面板；你的呼出键是 <kbd>{keyLabel(hotkey, true)}</kbd>。</p>
         <div class="actions">
           <button type="button" class="primary" data-action="confirm-target" aria-label="我已选好位置，呼出拈来" disabled={!loaded} onclick={() => dispatch({ type: "input_target_confirmed" })}>我已选好位置</button>
         </div>

@@ -54,6 +54,8 @@ jobs:
         run: pnpm check
       - name: 面板状态机回归
         run: node tools/test-panel-key-repeat.mjs
+      - name: 平台键名映射回归
+        run: node tools/test-platform.mjs
       # Windows runner 的控制台编码是 cp1252，-X utf8 才能输出中文；-I 会忽略 PYTHONUTF8 环境变量。
       - name: 核对发布版本来源
         run: python -X utf8 -I tools/check_release_versions.py
@@ -138,6 +140,8 @@ jobs:
         run: pnpm check
       - name: 面板状态机回归
         run: node tools/test-panel-key-repeat.mjs
+      - name: 平台键名映射回归
+        run: node tools/test-platform.mjs
       - name: 检查 Rust 格式
         run: cargo fmt --all -- --check
       - name: 检查 Rust 代码

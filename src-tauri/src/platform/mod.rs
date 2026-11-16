@@ -44,9 +44,9 @@ pub struct HitRegion {
     pub bottom: f64,
 }
 
-#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub struct HookOptions {
     pub monitor: std::sync::Arc<crate::paste::permit::Monitor>,
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     pub restricted: bool,
 }
 
@@ -89,10 +89,12 @@ pub struct ReplayKey {
     pub shift: bool,
 }
 
-#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub enum HookEvent {
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     Key(&'static str),
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     ForegroundRevision(u64),
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     Search(Instant),
     // 点击坐标、安装钩子时记下的面板范围、点击当时面板的实际范围，用于排查误判。
     Outside {
@@ -101,6 +103,7 @@ pub enum HookEvent {
         current: [i32; 4],
     },
     // 管理员提示停留期间的按键要收起面板（M0-6b），带上结束原因；不带按的是哪个键。
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     HintKey(HintEnd),
 }
 

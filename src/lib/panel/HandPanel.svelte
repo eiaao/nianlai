@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { keyLabel } from "../platform";
   // 手牌的唯一摆放入口：按姿态（扇面 / 摊开）算出每张牌的目标位置和尺寸，同一个以 id 为 key 的元素在两种姿态之间补间。
   import { untrack } from "svelte";
   import type { PanelState } from "../state.svelte";
@@ -123,7 +124,7 @@
   }
 </script>
 
-{#snippet keys(list: string[], label: string)}<span>{#each list as key}<kbd>{key}</kbd>{/each}{label}</span>{/snippet}
+{#snippet keys(list: string[], label: string)}<span>{#each list as key}<kbd>{keyLabel(key)}</kbd>{/each}{label}</span>{/snippet}
 
 <section class="hand-view" class:spread class:searching={panel.searching} aria-label="手牌" onwheel={wheel}>
   <!-- 真实输入框始终在 DOM 里（焦点和输入法要靠它），扇面时看不见。放在 interactive 判断之外：
@@ -149,7 +150,7 @@
       {/each}
       {#if !panel.handSource.length}
         <div class="blank-row" data-hit style={`translate:${ORIGIN_X + ROW_X}px ${view.top}px;width:${ROW_W}px`}>
-          {panel.searching ? `没找到“${panel.query}”。换个短点的词试试。按 Esc 回到全部。` : "复制点什么，它就出现在这里。"}
+          {panel.searching ? `没找到“${panel.query}”。${keyLabel("换个短点的词试试。按 Esc 回到全部。")}` : "复制点什么，它就出现在这里。"}
         </div>
       {/if}
     {:else}
@@ -178,7 +179,7 @@
         <button class="deck" type="button" tabindex="-1" data-hit style={`translate:${DECK_X}px ${DECK_Y}px;width:${DECK_W}px;height:${DECK_H}px`}
           onpointerdown={(event) => event.preventDefault()} onclick={() => panel.spreadOpen(FAN)} aria-label="摊开">
           {#each { length: Math.min(3, Math.ceil(rest / 12)) } as _, layer}<i style={`translate:${(3 - layer) * 3}px ${-(3 - layer) * 3}px`}></i>{/each}
-          <span class="deck-top"><b>＋</b><strong>还有 {rest} 张</strong><small><kbd>{panel.handList === "favorites" ? "PgDn" : "↓"}</kbd>摊开</small></span>
+          <span class="deck-top"><b>＋</b><strong>还有 {rest} 张</strong><small><kbd>{keyLabel(panel.handList === "favorites" ? "PgDn" : "↓")}</kbd>摊开</small></span>
         </button>
       {/if}
     {/if}
