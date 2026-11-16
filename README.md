@@ -8,7 +8,7 @@
 
 拈来是一个开源的 Windows 剪贴板历史工具：复制过的内容都留在本机，按一下快捷键呼出，挑一条直接粘贴到你正在用的程序里。呼出面板时**不抢焦点**，光标还在原来的位置；打字就能搜，中文也能搜。
 
-> **早期预览版（0.1.0-alpha）**：只支持 Windows x64，功能和数据格式仍可能变化。日常可用，但还在自用验证阶段。
+> **0.1.0**：只支持 Windows x64。数据库格式升级时会自动迁移，升级前自动备份。
 
 ## 特点
 
@@ -16,7 +16,7 @@
 - **键盘优先**：最近 7 张像一手牌，数字键 1–7 直接粘贴，Enter 粘贴，Ctrl+Enter 粘贴为纯文本，Shift+Enter 只复制。
 - **打字就搜**：全文搜索，支持中文；1 万条历史里搜索也在十几毫秒内完成。
 - **粘贴可靠**：发键前检查目标和剪贴板状态，尽量确认确实粘贴进去了；没把握时明确告诉你“已复制，请手动粘贴”，不会悄悄失败。
-- **常用**：常用内容加入常用后单独一手、顺序固定，不随历史过期。
+- **收藏**：常用的内容设为收藏后单独一手、顺序固定，可以加标题和备注，不随历史过期。
 - **手牌与摊开**：平时是一手扇面，要找更早的就把牌摊开成一列，连续滚动、按时间分组；深浅主题跟随系统。
 - **保留格式**：文字、富文本、图片、文件都按原格式记录，并显示来源程序的图标。
 - **本地优先**：数据只存在本机，不联网，不上传。
@@ -38,25 +38,27 @@
 | 1–7 | 粘贴对应的一张（摊开时是看得见的前 7 条，键帽上标着数字） |
 | Enter | 粘贴当前这张；有已选时按顺序一起粘贴 |
 | ← → | 上一张 / 下一张（任何状态都一样，搜索中也是） |
-| ↑ | 扇面里：切到常用；再按回到最近 |
+| ↑ | 扇面里：切到收藏；再按回到最近 |
 | ↓ / PageDown | 最近扇面里：摊开成一列；摊开里 ↓ 下一条、PageDown 翻一屏 |
 | Home / End | 摊开里：收回扇面 / 最后一条 |
-| 直接打字 | 搜索最近和常用（自动摊开）；搜索时数字是输入，用 Ctrl+1–7 粘贴 |
+| 直接打字 | 搜索最近和收藏（自动摊开）；搜索时数字是输入，用 Ctrl+1–7 粘贴 |
 | Ctrl+Enter | 粘贴为纯文本 |
 | Shift+Enter | 只复制当前一张，不粘贴（有已选时不执行，会提示） |
 | Tab | 看全（超长内容、原图）；看全里 Z 切换原图 |
 | 空格 | 多选；Backspace 放回最后选的一张 |
 | Ctrl+Shift+Enter | 已选的逐张放：之后每按一次 Ctrl+V 粘贴下一张，Esc 结束 |
-| Ctrl+D | 加入 / 移出常用 |
-| Delete | 把当前这张放进回收站（常用的要按住不放，进度走满才删）；搜索时用 Ctrl+Delete |
+| Ctrl+D | 设为收藏 / 取消收藏 |
+| Delete | 把当前这张放进回收站（收藏的要按住不放，进度走满才删）；搜索时用 Ctrl+Delete |
 | Ctrl+Z | 撤销最近的删除，关掉面板再打开也可以；可以连续撤销 |
 | Esc | 逐层退出：看全 → 搜索 → 已选 → 摊开 → 收起面板 |
 
-按住 Ctrl 或 Shift 稍等片刻，按键提示会换成对应的组合键。鼠标悬停在牌上会拈起它，单击直接粘贴；把牌拖到手牌以外松手也会粘贴（目前粘贴到呼出时的光标处）。滚轮向下摊开，摊开里滚轮逐条。
+按住 Ctrl 或 Shift 稍等片刻，按键提示会换成对应的组合键。鼠标悬停在牌上会拈起它，单击直接粘贴。滚轮向下摊开，摊开里滚轮逐条。
+
+在面板里搜“设置”（或 settings）会置顶一张“打开设置”，按 Enter 就打开设置窗口。第一次启动时有一张小纸笺带你走一遍“复制 → 呼出 → 粘贴”，之后可以在设置的“关于”页再看一次。
 
 退出：托盘图标右键“退出”，或按 Ctrl+Alt+Shift+Q。
 
-**目标是管理员权限的程序时**：普通权限的拈来无法向它发送按键，会把内容放进剪贴板并提示你手动按 Ctrl+V。
+**目标是管理员权限的程序时**：面板照常呼出、可以打字搜索；但普通权限的拈来无法向它发送按键，会把内容放进剪贴板并提示你手动按 Ctrl+V。
 
 ## 数据与隐私
 
@@ -73,9 +75,9 @@
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | v0.1 · M0 | 工程底座：单实例、托盘、自启、崩溃恢复、数据迁移、便携版 | ✅ |
-| v0.1 · M1 | 日常可用：来源程序、常用、三种布局（v10 起改为手牌）、主题、快捷键设置 | ✅ |
-| v0.1 · M2 | 数据安全：排除应用、跳过密码、暂停记录、存档与备份、存储管理、防误删 | 进行中 |
-| v0.1 · M3 | 发布准备：应用内更新、首次引导、安装包 | 计划中 |
+| v0.1 · M1 | 日常可用：来源程序、收藏、三种布局（v10 起改为手牌）、主题、快捷键设置 | ✅ |
+| v0.1 · M2 | 数据安全与整理：排除应用、跳过密码、暂停记录、快照与备份、存储管理、防误删、收藏整理、完整预览 | ✅ |
+| v0.1 · M3 | 发布准备：首次引导 ✅；应用内更新、安装包 | 进行中 |
 | v0.5 | 拼音搜索、接管 Win+V、分组、从 Ditto / EcoPaste 导入、macOS Beta | 计划中 |
 | v1.0 | 连续粘贴、文本转换、手机扫码互传等 | 计划中 |
 
@@ -114,15 +116,15 @@ CI（`.github/workflows/ci.yml`）在 PR、推送到 `main` 和手动触发时�
 
 ### 发版
 
-1. 改版本号：`powershell -NoProfile -ExecutionPolicy Bypass -File tools\release.ps1 -Version 0.1.0-alpha.3 -AllowDirty`，会同步 `src-tauri/Cargo.toml`、`package.json` 和 `Cargo.lock`。
+1. 改版本号：`powershell -NoProfile -ExecutionPolicy Bypass -File tools\release.ps1 -Version 0.1.0 -AllowDirty`，会同步 `src-tauri/Cargo.toml`、`package.json` 和 `Cargo.lock`。
 2. 提交版本号改动，推送到 `main`。
-3. 打标签并推送：`git tag v0.1.0-alpha.3 && git push origin v0.1.0-alpha.3`。
+3. 打标签并推送：`git tag v0.1.0 && git push origin v0.1.0`。
 
 推送 `v*` 标签后，`.github/workflows/release.yml` 会核对标签与版本一致 → 完整检查和构建 → 核对校验值和来源提交 → 创建 GitHub Release 并上传便携版。带 alpha、beta、rc 的版本标为预发布。
 
 ## English
 
-Nianlai (拈来) is an open-source clipboard history manager for Windows. Press <kbd>Ctrl</kbd>+<kbd>`</kbd> to open the panel **without stealing focus**, type to search (including Chinese), and press Enter or 1–7 to paste straight into the app you were using. Everything stays on your machine — no network access. It is an early alpha: Windows x64 only, portable zip from [Releases](https://github.com/eiaao/nianlai/releases). macOS is planned for v0.5.
+Nianlai (拈来) is an open-source clipboard history manager for Windows. Press <kbd>Ctrl</kbd>+<kbd>`</kbd> to open the panel **without stealing focus**, type to search (including Chinese), and press Enter or 1–7 to paste straight into the app you were using. Everything stays on your machine — no network access. Version 0.1.0: Windows x64 only, portable zip from [Releases](https://github.com/eiaao/nianlai/releases). macOS is planned for v0.5.
 
 ## 许可证
 
