@@ -20,6 +20,7 @@ pub enum AccessError {
     Timeout,
     Poisoned,
 }
+#[cfg(windows)]
 impl AccessError {
     pub fn reason(self) -> &'static str {
         match self {

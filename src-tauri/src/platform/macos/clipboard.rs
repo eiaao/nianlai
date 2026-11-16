@@ -186,7 +186,7 @@ impl Service {
         std::process::id() as usize
     }
     pub fn stamp(&self) -> queue::Stamp {
-        self.sample(NSPasteboard::generalPasteboard().changeCount())
+        objc2::rc::autoreleasepool(|_| self.sample(NSPasteboard::generalPasteboard().changeCount()))
     }
     fn sample(&self, count: isize) -> queue::Stamp {
         queue::Stamp {
@@ -225,12 +225,14 @@ impl Service {
             return Err("record_missing".into());
         }
         let _lock = self.lock();
-        let board = NSPasteboard::generalPasteboard();
-        publish(&board, &content)?;
-        self.0
-            .own_change
-            .store(board.changeCount(), Ordering::Release);
-        Ok(Arc::new(Mutex::new(Observation)))
+        objc2::rc::autoreleasepool(|_| {
+            let board = NSPasteboard::generalPasteboard();
+            publish(&board, &content)?;
+            self.0
+                .own_change
+                .store(board.changeCount(), Ordering::Release);
+            Ok(Arc::new(Mutex::new(Observation)))
+        })
     }
     pub fn write_guarded(
         &self,
@@ -250,7 +252,7 @@ impl Service {
     }
     pub fn write_for_capture(&self, content: Arc<Content>) -> Result<()> {
         let _lock = self.lock();
-        publish(&NSPasteboard::generalPasteboard(), &content)
+        objc2::rc::autoreleasepool(|_| publish(&NSPasteboard::generalPasteboard(), &content))
     }
     // macOS 没有剪贴板消息窗口，这里不需要。
     pub fn shutdown(&self) {}

@@ -34,7 +34,8 @@ impl Service {
         let thread = std::thread::Builder::new()
             .name("pasteboard-capture".into())
             .spawn(move || {
-                let mut previous = NSPasteboard::generalPasteboard().changeCount();
+                let mut previous =
+                    objc2::rc::autoreleasepool(|_| NSPasteboard::generalPasteboard().changeCount());
                 history.set_recording(true);
                 history.notify_health_changed();
                 while !stop.load(Ordering::Acquire) {

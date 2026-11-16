@@ -9,16 +9,18 @@ pub(super) struct Source {
     pub name: String,
 }
 pub(super) fn frontmost() -> Option<Source> {
-    let app = NSWorkspace::sharedWorkspace().frontmostApplication()?;
-    let name = app.localizedName()?.to_string();
-    let bundle = app
-        .bundleIdentifier()
-        .map(|value| value.to_string())
-        .unwrap_or_else(|| name.clone());
-    Some(Source {
-        pid: app.processIdentifier() as u32,
-        bundle,
-        name,
+    objc2::rc::autoreleasepool(|_| {
+        let app = NSWorkspace::sharedWorkspace().frontmostApplication()?;
+        let name = app.localizedName()?.to_string();
+        let bundle = app
+            .bundleIdentifier()
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| name.clone());
+        Some(Source {
+            pid: app.processIdentifier() as u32,
+            bundle,
+            name,
+        })
     })
 }
 
