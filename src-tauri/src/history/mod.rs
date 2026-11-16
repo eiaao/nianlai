@@ -1787,15 +1787,19 @@ mod deferred_tests {
         let history = history(&directory);
         let notified = Arc::new(AtomicUsize::new(0));
         let counter = notified.clone();
+        let (completed, ready) = std::sync::mpsc::channel();
         history.set_changed(Arc::new(move || {
             counter.fetch_add(1, Ordering::Relaxed);
+            let _ = completed.send(());
         }));
         assert!(matches!(
             capture(&history, "留下的内容", 1, Some(WINDOW)),
             Captured::Deferred
         ));
         assert!(previews(&history).is_empty());
-        std::thread::sleep(WINDOW * 3);
+        ready
+            .recv_timeout(Duration::from_secs(10))
+            .expect("暂存内容写入通知超时");
         assert_eq!(previews(&history), [("留下的内容".to_owned(), 1)]);
         assert_eq!(notified.load(Ordering::Relaxed), 1);
     }

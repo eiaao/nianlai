@@ -856,12 +856,20 @@ fn delete_moves_to_trash_then_restore_revive_and_purge() {
         ids.sort_unstable();
         ids
     });
+    assert!(reader.trash().unwrap().iter().all(|(_, at)| *at > 0));
+    // 固定先后，避免两次删除落在同一毫秒。
+    writable(&temp.0.join("history.db"))
+        .unwrap()
+        .execute(
+            "UPDATE trash SET deleted_ms=CASE content_id WHEN 3 THEN 1 ELSE 2 END WHERE content_id IN (2,3)",
+            [],
+        )
+        .unwrap();
     let trash = reader.trash().unwrap();
     assert_eq!(
         trash.iter().map(|(item, _)| item.id).collect::<Vec<_>>(),
         [2, 3]
     );
-    assert!(trash.iter().all(|(_, at)| *at > 0));
     assert!(trash[1].0.favorite);
 
     // 恢复：回到原来的位置，收藏还在。
