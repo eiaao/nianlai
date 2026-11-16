@@ -133,12 +133,15 @@ pub struct FocusResult {
     pub focus_unknown: bool,
 }
 
-#[cfg(not(windows))]
-compile_error!(
-    "拈来只支持 Windows：平台层只有 platform/windows 一份实现，请用 Windows 工具链构建。"
-);
+#[cfg(not(any(windows, target_os = "macos")))]
+compile_error!("拈来只支持 Windows 和 macOS。");
 
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
 pub use windows::*;
+
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
+pub use macos::*;
