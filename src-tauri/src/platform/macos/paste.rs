@@ -60,57 +60,59 @@ unsafe extern "C" {
     fn CFDataGetBytePtr(data: *const std::ffi::c_void) -> *const u8;
     fn CFRelease(value: *const std::ffi::c_void);
 }
-fn paste_key(app: &AppHandle) -> Result<u16, &'static str> {
+fn paste_key(app: &AppHandle) -> u16 {
     if let Some(main) = MainThreadMarker::new() {
         return command_paste_key(main);
     }
-    // Carbon 只能在主线程读取布局；超时后迟到的只读结果直接丢弃。
+    // Carbon 只能在主线程读取布局；读取或调度失败都回退物理 V，迟到结果丢弃。
     let (reply, receiver) = mpsc::sync_channel(1);
-    app.run_on_main_thread(move || {
-        let key = MainThreadMarker::new()
-            .ok_or("keyboard_layout_unavailable")
-            .and_then(command_paste_key);
-        let _ = reply.send(key);
-    })
-    .map_err(|_| "keyboard_layout_unavailable")?;
+    if app
+        .run_on_main_thread(move || {
+            let key = MainThreadMarker::new().map_or(9, command_paste_key);
+            let _ = reply.send(key);
+        })
+        .is_err()
+    {
+        return 9;
+    }
     receiver
         .recv_timeout(crate::platform::REPLAY_WAIT)
-        .map_err(|_| "keyboard_layout_unavailable")?
+        .unwrap_or(9)
 }
 
-fn command_paste_key(_: MainThreadMarker) -> Result<u16, &'static str> {
+fn command_paste_key(_: MainThreadMarker) -> u16 {
     unsafe {
         let source = TISCopyCurrentKeyboardLayoutInputSource();
         if source.is_null() {
-            return Err("keyboard_layout_unavailable");
+            return 9;
         }
         let data = TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData);
-        let key = if data.is_null() {
-            None
-        } else {
-            let layout = CFDataGetBytePtr(data);
-            (0..128).find(|key| {
-                let mut dead = 0;
-                let mut length = 0;
-                let mut output = [0; 4];
-                UCKeyTranslate(
-                    layout,
-                    *key,
-                    0,
-                    1,
-                    u32::from(LMGetKbdType()),
-                    1,
-                    &mut dead,
-                    4,
-                    &mut length,
-                    output.as_mut_ptr(),
-                ) == 0
-                    && length == 1
-                    && matches!(output[0], 0x56 | 0x76)
-            })
-        };
+        let layout = (!data.is_null()).then(|| CFDataGetBytePtr(data));
+        let key = layout
+            .filter(|layout| !layout.is_null())
+            .and_then(|layout| {
+                (0..128).find(|key| {
+                    let mut dead = 0;
+                    let mut length = 0;
+                    let mut output = [0; 4];
+                    UCKeyTranslate(
+                        layout,
+                        *key,
+                        0,
+                        1,
+                        u32::from(LMGetKbdType()),
+                        1,
+                        &mut dead,
+                        4,
+                        &mut length,
+                        output.as_mut_ptr(),
+                    ) == 0
+                        && length == 1
+                        && matches!(output[0], 0x56 | 0x76)
+                })
+            });
         CFRelease(source);
-        key.ok_or("keyboard_layout_unavailable")
+        key.unwrap_or(9)
     }
 }
 
@@ -324,12 +326,9 @@ impl Backend for Paste<'_> {
         Ok(())
     }
     fn send(&mut self) -> Result<Submission, &'static str> {
-        if self.request.target.process == std::process::id() {
-            return Err("invalid_target");
-        }
         let source =
             CGEventSource::new(CGEventSourceStateID::HIDSystemState).map_err(|()| "send_failed")?;
-        let key = paste_key(self.app)?;
+        let key = paste_key(self.app);
         let down =
             CGEvent::new_keyboard_event(source.clone(), key, true).map_err(|()| "send_failed")?;
         let up = CGEvent::new_keyboard_event(source, key, false).map_err(|()| "send_failed")?;

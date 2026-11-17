@@ -7,7 +7,7 @@ import { applyPreferences, DEFAULT_PREFERENCES, normalizePreferences, type Prefe
 import { cardKind, FAN, outlineFor, pageStep, spreadLayout, timeGroup, type SpreadLayout } from "./cards";
 import { dealtGuideItems, defaultGuideSettings, GUIDE_CARD_IDS, normalizePanelGuide } from "./guideCards";
 import { matchedActionItems } from "./panelActions";
-import { isMac, keyLabel, normalizePanelKey, primary, secondary } from "./platform";
+import { isMac, keyLabel, normalizePanelKey, primary, queueErrorMessage, secondary } from "./platform";
 
 const HOLD_HINT_MS = 300;
 /** 后端 start_queue 一次最多接受的条数。 */
@@ -1825,6 +1825,7 @@ export class PanelState {
       });
       await subscribe(ipc.onQueueChanged, (payload) => {
         if (payload.session !== this.session) return;
+        if (payload.error) payload = { ...payload, error: queueErrorMessage(payload.error) };
         const submission = this.queueSubmission;
         if (submission && submission.session === payload.session && payload.remaining > 0
           && payload.total === submission.ids.length && payload.automatic === submission.automatic) {
@@ -1853,6 +1854,7 @@ export class PanelState {
       });
       await subscribe(ipc.onPanelTiming, (payload) => { if (payload.session === this.session) this.timing = payload; });
       await subscribe(ipc.onPanelError, (payload) => {
+        payload = { ...payload, message: queueErrorMessage(payload.message) };
         if (payload.session === this.session) this.queueSubmission = null;
         if (this.visible && payload.session === this.session && this.interaction !== "passive"
           && (this.interaction !== "close_only" || payload.close_only === true)) {

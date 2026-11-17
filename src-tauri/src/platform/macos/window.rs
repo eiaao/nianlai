@@ -6,7 +6,7 @@ use objc2_app_kit::{
     NSPopUpMenuWindowLevel, NSScreen, NSWindowCollectionBehavior, NSWindowStyleMask,
 };
 use serde::Deserialize;
-use tauri::{LogicalPosition, LogicalSize, WebviewWindow};
+use tauri::{LogicalPosition, LogicalSize, Manager, WebviewWindow};
 use tauri_nspanel::{ManagerExt, WebviewWindowExt};
 
 tauri_nspanel::tauri_panel! {
@@ -281,6 +281,13 @@ pub fn show_no_activate(panel: &WebviewWindow) -> PlatformResult<()> {
         let native = panel
             .to_panel::<NianlaiGuidePanel>()
             .map_err(|error| error.to_string())?;
+        // 只在首次转换时注册；不捕获窗口，销毁后才能释放注册表里的原生面板。
+        let app = panel.app_handle().clone();
+        panel.on_window_event(move |event| {
+            if matches!(event, tauri::WindowEvent::Destroyed) {
+                app.remove_webview_panel("guide");
+            }
+        });
         native
             .add_style_mask(NSWindowStyleMask::NonactivatingPanel)
             .map_err(|error| error.to_string())?;
