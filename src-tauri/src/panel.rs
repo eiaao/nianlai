@@ -1537,6 +1537,11 @@ impl Panel {
     }
 
     fn stop_queue(&mut self, logger: &Logger, reason: Stop) -> platform::Result<bool> {
+        #[cfg(target_os = "macos")]
+        if self.queue.is_some() && reason.message().is_some() {
+            let app = self.window.app_handle().clone();
+            return self.fail_queue(&app, logger, reason).map(|()| true);
+        }
         self.stop_queue_with(logger, reason, true)
     }
 
@@ -2779,15 +2784,10 @@ impl Panel {
                         dwell,
                         if native_unknown {
                             "native_submission_unknown"
+                        } else if cfg!(windows) {
+                            "target_may_be_elevated"
                         } else {
-                            #[cfg(windows)]
-                            {
-                                "target_may_be_elevated"
-                            }
-                            #[cfg(target_os = "macos")]
-                            {
-                                "copied_only"
-                            }
+                            "copied_only"
                         },
                     )?,
                     None => {
