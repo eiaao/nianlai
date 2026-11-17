@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { isMac, keyLabel } from "../platform";
   import { onMount } from "svelte";
   import { PanelState } from "../state.svelte";
   import HandPanel from "./HandPanel.svelte";
@@ -96,18 +97,19 @@
         <span class="queue-error">{panel.queue.error}</span>
       {:else if panel.queue.automatic}
         <span>正在一起粘贴 · 还剩 <b>{panel.queue.remaining}</b> 张</span>
-      {:else}
-        <span>逐张放 · 还剩 <b>{panel.queue.remaining}</b> 张 · 按 <kbd>Ctrl+V</kbd> 粘贴下一张</span>
+      {:else if !isMac}
+        <span>逐张放 · 还剩 <b>{panel.queue.remaining}</b> 张 · 按 <kbd>{keyLabel("Ctrl+V")}</kbd> 粘贴下一张</span>
       {/if}
       {#if panel.queue.skipped && !panel.queue.error}<span>已跳过 {panel.queue.skipped} 张</span>{/if}
-      {#if !panel.queue.error}<small>Esc 取消</small>{/if}<button type="button" tabindex="-1" aria-label="取消逐张放" onclick={panel.cancelQueue}>×</button>
+      {#if !panel.queue.error}<small>{keyLabel("Esc")} 取消</small>{/if}<button type="button" tabindex="-1" aria-label={isMac ? "取消一起粘贴" : "取消逐张放"} onclick={panel.cancelQueue}>×</button>
     </div>
   {:else if !panel.visible && !panel.warming}
     <!-- 隐藏期不保留旧会话手牌。 -->
   {:else if panel.interaction === "close_only"}
     <section class="terminal-feedback" data-hit>
       <span class="terminal-mark" aria-hidden="true">△</span>
-      <p role="status">{panel.message || "这次没贴。收起再呼出一次"}</p>
+      <p role="status">{panel.feedback?.accessibility ? `${panel.feedback.title}：${panel.feedback.detail}` : panel.message || "这次没贴。收起再呼出一次"}</p>
+      {#if panel.feedback?.accessibility}<button type="button" onpointerdown={(event) => event.preventDefault()} onclick={panel.openAccessibilitySettings}>去设置</button>{/if}
       <button type="button" onclick={panel.close}>关闭面板</button>
     </section>
   {:else if !panel.interactive && !panel.warming && panel.interaction !== "passive" && !panel.inputSurface}

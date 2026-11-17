@@ -43,6 +43,18 @@ fn get_license_notices() -> LicenseNotices {
     license_notices()
 }
 
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn mac_accessibility_status() -> bool {
+    platform::ax::accessibility_status()
+}
+
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn mac_open_accessibility_settings() -> Result<(), String> {
+    platform::ax::open_accessibility_settings()
+}
+
 #[tauri::command]
 fn get_data_dir(app: AppHandle) -> String {
     app.state::<Controller>()
@@ -67,7 +79,8 @@ fn open_data_directory_with(
 }
 
 fn open_directory(path: &std::path::Path) -> Result<(), String> {
-    std::process::Command::new("explorer.exe")
+    let command = cfg!(windows).then_some("explorer.exe").unwrap_or("open");
+    std::process::Command::new(command)
         .arg(path)
         .spawn()
         .map(drop)
@@ -140,7 +153,7 @@ struct CaptureState {
     paused: bool,
     ignore_next: bool,
     rules: &'static [capture::sensitive::Rule],
-    default_excluded_apps: [&'static str; 6],
+    default_excluded_apps: [&'static str; settings::DEFAULT_EXCLUDED_APPS.len()],
 }
 
 #[tauri::command]
@@ -652,6 +665,10 @@ pub fn run() {
             get_settings,
             set_settings,
             get_license_notices,
+            #[cfg(target_os = "macos")]
+            mac_accessibility_status,
+            #[cfg(target_os = "macos")]
+            mac_open_accessibility_settings,
             get_data_dir,
             open_data_dir,
             tray::get_autostart,
@@ -718,6 +735,11 @@ pub fn run() {
             guide_window::set_guide_hit_regions
         ])
         .setup(|app| {
+            #[cfg(target_os = "macos")]
+            {
+                app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+                app.handle().plugin(tauri_nspanel::init())?;
+            }
             let settings_file = settings::settings_path();
             let (store, issues) = settings::Store::load(settings_file.clone());
             let resolved = settings::Resolved::new(store.get(), settings_file);
@@ -817,6 +839,11 @@ pub fn run() {
                     return;
                 }
                 api.prevent_close();
+                #[cfg(target_os = "macos")]
+                if window.label() == "panel" {
+                    let _ = panel::dispatch(window.app_handle(), Action::CloseWindow);
+                    return;
+                }
                 if let Some(controller) = window.app_handle().try_state::<Controller>() {
                     controller
                         .logger

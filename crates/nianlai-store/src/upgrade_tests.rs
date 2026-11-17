@@ -842,9 +842,11 @@ fn rebuild_v3_fixture() {
 }
 
 // v1 夹具里出现过的来源进程名（populate 的 sources）；回填的 source_apps 应当恰好是这些。
+#[cfg(windows)]
 const BACKFILLED_APPS: &[&str] = &["Code.exe", "chrome.exe", "explorer.exe", "notepad.exe"];
 
 #[test]
+#[cfg(windows)]
 fn v2_migration_backfills_source_apps_and_keeps_content_and_search() {
     let manifest = load_manifest(1);
     let temp = fixture_copy(1);

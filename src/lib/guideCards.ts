@@ -1,10 +1,11 @@
 import type { GuideCardId, GuideSettings, HistoryItem } from "./ipc";
+import { isMac } from "./platform";
 
 export const GUIDE_CARD_IDS: readonly GuideCardId[] = ["t1", "t2", "t3", "t4"];
 export const GUIDE_CARD_RESERVED_IDS: Readonly<Record<GuideCardId, number>> = { t1: -1, t2: -2, t3: -3, t4: -4 };
 export const GUIDE_CARD_COPY: Readonly<Record<GuideCardId, { title: string; body: string }>> = {
   t1: { title: "按数字，直接贴", body: "每张牌左上角有数字，按一下就贴过去。现在按 1 试试。" },
-  t2: { title: "它记什么", body: "文字、图片、文件都记；密码管理器里复制的不记。想停一会儿，点托盘图标选“暂停记录”。" },
+  t2: { title: "它记什么", body: `文字、图片、文件都记；密码管理器里复制的不记。想停一会儿，点${isMac ? "菜单栏" : "托盘"}图标选“暂停记录”。` },
   t3: { title: "呼出键", body: "" },
   t4: { title: "开机时启动", body: "" },
 };

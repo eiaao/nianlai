@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { isMac, keyLabel } from "../platform";
   // 一张牌 = 一个元素，两种姿态：扇面（竖牌）和摊开（横条）。位置、尺寸、旋转由 HandPanel 算好传进来，
   // 姿态切换时同一个元素补间 translate / rotate / 宽高，两层内容交叉淡入（对象恒常性）。
   import * as ipc from "../ipc";
@@ -114,7 +115,7 @@
   data-hit-target={target}
   role="option"
   aria-selected={selected}
-  aria-label={`${keycap || index + 1}，${item.title || firstLine(text) || KIND_NAME[kind]}${taken ? "，已选" : ""}`}
+  aria-label={`${keyLabel(keycap) || index + 1}，${item.title || firstLine(text) || KIND_NAME[kind]}${taken ? "，已选" : ""}`}
   tabindex="-1"
   onpointerenter={() => { if (!press) panel.hoverSelect(index); }}
   onpointermove={pointerMove}
@@ -135,18 +136,18 @@
           <strong>{guide.title}</strong>
           {#if guide.id === "t1" || guide.id === "t2"}<p>{guide.body}</p>
           {:else if guide.id === "t3"}
-            <div class="guide-key"><kbd>{displayHotkey(panel.hotkey)}</kbd></div>
+            <div class="guide-key"><kbd>{keyLabel(displayHotkey(panel.hotkey), true)}</kbd></div>
             <p><button type="button" data-guide-hotkey onpointerdown={(event) => event.stopPropagation()} onclick={(event) => { event.preventDefault(); event.stopPropagation(); void panel.openGuideHotkeySettings(item); }}>换一个</button></p>
           {:else}
             <div class="guide-switch"><input type="checkbox" role="switch" aria-label="开机时启动" data-guide-autostart checked={panel.autostart} disabled={!panel.autostartReady || panel.autostartBusy}
               onpointerdown={(event) => event.stopPropagation()} onclick={(event) => event.stopPropagation()}
               onchange={(event) => { event.stopPropagation(); const control = event.currentTarget; const requested = control.checked; control.checked = panel.autostart; void panel.setGuideAutostart(requested, item); }} />
               <span>{panel.autostart ? "开着" : "关着"}</span></div>
-            <p>{panel.autostart ? "电脑开机后，拈来就在托盘里等着。" : "要用时从开始菜单打开拈来。"}</p>
+            <p>{panel.autostart ? `电脑开机后，拈来就在${isMac ? "菜单栏" : "托盘"}里等着。` : `要用时从${isMac ? "“应用程序”" : "开始菜单"}打开拈来。`}</p>
             {#if panel.autostartError}<p class="guide-error" role="alert">{panel.autostartError}</p>{/if}
           {/if}
         </div>
-        <div class="foot">Delete 扔掉</div>
+        <div class="foot">{keyLabel(isMac ? "Backspace" : "Delete")} 扔掉</div>
       {:else}
         {#if kind === "image"}
           <div class="img">{#if image}<img src={image.url} alt="" draggable="false" />{/if}</div>
@@ -204,9 +205,9 @@
       {/if}
       <div class="rb">
         {#if action}
-          <div class="guide-row action-row"><b>{action.title}</b><span>{action.body}</span></div>
+          <div class="guide-row action-row"><b>{action.title}</b><span>{action.body.replace("↵", keyLabel("↵"))}</span></div>
         {:else if guide}
-          <div class="guide-row" class:has-error={guide.id === "t4" && !!panel.autostartError}><b>{guide.title}</b><span>{guide.id === "t3" ? displayHotkey(panel.hotkey) : guide.id === "t4" ? (panel.autostart ? "电脑开机后，拈来就在托盘里等着。" : "要用时从开始菜单打开拈来。") : guide.body}</span>
+          <div class="guide-row" class:has-error={guide.id === "t4" && !!panel.autostartError}><b>{guide.title}</b><span>{guide.id === "t3" ? keyLabel(displayHotkey(panel.hotkey), true) : guide.id === "t4" ? (panel.autostart ? `电脑开机后，拈来就在${isMac ? "菜单栏" : "托盘"}里等着。` : `要用时从${isMac ? "“应用程序”" : "开始菜单"}打开拈来。`) : guide.body}</span>
             {#if selected && flat}
               {#if guide.id === "t3"}<button type="button" data-guide-hotkey onpointerdown={(event) => event.stopPropagation()} onclick={(event) => { event.preventDefault(); event.stopPropagation(); void panel.openGuideHotkeySettings(item); }}>换一个</button>{/if}
               {#if guide.id === "t4"}<input type="checkbox" role="switch" aria-label="开机时启动" data-guide-autostart checked={panel.autostart} disabled={!panel.autostartReady || panel.autostartBusy}
@@ -244,12 +245,12 @@
         {/if}
         {/if}
       </div>
-      <span class="mt">{#if action}<span class="src">操作 · ↵ 执行</span>{:else if guide}<span class="src">新手牌 · Delete 扔掉</span>{:else}{#if showSeal}<i class="sl">藏</i>{/if}<span class="src">{meta}</span>{/if}</span>
+      <span class="mt">{#if action}<span class="src">操作 · {keyLabel("↵")} 执行</span>{:else if guide}<span class="src">新手牌 · {keyLabel(isMac ? "Backspace" : "Delete")} 扔掉</span>{:else}{#if showSeal}<i class="sl">藏</i>{/if}<span class="src">{meta}</span>{/if}</span>
     </div>
 
     {#if holding}<i class="hold" style={`animation-duration:${holding.duration}ms`}></i>{/if}
   </div>
-  <span class="kc" class:wide={keycap.startsWith("Ctrl")}>{#if keycap.startsWith("Ctrl")}<small>Ctrl</small>{keycap.slice(5)}{:else}{keycap}{/if}</span>
+  <span class="kc" class:wide={keycap.startsWith("Ctrl")}>{#if keycap.startsWith("Ctrl")}<small>{keyLabel("Ctrl")}</small>{keycap.slice(5)}{:else}{keyLabel(keycap)}{/if}</span>
   {#if taken}<span class="tk">已选</span>{/if}
   {#if item.file_state?.state === "missing"}<span class="missing">不在了</span>{/if}
   {#if drag}<span class="drop">{drag.out ? "松手：粘贴到原光标处" : "松手：放回"}</span>{/if}

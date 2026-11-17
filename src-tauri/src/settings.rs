@@ -64,6 +64,7 @@ impl Default for Settings {
 }
 
 /// 默认排除的密码管理器（A07）。按进程名比较，不区分大小写。
+#[cfg(windows)]
 pub const DEFAULT_EXCLUDED_APPS: [&str; 6] = [
     "KeePass.exe",
     "KeePassXC.exe",
@@ -71,6 +72,14 @@ pub const DEFAULT_EXCLUDED_APPS: [&str; 6] = [
     "1Password.exe",
     "Enpass.exe",
     "RoboForm.exe",
+];
+#[cfg(target_os = "macos")]
+pub const DEFAULT_EXCLUDED_APPS: [&str; 5] = [
+    "1Password",
+    "Bitwarden",
+    "KeePassXC",
+    "com.apple.keychainaccess",
+    "com.apple.Passwords",
 ];
 pub const MAX_TEXT_KB: u64 = 2048;
 const MAX_EXCLUDED_APPS: usize = 200;
@@ -739,12 +748,25 @@ pub fn open_logger() -> io::Result<Logger> {
     Ok(logger)
 }
 
+#[cfg(windows)]
 pub fn settings_path() -> PathBuf {
     std::env::var_os("APPDATA")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir)
         .join("Nianlai/settings.json")
+}
+
+#[cfg(target_os = "macos")]
+fn mac_library() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("Library")
+}
+#[cfg(target_os = "macos")]
+pub fn settings_path() -> PathBuf {
+    mac_library().join("Application Support/Nianlai/settings.json")
 }
 
 pub struct Resolved {
@@ -757,10 +779,13 @@ pub struct Resolved {
 
 impl Resolved {
     pub fn new(settings: Settings, settings_file: PathBuf) -> Self {
+        #[cfg(windows)]
         let local = std::env::var_os("LOCALAPPDATA")
             .filter(|value| !value.is_empty())
             .map(PathBuf::from)
             .unwrap_or_else(std::env::temp_dir);
+        #[cfg(target_os = "macos")]
+        let local = mac_library();
         Self::resolve(
             settings,
             settings_file,
@@ -811,7 +836,10 @@ impl Resolved {
                 }
             };
         }
+        #[cfg(windows)]
         let default_data = local.join("Nianlai/data");
+        #[cfg(target_os = "macos")]
+        let default_data = local.join("Application Support/Nianlai");
         let (data, data_source, test_data_dir) = match data {
             Some(value) if value.to_str().is_some_and(valid_path) => {
                 (PathBuf::from(value), "环境变量指定", true)
@@ -831,7 +859,14 @@ impl Resolved {
         let logs = if test_data_dir {
             data.clone()
         } else {
-            local.join("Nianlai/logs")
+            #[cfg(windows)]
+            {
+                local.join("Nianlai/logs")
+            }
+            #[cfg(target_os = "macos")]
+            {
+                local.join("Logs/Nianlai")
+            }
         };
         Self {
             settings,
@@ -1218,6 +1253,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(windows)]
     #[test]
     fn capture_rules_validate_each_field() {
         let (settings, issues) = validate(json!({}));
@@ -1458,6 +1494,7 @@ pub(crate) mod tests {
         assert_eq!(fs::read_dir(&directory.0).unwrap().count(), 1);
     }
 
+    #[cfg(windows)]
     #[test]
     fn test_overrides_win_without_changing_persisted_settings() {
         let directory = Directory::new();

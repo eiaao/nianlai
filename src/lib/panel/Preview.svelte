@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { isMac, keyLabel } from "../platform";
   import { onDestroy, tick } from "svelte";
   import * as ipc from "../ipc";
   import type { HistoryItem, ImageView, PathCheck, TextChunk } from "../ipc";
@@ -7,14 +8,15 @@
   import { cardKind, colorValue, linkParts, relativeTime, sourceName } from "../cards";
   import { SpringValue } from "./motion";
   import { displayHotkey } from "../guideCards";
+  import { PANEL_ACTION_COPY } from "../panelActions";
 
   let { panel, item, expanded = false, compact = false }: { panel: PanelState; item: HistoryItem | null; expanded?: boolean; compact?: boolean } = $props();
   let root: HTMLDivElement;
   let previousId: number | null | undefined;
   const kind = $derived(item ? cardKind(item) : "short");
   const rich = $derived(item?.kind === "富文本");
-  const guideText = $derived(item?.guide_id === "t3" ? displayHotkey(panel.hotkey)
-    : item?.guide_id === "t4" ? (panel.autostart ? "电脑开机后，拈来就在托盘里等着。" : "要用时从开始菜单打开拈来。")
+  const guideText = $derived(item?.guide_id === "t3" ? keyLabel(displayHotkey(panel.hotkey), true)
+    : item?.guide_id === "t4" ? (panel.autostart ? `电脑开机后，拈来就在${isMac ? "菜单栏" : "托盘"}里等着。` : `要用时从${isMac ? "“应用程序”" : "开始菜单"}打开拈来。`)
       : item?.preview ?? "");
   const link = $derived(item ? linkParts(item.preview ?? "") : null);
   const color = $derived(item ? colorValue(item.preview ?? "") : null);
@@ -137,11 +139,11 @@
   {#if !item}
     <div class="empty-preview">
       <strong>{panel.query ? `没找到“${panel.query}”` : "还没复制过东西"}</strong>
-      <p>{panel.query ? "换个短点的词试试。按 Esc 回到全部。" : "复制点什么，它就出现在这里。"}</p>
+      <p>{panel.query ? "换个短点的词试试。按 Esc 回到全部。".replace("Esc", keyLabel("Esc")) : "复制点什么，它就出现在这里。"}</p>
     </div>
   {:else}
     <div class="preview-eyebrow">
-      <span>{item.action ? "操作 · ↵ 执行" : item.guide_id ? "新手牌 · Delete 扔掉" : `${sourceName(item)} · ${relativeTime(item.copied_ms)}`}</span>
+      <span>{item.action ? `操作 · ${keyLabel("↵")} 执行` : item.guide_id ? `新手牌 · ${keyLabel(isMac ? "Backspace" : "Delete")} 扔掉` : `${sourceName(item)} · ${relativeTime(item.copied_ms)}`}</span>
     </div>
     {#if item.favorite && (item.title || item.note)}
       <!-- M2-6：常用的标题和备注在设置“整理”页里编辑，这里只显示。 -->
@@ -153,7 +155,7 @@
 
     {#if item.action}
       <h2 class="preview-title">{item.title}</h2>
-      <p class="preview-text">{item.preview}</p>
+      <p class="preview-text">{PANEL_ACTION_COPY[item.action].body.replace("↵", keyLabel("↵"))}</p>
     {:else if item.guide_id}
       <h2 class="preview-title">{item.title}</h2>
       <p class="preview-text">{guideText}</p>

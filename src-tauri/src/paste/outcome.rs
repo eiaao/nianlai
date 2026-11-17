@@ -13,7 +13,9 @@ pub enum PasteResult {
     Sent,
     Confirmed,
     CopiedOnly,
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     NativeSubmissionUnknown,
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     NativeNotSubmitted,
     GenericSubmissionUnknown,
     GenericNotSubmitted,

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { isMac, keyLabel } from "../lib/platform";
   import { onDestroy, onMount, untrack } from "svelte";
   import * as ipc from "../lib/ipc";
   import type {
@@ -44,7 +45,7 @@
   function displayHotkey(value: string) {
     const order = ["control", "ctrl", "alt", "shift", "super", "win"];
     const parts = (value.trim() || "Ctrl+`").split("+").filter(Boolean);
-    return parts.sort((a, b) => {
+    return keyLabel(parts.sort((a, b) => {
       const ai = order.indexOf(a.toLowerCase());
       const bi = order.indexOf(b.toLowerCase());
       return (ai < 0 ? 99 : ai) - (bi < 0 ? 99 : bi);
@@ -53,7 +54,7 @@
       .replace(/^shift$/i, "Shift").replace(/^alt$/i, "Alt")
       .replace(/^Key([A-Z])$/, "$1").replace(/^Digit([0-9])$/, "$1")
       .replace(/^Backquote$/, "`"))
-      .join(" + ");
+      .join(" + "), true);
   }
 
   // 预览只持有自己的演示次数。设置改变会重播，但不写存储，也不调用任何面板命令。
@@ -209,7 +210,7 @@
       <label class="setting" data-save-row="general.theme"><span class="setting-copy"><strong>主题</strong><small>浅色、深色，或跟随系统。</small></span><SaveMark state={saveState("general.theme")} /><select data-setting="theme" aria-label="主题" value={preferences.theme} disabled={disabled} onchange={(event) => onsave("general.theme", { theme: event.currentTarget.value as ThemePreference }, "主题已保存并应用")}><option value="light">浅色</option><option value="dark">深色</option><option value="system">跟随系统</option></select></label>
       <label class="setting" data-save-row="general.motion"><span class="setting-copy"><strong>动效</strong><small>关闭后牌直接到位，没有飞的过程。</small></span><SaveMark state={saveState("general.motion")} /><select data-setting="motion" aria-label="动效" value={preferences.motion} disabled={disabled} onchange={(event) => onsave("general.motion", { feedback: { motion: event.currentTarget.value as MotionPreference } }, "动效已保存并应用")}><option value="spring">完整</option><option value="soft">柔和</option><option value="none">关闭</option></select></label>
       <label class="setting" data-save-row="general.follow-system"><span class="setting-copy"><strong>系统关了动画时，我也跟着简化</strong><small>比如远程桌面时。{systemReduced ? "系统现在关着动画效果。" : ""}</small></span><SaveMark state={saveState("general.follow-system")} /><input class="switch" data-setting="follow-system" aria-label="系统关了动画时，我也跟着简化" type="checkbox" role="switch" checked={preferences.followSystemMotion} disabled={disabled} onchange={(event) => onsave("general.follow-system", { feedback: { follow_system: event.currentTarget.checked } }, event.currentTarget.checked ? "已改为跟随系统的动画设置" : "已改为始终播放动画")}></label>
-      <label class="setting" data-save-row="general.autostart"><span class="setting-copy"><strong>开机时启动</strong><small>和托盘里的“开机时启动”是同一个开关。</small></span><SaveMark state={autostartMark} /><input class="switch" data-setting="autostart" aria-label="开机时启动" type="checkbox" role="switch" checked={autostart} disabled={disabled || autostartBusy || !autostartReady} onchange={changeAutostart}></label>
+      <label class="setting" data-save-row="general.autostart"><span class="setting-copy"><strong>开机时启动</strong><small>和{isMac ? "菜单栏" : "托盘"}里的“开机时启动”是同一个开关。</small></span><SaveMark state={autostartMark} /><input class="switch" data-setting="autostart" aria-label="开机时启动" type="checkbox" role="switch" checked={autostart} disabled={disabled || autostartBusy || !autostartReady} onchange={changeAutostart}></label>
     </div>
   </div>
 </section>

@@ -419,6 +419,7 @@ mod tests {
 
     // 用 cmd /C exit N 代替 nianlai.exe --child：按参数立刻以指定退出码退出，不建窗口、不碰剪贴板。
     #[test]
+    #[cfg(windows)]
     fn real_child_exit_codes_flow_through_the_loop() {
         let policy = Policy {
             delay: Duration::ZERO,
@@ -574,6 +575,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
     fn journal_open_resolves_isolated_environment_without_changing_settings() {
         const PROBE: &str = "NIANLAI_JOURNAL_TEST_ROOT";
         if let Some(root) = std::env::var_os(PROBE) {

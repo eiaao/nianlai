@@ -137,7 +137,7 @@ export type PasteResult = SessionEvent & {
   layer3: { conclusion: string };
   as_text: { conversion: "paths" | "image_path" | "plain_text" | null; error?: string } | null;
   selected_to_result_ms: number;
-  // 只复制后的被动提示；权限和原控件是否恢复由后端确认，前端不根据 reason 猜测。
+  // 后端确认只复制结果及被动提示时长；前端仅按明确的权限 reason 显示授权入口。
   hint_dwell_ms?: number;
   hint_message?: string;
 };
@@ -178,6 +178,8 @@ export const getHotkeyStatus = () => invoke<HotkeyStatus>("get_hotkey_status");
 // 设置页录制新组合键期间暂时注销呼出键（后端 30 秒后自动恢复兜底）。
 export const pauseHotkey = (paused: boolean) => invoke<void>("pause_hotkey", { paused });
 export const openSettings = (page?: string) => invoke("open_settings", { page: page ?? null });
+export const macAccessibilityStatus = () => invoke<boolean>("mac_accessibility_status");
+export const macOpenAccessibilitySettings = () => invoke<void>("mac_open_accessibility_settings");
 // 首次启动使用独立窗口和定向事件；不向普通 panel 增加展示、粘贴或历史调用。
 export const openGuide = () => invoke<void>("open_guide");
 export const guideCopySample = () => invoke<void>("guide_copy_sample");

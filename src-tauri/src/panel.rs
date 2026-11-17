@@ -210,6 +210,7 @@ struct Hint {
 // 粘贴前的预判：面板要不要先别收起。判断顺序和 paste::perform 一致——复制模式、目标失效、用户切走
 // 都排在完整性比较前面，这些情况照旧立即收起；只有走到完整性比较且目标不是 allowed（比样机高，或查不到、
 // 按高处理）时，结论必然是 copied_only / target_may_be_elevated，此时面板留着等结论。
+#[cfg(any(windows, test))]
 fn defers_hide_for_elevated(
     mode: PasteMode,
     target_valid: bool,
@@ -366,6 +367,8 @@ pub(crate) struct Panel {
 
 pub enum Action {
     HistoryChanged,
+    #[cfg(target_os = "macos")]
+    CloseWindow,
     Toggle {
         started: Instant,
         target: Target,
@@ -750,10 +753,14 @@ fn run_paste(job: PasteJob) {
                 hooks.synchronize();
             }
             let passive = matches!(policy, RestorePolicy::NativeAfterSubmit { unknown: true });
+            #[cfg(target_os = "macos")]
+            let passive = passive || policy == RestorePolicy::CopiedOnlyHint;
             return_for_paste(&app, session, permit.clone(), passive, policy)
         };
         match loaded {
             Ok(Some(content)) => paste::execute(
+                #[cfg(target_os = "macos")]
+                &app,
                 Request {
                     session,
                     target: target.clone(),
@@ -861,6 +868,8 @@ fn run_paste(job: PasteJob) {
 }
 
 struct QueueJob {
+    #[cfg(target_os = "macos")]
+    target: Target,
     app: AppHandle,
     logger: Logger,
     session: u64,
@@ -888,6 +897,8 @@ fn queue_target_rejected(target: &Target, own_process: u32) -> bool {
 // 不留宽限（modifier_grace=0），其余条件仍按原 300ms 确认。
 fn run_queue_item(job: QueueJob) {
     let QueueJob {
+        #[cfg(target_os = "macos")]
+        target,
         app,
         logger,
         session,
@@ -903,12 +914,17 @@ fn run_queue_item(job: QueueJob) {
     } = job;
     let cancel = guard.cancelled.clone();
     let started = Instant::now();
+    #[cfg(windows)]
     let target = window::capture();
+    #[cfg(target_os = "macos")]
+    if window::foreground() != target.window {
+        guard.stop(Stop::Cancelled);
+    }
     let cancelled = || cancel.load(Ordering::Acquire) || stopping.load(Ordering::Acquire);
     let mut files_skipped = 0;
     let mut result = if cancelled() {
         Outcome::not_written(Reason::RequestCancelled)
-    } else if queue_target_rejected(&target, std::process::id()) {
+    } else if !cfg!(target_os = "macos") && queue_target_rejected(&target, std::process::id()) {
         Outcome::not_written(Reason::InvalidTarget)
     } else {
         let loaded = load_for_paste(&history, id);
@@ -924,6 +940,8 @@ fn run_queue_item(job: QueueJob) {
                 let sent = || {};
                 let synchronize = || true;
                 paste::execute(
+                    #[cfg(target_os = "macos")]
+                    &app,
                     Request {
                         session,
                         target: target.clone(),
@@ -937,7 +955,10 @@ fn run_queue_item(job: QueueJob) {
                         permit: Some(permit),
                         copy_only_reason: None,
                         text_separator,
+                        #[cfg(windows)]
                         modifier_grace: Duration::ZERO,
+                        #[cfg(target_os = "macos")]
+                        modifier_grace: MODIFIER_GRACE,
                         clipboard_guard: Some(guard.clone()),
                         cancelled: cancel.clone(),
                     },
@@ -1097,6 +1118,11 @@ impl Panel {
             mode,
             selection,
         } = command;
+        #[cfg(target_os = "macos")]
+        if !automatic {
+            self.emit("panel:error", json!({"message":"macOS 版暂不支持逐张粘贴"}));
+            return Ok(());
+        }
         if let Err(message) = crate::paste::queue::validate_ids(&ids) {
             // 不走 Err：dispatch 的通用错误会收起面板并只显示“操作未完成”。
             self.log(
@@ -1115,6 +1141,7 @@ impl Panel {
             );
             return Ok(());
         }
+        #[cfg(windows)]
         if self.interaction == Interaction::Activated {
             // 主路径这种目标（可能以管理员运行）只复制；低权限的键盘钩子也收不到发往它的
             // Ctrl+V，逐张放必然失效，所以直接拒绝。
@@ -1308,7 +1335,7 @@ impl Panel {
         self.emit("panel:hidden", json!({"queue":true}));
         self.emit_queue();
         self.log(logger, "queue_started", json!({"total":total,"automatic":automatic,"mode":match mode { PasteMode::Paste => "paste", PasteMode::Copy => "copy", PasteMode::Text => "text" }}));
-        if automatic && returned {
+        if automatic && (returned || cfg!(target_os = "macos")) {
             self.begin_queue_item(app, logger)?;
         }
         Ok(())
@@ -1350,6 +1377,8 @@ impl Panel {
         self.emit_queue();
         let controller = app.state::<Controller>();
         let job = QueueJob {
+            #[cfg(target_os = "macos")]
+            target: self.target.clone(),
             app: app.clone(),
             logger: logger.clone(),
             session: self.session,
@@ -1476,6 +1505,15 @@ impl Panel {
             self.stop_queue(logger, reason)?;
             return Ok(());
         }
+        #[cfg(target_os = "macos")]
+        if result.passive_hint && result.clipboard_written {
+            self.stop_queue_with(logger, Stop::SubmissionUncertain, false)?;
+            self.show_submission_feedback(app, logger)?;
+            let mut report = result.to_value();
+            report["hint_dwell_ms"] = json!(QUEUE_ERROR_DWELL.as_millis() as u64);
+            self.emit("panel:paste-result", report);
+            return Ok(());
+        }
         let Some(queue) = self.queue.as_mut() else {
             return Ok(());
         };
@@ -1484,6 +1522,9 @@ impl Panel {
         match queue.state.finish(id, &result, now) {
             Finished::Stopped(reason) => {
                 self.stop_queue(logger, reason)?;
+            }
+            Finished::Ready if cfg!(target_os = "macos") && queue.state.error.is_some() => {
+                return self.fail_queue(app, logger, Stop::WriteFailed);
             }
             Finished::Ready => self.emit_queue(),
             Finished::Next => {
@@ -1496,6 +1537,11 @@ impl Panel {
     }
 
     fn stop_queue(&mut self, logger: &Logger, reason: Stop) -> platform::Result<bool> {
+        #[cfg(target_os = "macos")]
+        if self.queue.is_some() && reason.message().is_some() {
+            let app = self.window.app_handle().clone();
+            return self.fail_queue(&app, logger, reason).map(|()| true);
+        }
         self.stop_queue_with(logger, reason, true)
     }
 
@@ -1608,7 +1654,13 @@ impl Panel {
             self.log(logger, "hit_regions_failed", json!({"error":error}));
         }
         let incoming = match avoid
-            .map(|avoid| window::convert_avoid(avoid, window::window_scale(&self.window)))
+            .map(|avoid| {
+                #[cfg(windows)]
+                let scale = window::window_scale(&self.window);
+                #[cfg(target_os = "macos")]
+                let scale = window::window_scale(&self.window)?;
+                window::convert_avoid(avoid, scale)
+            })
             .transpose()
         {
             Ok(incoming) => incoming,
@@ -1775,6 +1827,7 @@ impl Panel {
             }
         };
         let webview_started = Instant::now();
+        #[cfg(windows)]
         let restricted = automatic.is_none()
             && defers_hide_for_elevated(
                 PasteMode::Paste,
@@ -1782,7 +1835,11 @@ impl Panel {
                 false,
                 &paste::compare_integrity(&self.target),
             );
-        self.interaction = if restricted {
+        #[cfg(target_os = "macos")]
+        let restricted = false;
+        self.interaction = if cfg!(target_os = "macos") && automatic.is_none() {
+            Interaction::Activated
+        } else if restricted {
             Interaction::ActivationPending
         } else {
             Interaction::Quick
@@ -1908,7 +1965,10 @@ impl Panel {
             self.session,
             self.memory.clone(),
         )?;
+        #[cfg(windows)]
         let layout = window::show(&self.window, &self.target, placement_mode(app))?.layout;
+        #[cfg(target_os = "macos")]
+        let layout = window::show_feedback(&self.window, &self.target, placement_mode(app))?.layout;
         self.avoid = Some(window::default_avoid(&layout));
         self.layout = Some(layout);
         self.glide = None;
@@ -1918,6 +1978,8 @@ impl Panel {
             "submission_feedback",
             json!({"interaction":"close_only","reactivated":false}),
         );
+        #[cfg(target_os = "macos")]
+        self.begin_hint(app, logger, QUEUE_ERROR_DWELL, "submission_feedback")?;
         Ok(())
     }
     fn activate_restricted(&mut self, logger: &Logger) -> platform::Result<()> {
@@ -2275,7 +2337,9 @@ impl Panel {
             reason,
         });
         // 已批准 A：归还后只保留被动反馈，不再承诺管理员目标下能截键或按键立即关闭。
-        self.set_interaction(Interaction::Passive);
+        if cfg!(windows) || self.interaction != Interaction::CloseOnly {
+            self.set_interaction(Interaction::Passive);
+        }
         window::no_activate(&self.window, true)?;
         // target_foreground 只记录此刻目标是否在前台，不把归还尝试当成已成功。
         self.log(logger, "elevated_hint_shown", json!({
@@ -2439,10 +2503,12 @@ impl Panel {
                 self.set_interaction(Interaction::Passive);
             }
             window::no_activate(&self.window, true)?;
+            #[cfg(windows)]
             let armed_at = window::tick_count();
             if !can_restore && let Some(permit) = permit.as_ref() {
                 permit.revoke();
             }
+            #[cfg(windows)]
             if can_restore
                 && permit
                     .as_ref()
@@ -2479,8 +2545,28 @@ impl Panel {
                 self.mode = Mode::Hidden;
                 self.awaiting_search = false;
                 self.emit_hidden();
+                #[cfg(windows)]
                 self.conceal(logger, None)?;
+                #[cfg(target_os = "macos")]
+                if let Err(error) = self.conceal(logger, None) {
+                    focus.foreground.success = false;
+                    let _ = reply.send(focus);
+                    return Err(error);
+                }
                 self.log(logger, "hidden", json!({"source":"paste"}));
+            }
+            #[cfg(target_os = "macos")]
+            {
+                if passive {
+                    window::show_feedback(&self.window, &self.target, placement_mode(app))?;
+                }
+                focus = window::confirm(&self.target);
+                focus.foreground.success &= can_restore;
+                if !focus.foreground.success
+                    && let Some(permit) = permit.as_ref()
+                {
+                    permit.revoke();
+                }
             }
         }
         let _ = reply.send(focus);
@@ -2503,7 +2589,10 @@ impl Panel {
         let owner = window::handle(&self.window)?;
         let foreground = window::foreground();
         let search = self.mode == Mode::Search;
+        #[cfg(windows)]
         let restricted = self.interaction == Interaction::Activated;
+        #[cfg(target_os = "macos")]
+        let restricted = false;
         let external_switch = !search
             && self
                 .hooks
@@ -2535,6 +2624,7 @@ impl Panel {
             Some(permits.quick(id, mode))
         };
         let mut copy_only_reason = None;
+        #[cfg(windows)]
         if search && !reliable_control(&self.target) && copy_only_reason.is_none() {
             copy_only_reason = Some("target_control_unverified");
         }
@@ -2635,7 +2725,10 @@ impl Panel {
                     if finish == NoSubmissionFinish::ShowCloseOnly {
                         self.show_submission_feedback(app, logger)?;
                     } else {
+                        #[cfg(windows)]
                         self.set_interaction(Interaction::CloseOnly);
+                        #[cfg(target_os = "macos")]
+                        self.show_submission_feedback(app, logger)?;
                     }
                     self.emit(
                                 "panel:error",
@@ -2659,7 +2752,10 @@ impl Panel {
                 self.set_interaction(Interaction::Passive);
             }
             // 预判时没收起的面板：按实际结论决定是停留提示还是现在收起。
+            #[cfg(windows)]
             let deferred = self.hint.take().is_some() && self.current(session);
+            #[cfg(target_os = "macos")]
+            let deferred = result.passive_hint && self.current(session);
             let dwell = if deferred {
                 dwell_after_paste(&result)
             } else {
@@ -2688,8 +2784,10 @@ impl Panel {
                         dwell,
                         if native_unknown {
                             "native_submission_unknown"
-                        } else {
+                        } else if cfg!(windows) {
                             "target_may_be_elevated"
+                        } else {
+                            "copied_only"
                         },
                     )?,
                     None => {
@@ -2868,6 +2966,11 @@ impl Panel {
                 self.finish_search(logger, false)?
             }
             // 前端的 hide_panel（lib.rs 已记 hide_source=frontend）。
+            #[cfg(target_os = "macos")]
+            Action::CloseWindow => {
+                self.end_hint("window_close");
+                self.hide(logger)?;
+            }
             Action::Hide { session } if self.current(session) => {
                 self.end_hint("frontend");
                 self.hide(logger)?;

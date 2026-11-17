@@ -648,6 +648,7 @@ fn dedup_keeps_every_event_moves_content_to_front_and_reuse_keeps_order() {
 
 // A06：来源应用行随事件写入并被列表引用；同进程同路径只建一行，最近一次复制决定列表来源。
 #[test]
+#[cfg(windows)]
 fn source_apps_upsert_with_events_and_lists_latest_source() {
     let temp = Temp::new();
     let store = temp.store();
@@ -829,6 +830,7 @@ fn delete_moves_to_trash_then_restore_revive_and_purge() {
     store.set_favorite(3, true).unwrap().unwrap();
     // 收藏的也能删（界面先确认），恢复后仍是收藏。
     assert!(store.delete(3).unwrap());
+    std::thread::sleep(std::time::Duration::from_millis(20));
     assert!(store.delete(2).unwrap());
     assert!(!store.delete(2).unwrap());
     assert!(!store.delete(99).unwrap());
@@ -861,6 +863,7 @@ fn delete_moves_to_trash_then_restore_revive_and_purge() {
         [2, 3]
     );
     assert!(trash.iter().all(|(_, at)| *at > 0));
+    assert!(trash[0].1 > trash[1].1);
     assert!(trash[1].0.favorite);
 
     // 恢复：回到原来的位置，收藏还在。

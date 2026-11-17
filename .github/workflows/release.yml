@@ -1,7 +1,7 @@
 name: 发布
 
 # 推送 v* 标签即发布：标签须与 src-tauri/Cargo.toml 的版本一致（v0.1.0 ↔ 0.1.0）。
-# 先跑完整的检查与构建，再核对产物并创建 GitHub Release；带 - 的版本标为预发布。
+# Windows 与 Mac 独立检查构建；Windows 先发布，Mac 成功后追加到同一 Release。带 - 的版本标为预发布。
 on:
   push:
     tags: ["v*"]
@@ -41,6 +41,13 @@ jobs:
     name: 检查与构建
     needs: verify-tag
     uses: ./.github/workflows/ci.yml
+    with:
+      windows_only: true
+
+  macos:
+    name: macOS 检查与构建
+    needs: verify-tag
+    uses: ./.github/workflows/macos.yml
 
   publish:
     name: 创建 GitHub Release
@@ -95,6 +102,7 @@ jobs:
           {
             echo "Windows x64 便携版：解压后运行 \`nianlai.exe\`，需要 WebView2 运行时（Windows 11 通常自带）。"
             echo "此版本未签名，SmartScreen 提示时选择“更多信息 → 仍要运行”。"
+            echo
             if [ "$PRERELEASE" = true ]; then echo; echo "这是预发布版本，仍在自用验证阶段。"; fi
             echo
             echo "| 文件 | SHA-256 |"
@@ -106,3 +114,57 @@ jobs:
           if [ "$PRERELEASE" = true ]; then flags+=(--prerelease); fi
           gh release create "$GITHUB_REF_NAME" "$zip" "$sum" build-info.json \
             --verify-tag --title "拈来 ${VERSION}" --notes-file notes.md --generate-notes "${flags[@]}"
+
+  publish-macos:
+    name: 为同一 Release 添加 macOS 安装包
+    needs: [verify-tag, macos, publish]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: 下载 macOS 安装包
+        uses: actions/download-artifact@v8
+        with:
+          name: nianlai-macos
+          path: dist-macos
+      - name: 核对并追加 Mac 产物和说明
+        shell: bash
+        working-directory: dist-macos
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.verify-tag.outputs.version }}
+        run: |
+          dmg="nianlai-${VERSION}-macos-universal.dmg"
+          test -f "$dmg" && test -f "$dmg.sha256"
+          sha256sum -c "$dmg.sha256"
+          # 重跑只复用字节一致的附件；不覆盖已发布资产。
+          gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets[].name' > assets.txt
+          for asset in "$dmg" "$dmg.sha256"; do
+            if grep -Fxq "$asset" assets.txt; then
+              mkdir -p existing
+              gh release download "$GITHUB_REF_NAME" --pattern "$asset" --dir existing
+              cmp "$asset" "existing/$asset"
+            else
+              gh release upload "$GITHUB_REF_NAME" "$asset"
+            fi
+          done
+          # 附件成功后才追加 Mac 下载说明，保留 Windows 和 GitHub 自动生成的说明。
+          gh release view "$GITHUB_REF_NAME" --json body --jq '.body' > notes.md
+          if ! grep -Fq '<!-- nianlai-macos-assets -->' notes.md; then
+            dmg_sha=$(sha256sum "$dmg" | cut -d' ' -f1)
+            {
+              echo
+              echo '<!-- nianlai-macos-assets -->'
+              echo '### macOS（Beta）'
+              echo
+              echo '支持 macOS 13 及更新版本，通用安装包包含 Apple Silicon 与 Intel。打开 DMG 后把 Nianlai 拖入“应用程序”，再打开和启用开机启动。'
+              echo 'Beta 仅使用 ad-hoc 签名，未做 Developer ID 签名或公证。首次打开若被拦截，在“系统设置 › 隐私与安全性”选择“仍要打开”；在“辅助功能”里允许拈来，即可直接粘贴。更新后可能需要重新授权。'
+              echo 'Beta 不含手动逐张粘贴、原生编辑控件直投、Windows 内存采样与 WebView2 挂起，以及正式签名与公证；已选内容的一起粘贴仍可用。'
+              echo
+              echo '| 文件 | SHA-256 |'
+              echo '|---|---|'
+              echo "| \`${dmg}\` | \`${dmg_sha}\` |"
+            } >> notes.md
+            gh release edit "$GITHUB_REF_NAME" --notes-file notes.md
+          fi
