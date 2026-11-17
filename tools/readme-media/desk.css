@@ -1,0 +1,13 @@
+/* 演示桌面：一扇“记事本”窗口，让配图看得出面板浮在正在打字的程序上方。 */
+#desk { position: fixed; inset: 0; z-index: 0; overflow: hidden; font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif; }
+#app { position: relative; z-index: 1; }
+html[data-desk="light"] #desk { background: linear-gradient(135deg, #dfe7ee 0%, #ece4da 100%); --win: #ffffff; --bar: #f3f3f3; --ink: #1f1f1f; --dim: #8a8a8a; --edge: rgba(0, 0, 0, .12); }
+html[data-desk="dark"] #desk { background: linear-gradient(135deg, #1d2430 0%, #2a2522 100%); --win: #272727; --bar: #202020; --ink: #e8e8e8; --dim: #8d8d8d; --edge: rgba(255, 255, 255, .1); }
+.win { position: absolute; left: 40px; top: 10px; right: 40px; bottom: -20px; border-radius: 8px; background: var(--win); box-shadow: 0 0 0 1px var(--edge), 0 12px 40px rgba(0, 0, 0, .18); color: var(--ink); }
+.bar { height: 32px; display: flex; align-items: center; gap: 8px; padding: 0 14px; border-radius: 8px 8px 0 0; background: var(--bar); font-size: 12px; color: var(--dim); }
+.dot { width: 12px; height: 12px; border-radius: 3px; background: #3b82c4; }
+.doc { padding: 6px 24px; font-family: Consolas, "Microsoft YaHei UI", monospace; font-size: 14px; line-height: 22px; }
+.doc p { margin: 0; }
+.doc .h { font-weight: 600; }
+.doc .dim { color: var(--dim); }
+.caret { display: inline-block; width: 1.5px; height: 17px; margin-left: 1px; vertical-align: -3px; background: var(--ink); }
