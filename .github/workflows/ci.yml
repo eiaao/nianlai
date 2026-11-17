@@ -124,7 +124,7 @@ jobs:
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleName' "$plist")" = "Nianlai"
           test "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$plist")" = "13.0"
           test "$(/usr/libexec/PlistBuddy -c 'Print :LSUIElement' "$plist")" = "true"
-          lipo -verify_arch arm64 x86_64 "$app/Contents/MacOS/$executable"
+          lipo "$app/Contents/MacOS/$executable" -verify_arch arm64 x86_64
           codesign --verify --deep --strict "$app"
           hdiutil verify "${images[0]}"
           mkdir -p release

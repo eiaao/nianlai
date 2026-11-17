@@ -48,7 +48,7 @@ CI 会检查 App 主程序同时含 `arm64`、`x86_64` 架构，并使用 `codes
 ```bash
 app="target/universal-apple-darwin/release/bundle/macos/Nianlai.app"
 executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")
-lipo -verify_arch arm64 x86_64 "$app/Contents/MacOS/$executable"
+lipo "$app/Contents/MacOS/$executable" -verify_arch arm64 x86_64
 codesign --verify --deep --strict "$app"
 ```
 
