@@ -2,9 +2,15 @@
 // Node 直接加载生产 src/lib/guide.ts；这里只组织事件，不复制状态转移表。
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { readFileSync } from "node:fs";
+import ts from "typescript";
 
 const { GuideFlow } = await import("../src/lib/guide.ts");
-const { dealtGuideItems, normalizePanelGuide } = await import("../src/lib/guideCards.ts");
+const transpileUrl = (path, replace = (value) => value) => "data:text/javascript;base64," + Buffer.from(replace(ts.transpileModule(
+  readFileSync(new URL(path, import.meta.url), "utf8"), { compilerOptions: { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.ESNext } },
+).outputText)).toString("base64");
+const platformUrl = transpileUrl("../src/lib/platform.ts");
+const { dealtGuideItems, normalizePanelGuide } = await import(transpileUrl("../src/lib/guideCards.ts", (value) => value.replace('"./platform"', JSON.stringify(platformUrl))));
 
 const healthy = { store: "ready", capture: "recording" };
 const oldSnapshot = {

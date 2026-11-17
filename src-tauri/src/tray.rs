@@ -96,7 +96,10 @@ fn hotkey_label(value: &str) -> String {
 
 /// 生产菜单构造、后续刷新和测试共用；Tab 只是菜单文字，accelerator 参数仍为 None。
 fn open_panel_label(hotkey: &str) -> String {
-    format!("打开拈来\t{}", hotkey_label(hotkey))
+    let label = hotkey_label(hotkey);
+    #[cfg(target_os = "macos")]
+    let label = platform::theme::hotkey_label(&label);
+    format!("打开拈来\t{label}")
 }
 
 /// refresh 与测试共用同一 setter 路径；测试用 fake sink 观察真实刷新调用，而非另算标签自证。
@@ -242,9 +245,12 @@ pub fn apply(app: &AppHandle, health: HealthSnapshot) {
     let view = tray_view(&health, paused, ignore_next);
     let light = taskbar_uses_light_theme();
     if let Some(tray) = app.tray_by_id("nianlai") {
-        let size = select_tray_bitmap(current_small_icon_width(&tray));
-        if let Ok(image) = tauri::image::Image::from_bytes(tray_png(view.state, light, size)) {
-            let _ = tray.set_icon(Some(image));
+        // tray-icon 0.25 的 set_icon 会取消模板属性；Mac 保留静态模板，只刷新文字。
+        if cfg!(windows) {
+            let size = select_tray_bitmap(current_small_icon_width(&tray));
+            if let Ok(image) = tauri::image::Image::from_bytes(tray_png(view.state, light, size)) {
+                let _ = tray.set_icon(Some(image));
+            }
         }
         let _ = tray.set_tooltip(Some(view.tooltip));
     }
@@ -291,6 +297,7 @@ pub fn single_instance() -> TauriPlugin<Wry> {
 
 pub fn autostart() -> TauriPlugin<Wry> {
     // 初始化只建立管理器；仅用户点击菜单时才修改自启设置。
+    // tauri-plugin-autostart 2.5.1 的 Builder 默认使用 MacosLauncher::LaunchAgent。
     tauri_plugin_autostart::Builder::new().build()
 }
 
@@ -440,13 +447,17 @@ pub fn setup(app: &AppHandle, logger: &Logger) -> Result<(), Box<dyn std::error:
         autostart: autostart.clone(),
     });
     let menu_autostart = autostart.clone();
+    #[cfg(windows)]
     let initial = tauri::image::Image::from_bytes(RECORDING_16)?;
+    #[cfg(target_os = "macos")]
+    let initial = tauri::image::Image::from_bytes(platform::theme::TRAY_TEMPLATE)?;
 
     TrayIconBuilder::with_id("nianlai")
         .icon(initial)
+        .icon_as_template(cfg!(target_os = "macos"))
         .tooltip("拈来")
         .menu(&menu)
-        .show_menu_on_left_click(false)
+        .show_menu_on_left_click(cfg!(target_os = "macos"))
         .on_menu_event(move |app, event| match event.id().as_ref() {
             OPEN_PANEL => open_panel(app),
             STATUS => {} // 状态行不可点。
@@ -574,6 +585,10 @@ fn route_left_click(
 }
 
 fn handle_left_click(app: &AppHandle, health: Option<HealthSnapshot>) {
+    // Mac 左键已交给原生菜单，松开时不再呼出面板。
+    if cfg!(target_os = "macos") {
+        return;
+    }
     // 出了问题：左键打开对应设置页（存储 → 数据与备份，记录 → 记录与隐私）。
     let error_page = health.and_then(|health| select_tray(&health, gate().paused()).settings_page);
     route_left_click(
@@ -1406,12 +1421,14 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
     fn refreshed_open_panel_labels(hotkey: &str) -> Vec<String> {
         let mut labels = Vec::new();
         refresh_open_panel_label(hotkey, |label| labels.push(label));
         labels
     }
 
+    #[cfg(windows)]
     #[test]
     fn open_panel_label_shows_current_hotkey_with_safe_fallbacks() {
         assert_eq!(refreshed_open_panel_labels("Ctrl+`"), ["打开拈来\tCtrl+`"]);
@@ -1447,6 +1464,7 @@ mod tests {
         ));
     }
 
+    #[cfg(windows)]
     #[test]
     fn saved_and_reloaded_hotkey_drive_the_same_open_panel_label() {
         let directory = crate::settings::tests::Directory::new();

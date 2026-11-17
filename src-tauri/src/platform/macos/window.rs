@@ -7,7 +7,7 @@ use objc2_app_kit::{
 };
 use serde::Deserialize;
 use std::sync::mpsc;
-use tauri::{AppHandle, LogicalPosition, LogicalSize, PhysicalSize, WebviewWindow};
+use tauri::{AppHandle, LogicalPosition, LogicalSize, WebviewWindow};
 use tauri_nspanel::{ManagerExt, WebviewWindowExt};
 
 tauri_nspanel::tauri_panel! {
@@ -293,7 +293,9 @@ pub fn hide(panel: &WebviewWindow) -> PlatformResult<()> {
     Ok(())
 }
 pub fn show_no_activate(panel: &WebviewWindow) -> PlatformResult<()> {
-    panel.show().map_err(|error| error.to_string())
+    // 引导使用普通窗口，只在首次打开和主动重开时接受键盘输入。
+    panel.show().map_err(|error| error.to_string())?;
+    panel.set_focus().map_err(|error| error.to_string())
 }
 pub fn present_guide(
     panel: &WebviewWindow,
@@ -303,10 +305,12 @@ pub fn present_guide(
     height: i32,
 ) -> PlatformResult<()> {
     panel
-        .set_size(PhysicalSize::new(width as u32, height as u32))
+        .set_size(LogicalSize::new(width, height))
         .map_err(|error| error.to_string())?;
-    move_to(panel, x, y)?;
-    panel.show().map_err(|error| error.to_string())
+    // panel_shown 也会重定位引导；不能用 show 抢走面板刚取得的键盘输入。
+    panel
+        .set_position(LogicalPosition::new(x, y))
+        .map_err(|error| error.to_string())
 }
 #[allow(clippy::too_many_arguments)]
 pub fn present_guide_initial(
@@ -318,7 +322,8 @@ pub fn present_guide_initial(
     _: &[HitRegion],
     _: f64,
 ) -> PlatformResult<()> {
-    present_guide(panel, x, y, width, height)
+    present_guide(panel, x, y, width, height)?;
+    show_no_activate(panel)
 }
 pub fn activate(window: usize) -> ForegroundResult {
     ForegroundResult {

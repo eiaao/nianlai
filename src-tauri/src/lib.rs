@@ -79,7 +79,8 @@ fn open_data_directory_with(
 }
 
 fn open_directory(path: &std::path::Path) -> Result<(), String> {
-    std::process::Command::new("explorer.exe")
+    let command = cfg!(windows).then_some("explorer.exe").unwrap_or("open");
+    std::process::Command::new(command)
         .arg(path)
         .spawn()
         .map(drop)

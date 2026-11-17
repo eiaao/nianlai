@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { keyLabel } from "../platform";
+  import { isMac, keyLabel } from "../platform";
   // 一张牌 = 一个元素，两种姿态：扇面（竖牌）和摊开（横条）。位置、尺寸、旋转由 HandPanel 算好传进来，
   // 姿态切换时同一个元素补间 translate / rotate / 宽高，两层内容交叉淡入（对象恒常性）。
   import * as ipc from "../ipc";
@@ -143,7 +143,7 @@
               onpointerdown={(event) => event.stopPropagation()} onclick={(event) => event.stopPropagation()}
               onchange={(event) => { event.stopPropagation(); const control = event.currentTarget; const requested = control.checked; control.checked = panel.autostart; void panel.setGuideAutostart(requested, item); }} />
               <span>{panel.autostart ? "开着" : "关着"}</span></div>
-            <p>{panel.autostart ? "电脑开机后，拈来就在托盘里等着。" : "要用时从开始菜单打开拈来。"}</p>
+            <p>{panel.autostart ? `电脑开机后，拈来就在${isMac ? "菜单栏" : "托盘"}里等着。` : `要用时从${isMac ? "“应用程序”" : "开始菜单"}打开拈来。`}</p>
             {#if panel.autostartError}<p class="guide-error" role="alert">{panel.autostartError}</p>{/if}
           {/if}
         </div>
@@ -207,7 +207,7 @@
         {#if action}
           <div class="guide-row action-row"><b>{action.title}</b><span>{keyLabel(action.body)}</span></div>
         {:else if guide}
-          <div class="guide-row" class:has-error={guide.id === "t4" && !!panel.autostartError}><b>{guide.title}</b><span>{guide.id === "t3" ? displayHotkey(panel.hotkey) : guide.id === "t4" ? (panel.autostart ? "电脑开机后，拈来就在托盘里等着。" : "要用时从开始菜单打开拈来。") : guide.body}</span>
+          <div class="guide-row" class:has-error={guide.id === "t4" && !!panel.autostartError}><b>{guide.title}</b><span>{guide.id === "t3" ? keyLabel(displayHotkey(panel.hotkey), true) : guide.id === "t4" ? (panel.autostart ? `电脑开机后，拈来就在${isMac ? "菜单栏" : "托盘"}里等着。` : `要用时从${isMac ? "“应用程序”" : "开始菜单"}打开拈来。`) : guide.body}</span>
             {#if selected && flat}
               {#if guide.id === "t3"}<button type="button" data-guide-hotkey onpointerdown={(event) => event.stopPropagation()} onclick={(event) => { event.preventDefault(); event.stopPropagation(); void panel.openGuideHotkeySettings(item); }}>换一个</button>{/if}
               {#if guide.id === "t4"}<input type="checkbox" role="switch" aria-label="开机时启动" data-guide-autostart checked={panel.autostart} disabled={!panel.autostartReady || panel.autostartBusy}

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { keyLabel } from "../platform";
+  import { isMac, keyLabel } from "../platform";
   import { onDestroy, tick } from "svelte";
   import * as ipc from "../ipc";
   import type { HistoryItem, ImageView, PathCheck, TextChunk } from "../ipc";
@@ -15,7 +15,7 @@
   const kind = $derived(item ? cardKind(item) : "short");
   const rich = $derived(item?.kind === "富文本");
   const guideText = $derived(item?.guide_id === "t3" ? keyLabel(displayHotkey(panel.hotkey), true)
-    : item?.guide_id === "t4" ? (panel.autostart ? "电脑开机后，拈来就在托盘里等着。" : "要用时从开始菜单打开拈来。")
+    : item?.guide_id === "t4" ? (panel.autostart ? `电脑开机后，拈来就在${isMac ? "菜单栏" : "托盘"}里等着。` : `要用时从${isMac ? "“应用程序”" : "开始菜单"}打开拈来。`)
       : item?.preview ?? "");
   const link = $derived(item ? linkParts(item.preview ?? "") : null);
   const color = $derived(item ? colorValue(item.preview ?? "") : null);

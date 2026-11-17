@@ -231,14 +231,41 @@ pub mod queue_hook {
 }
 
 pub mod theme {
+    // tray-icon 将 36px 图设为 18pt，保留 Retina 清晰度并由系统适配深浅色。
+    pub(crate) const TRAY_TEMPLATE: &[u8] =
+        include_bytes!("../../../icons/tray/macos-template-36.png");
+
+    pub(crate) fn hotkey_label(value: &str) -> String {
+        value
+            .replace("Ctrl+", "⌃")
+            .replace("Alt+", "⌥")
+            .replace("Shift+", "⇧")
+            .replace("Win+", "⌘")
+    }
+
     // macOS 没有 Windows 任务栏主题，菜单栏由模板图标适配。
     pub fn taskbar_uses_light_theme() -> bool {
         true
     }
 
-    // macOS 没有 Windows 任务栏小图标尺寸，M4 使用菜单栏模板图标。
+    // macOS 没有 Windows 任务栏小图标尺寸，这里不需要。
     pub(crate) fn current_small_icon_width(_tray: &tauri::tray::TrayIcon<tauri::Wry>) -> i32 {
         16
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn menu_hotkey_uses_physical_mac_modifiers() {
+            assert_eq!(hotkey_label("Ctrl+Alt+Shift+Win+K"), "⌃⌥⇧⌘K");
+        }
+
+        #[test]
+        fn menu_hotkey_formats_the_safe_default() {
+            assert_eq!(hotkey_label("Ctrl+`"), "⌃`");
+        }
     }
 }
 
@@ -262,16 +289,21 @@ pub mod monitor {
     }
 
     pub(crate) fn current_target_monitor() -> Result<TargetMonitor, String> {
-        let (_, work, scale) = current_target_screen()?;
-        Ok(TargetMonitor {
+        let (_, work, _) = current_target_screen()?;
+        Ok(logical_monitor(work))
+    }
+
+    fn logical_monitor(work: NSRect) -> TargetMonitor {
+        // 引导使用逻辑坐标，跨不同缩放的显示器时不能用目标屏的比例缩放全局位置。
+        TargetMonitor {
             work: WorkArea {
-                left: (work.origin.x * scale).round() as i32,
-                top: (work.origin.y * scale).round() as i32,
-                right: ((work.origin.x + work.size.width) * scale).round() as i32,
-                bottom: ((work.origin.y + work.size.height) * scale).round() as i32,
+                left: work.origin.x.round() as i32,
+                top: work.origin.y.round() as i32,
+                right: (work.origin.x + work.size.width).round() as i32,
+                bottom: (work.origin.y + work.size.height).round() as i32,
             },
-            scale,
-        })
+            scale: 1.0,
+        }
     }
 
     pub(crate) fn current_target_screen() -> Result<(NSPoint, NSRect, f64), String> {
@@ -295,5 +327,32 @@ pub mod monitor {
         // AppKit 为左下原点；只在平台边界转为左上原点的逻辑坐标。
         work.origin.y = primary_top - work.origin.y - work.size.height;
         Ok((NSPoint::new(mouse.x, primary_top - mouse.y), work, scale))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use objc2_foundation::NSSize;
+
+        #[test]
+        fn guide_keeps_left_display_in_logical_points() {
+            let monitor = logical_monitor(NSRect::new(
+                NSPoint::new(-1920.0, 25.0),
+                NSSize::new(1920.0, 1015.0),
+            ));
+            assert_eq!(
+                (monitor.work.left, monitor.work.right, monitor.scale),
+                (-1920, 0, 1.0)
+            );
+        }
+
+        #[test]
+        fn guide_keeps_upper_display_in_logical_points() {
+            let monitor = logical_monitor(NSRect::new(
+                NSPoint::new(0.0, -1055.0),
+                NSSize::new(1920.0, 1015.0),
+            ));
+            assert_eq!((monitor.work.top, monitor.work.bottom), (-1055, -40));
+        }
     }
 }

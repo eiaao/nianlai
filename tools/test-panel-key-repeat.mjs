@@ -147,7 +147,7 @@ export function emit(name, payload) { return handlers.get(name)?.(payload); }
       ["./platform", pathToFileURL(platformPath).href],
     ]);
     writeFileSync(cardsPath, transpile("src/lib/cards.ts"));
-    writeFileSync(guideCardsPath, transpile("src/lib/guideCards.ts"));
+    writeFileSync(guideCardsPath, transpile("src/lib/guideCards.ts").replace('"./platform"', JSON.stringify(pathToFileURL(platformPath).href)));
     writeFileSync(panelActionsPath, transpile("src/lib/panelActions.ts"));
     writeFileSync(platformPath, transpile("src/lib/platform.ts"));
     // 真实的 preferences.ts 一并转译，面板与设置页用同一份偏好映射。

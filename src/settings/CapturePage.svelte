@@ -2,6 +2,7 @@
   // 暂停和“下一次复制不记”只改运行状态；其余规则仍按原有设置字段保存。
   import { onMount } from "svelte";
   import * as ipc from "../lib/ipc";
+  import { isMac } from "../lib/platform";
   import type { AppSettings, CaptureSettings, CaptureState, SettingsUpdate } from "../lib/ipc";
   import { message } from "./format";
 
@@ -12,14 +13,17 @@
   } = $props();
 
   let status = $state<CaptureState | null>(null);
-  let recentApps = $state<string[]>([]);
+  let recentApps = $state<Pick<ipc.HistoryItem, "source" | "source_name">[]>([]);
   let draft = $state("");
   let draftError = $state("");
   let stateError = $state("");
 
   const off = $derived(!capture || disabled);
   const excluded = $derived(capture?.excluded_apps ?? []);
-  const suggestions = $derived(recentApps.filter((app) => !excluded.some((name) => same(name, app))).slice(0, 8));
+  const suggestions = $derived([...new Set(recentApps
+    .filter(({ source, source_name }) => !excluded.some((name) => same(name, source)
+      || (isMac && !!source_name && same(name, source_name))))
+    .map(({ source }) => source))].slice(0, 8));
 
   function same(a: string, b: string) { return a.toLowerCase() === b.toLowerCase(); }
 
@@ -35,7 +39,8 @@
       }
       try {
         const history = await ipc.getHistory();
-        if (!disposed) recentApps = [...new Set(history.items.map((item) => item.source).filter((source) => /\.exe$/i.test(source)))];
+        if (!disposed) recentApps = history.items.filter(({ source }) => isMac
+          ? !!source && !same(source, "app.nianlai") : /\.exe$/i.test(source));
       } catch {
         if (!disposed) recentApps = [];
       }
@@ -79,7 +84,7 @@
     const value = name.trim();
     draftError = "";
     if (!value) return;
-    if (/[\\/]/.test(value)) { draftError = "只填程序名，比如 KeePass.exe"; return; }
+    if (/[\\/]/.test(value)) { draftError = isMac ? "只填 App 名称或 Bundle ID，比如 1Password" : "只填程序名，比如 KeePass.exe"; return; }
     if (excluded.some((app) => same(app, value))) { draftError = `${value} 已在名单里`; return; }
     if (await saveApps([...excluded, value], `已排除 ${value}`)) draft = "";
   }
@@ -98,7 +103,7 @@
 
   <div class="state-grid">
     <label class="setting state-card">
-      <span class="setting-copy"><strong>暂停记录</strong><small>暂停时复制的都不记。拈来重新打开后会接着记；托盘图标上也能点。</small></span>
+      <span class="setting-copy"><strong>暂停记录</strong><small>暂停时复制的都不记。拈来重新打开后会接着记；{isMac ? "菜单栏" : "托盘"}图标上也能点。</small></span>
       <input class="switch" type="checkbox" role="switch" checked={status?.paused ?? false} disabled={!status} onchange={(event) => setPaused(event.currentTarget.checked, event.currentTarget)}>
     </label>
     <label class="setting state-card">
@@ -110,7 +115,7 @@
 
   <div class="group"><span class="group-title split">这些程序里复制的不记<em>已经放了常见的密码管理器</em></span><div class="card">
     <div class="setting column">
-      <span class="setting-copy"><strong>名单里的程序，复制的内容不记</strong><small>按程序名匹配，不区分大小写。点 × 拿掉。</small></span>
+      <span class="setting-copy"><strong>名单里的程序，复制的内容不记</strong><small>按{isMac ? " App 名称或 Bundle ID " : "程序名"}匹配，不区分大小写。点 × 拿掉。</small></span>
       <ul class="chips" aria-label="排除的程序">
         {#each excluded as app (app)}
           <li><span>{app}</span><button type="button" aria-label={`拿掉 ${app}`} disabled={off} onclick={() => saveApps(excluded.filter((name) => name !== app), `已拿掉 ${app}`)}>×</button></li>
@@ -119,7 +124,7 @@
         {/each}
       </ul>
       <form class="add" onsubmit={(event) => { event.preventDefault(); void addApp(draft); }}>
-        <input type="text" aria-label="添加程序" placeholder="程序名，比如 KeePass.exe" bind:value={draft} disabled={off} spellcheck="false" autocomplete="off">
+        <input type="text" aria-label="添加程序" placeholder={isMac ? "App 名称或 Bundle ID，比如 1Password" : "程序名，比如 KeePass.exe"} bind:value={draft} disabled={off} spellcheck="false" autocomplete="off">
         <button type="submit" disabled={off || !draft.trim()}>添加程序</button>
         {#if status && status.default_excluded_apps.some((app) => !excluded.some((name) => same(name, app)))}
           <button type="button" class="link" disabled={off} onclick={() => saveApps([...excluded, ...status!.default_excluded_apps.filter((app) => !excluded.some((name) => same(name, app)))], "已放回默认的密码管理器")}>放回默认的密码管理器</button>
