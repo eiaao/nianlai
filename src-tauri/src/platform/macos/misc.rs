@@ -211,9 +211,6 @@ pub mod queue_hook {
             _expired: impl Fn() -> bool + Send + 'static,
             _callback: impl Fn(QueueEvent) + Send + 'static,
         ) -> Result<Self> {
-            if !super::super::ax::accessibility_status() {
-                return Err("mac_accessibility_required".into());
-            }
             Ok(Self)
         }
 

@@ -147,7 +147,7 @@
             {#if panel.autostartError}<p class="guide-error" role="alert">{panel.autostartError}</p>{/if}
           {/if}
         </div>
-        <div class="foot">{keyLabel("Delete 扔掉")}</div>
+        <div class="foot">{keyLabel(isMac ? "Backspace" : "Delete")} 扔掉</div>
       {:else}
         {#if kind === "image"}
           <div class="img">{#if image}<img src={image.url} alt="" draggable="false" />{/if}</div>
@@ -205,7 +205,7 @@
       {/if}
       <div class="rb">
         {#if action}
-          <div class="guide-row action-row"><b>{action.title}</b><span>{keyLabel(action.body)}</span></div>
+          <div class="guide-row action-row"><b>{action.title}</b><span>{action.body.replace("↵", keyLabel("↵"))}</span></div>
         {:else if guide}
           <div class="guide-row" class:has-error={guide.id === "t4" && !!panel.autostartError}><b>{guide.title}</b><span>{guide.id === "t3" ? keyLabel(displayHotkey(panel.hotkey), true) : guide.id === "t4" ? (panel.autostart ? `电脑开机后，拈来就在${isMac ? "菜单栏" : "托盘"}里等着。` : `要用时从${isMac ? "“应用程序”" : "开始菜单"}打开拈来。`) : guide.body}</span>
             {#if selected && flat}
@@ -245,7 +245,7 @@
         {/if}
         {/if}
       </div>
-      <span class="mt">{#if action}<span class="src">{keyLabel("操作 · ↵ 执行")}</span>{:else if guide}<span class="src">{keyLabel("新手牌 · Delete 扔掉")}</span>{:else}{#if showSeal}<i class="sl">藏</i>{/if}<span class="src">{meta}</span>{/if}</span>
+      <span class="mt">{#if action}<span class="src">操作 · {keyLabel("↵")} 执行</span>{:else if guide}<span class="src">新手牌 · {keyLabel(isMac ? "Backspace" : "Delete")} 扔掉</span>{:else}{#if showSeal}<i class="sl">藏</i>{/if}<span class="src">{meta}</span>{/if}</span>
     </div>
 
     {#if holding}<i class="hold" style={`animation-duration:${holding.duration}ms`}></i>{/if}

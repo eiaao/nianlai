@@ -26,7 +26,7 @@
           <button type="button" tabindex="-1" class:on={panel.previewZoom === "original"} onpointerdown={(event) => event.preventDefault()} onclick={() => { panel.previewZoom = "original"; }}>原图</button>
         </span>
       {/if}
-      <button class="close" type="button" tabindex="-1" aria-label="合上看全" title={keyLabel("合上（Tab / Esc）")} onpointerdown={(event) => event.preventDefault()} onclick={() => { panel.previewOpen = false; }}>×</button>
+      <button class="close" type="button" tabindex="-1" aria-label="合上看全" title={`合上（${keyLabel("Tab")} / ${keyLabel("Esc")}）`} onpointerdown={(event) => event.preventDefault()} onclick={() => { panel.previewOpen = false; }}>×</button>
     </header>
     <div class="overlay-scroll"><Preview {panel} item={panel.currentItem} expanded /></div>
     <footer>

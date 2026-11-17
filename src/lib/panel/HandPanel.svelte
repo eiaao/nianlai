@@ -150,7 +150,7 @@
       {/each}
       {#if !panel.handSource.length}
         <div class="blank-row" data-hit style={`translate:${ORIGIN_X + ROW_X}px ${view.top}px;width:${ROW_W}px`}>
-          {panel.searching ? `没找到“${panel.query}”。${keyLabel("换个短点的词试试。按 Esc 回到全部。")}` : "复制点什么，它就出现在这里。"}
+          {panel.searching ? `没找到“${panel.query}”。${"换个短点的词试试。按 Esc 回到全部。".replace("Esc", keyLabel("Esc"))}` : "复制点什么，它就出现在这里。"}
         </div>
       {/if}
     {:else}
@@ -209,7 +209,7 @@
           {@render keys(["↵"], "打开设置")}{@render keys(["↓"], "看搜索结果")}{@render keys(["Esc"], "清空搜索")}
         {:else if panel.currentItem?.guide_id}
           {#if spread}{@render keys(["↑", "↓"], "上一张 / 下一张")}{:else}{@render keys(["←", "→"], "换一张")}{/if}
-          {@render keys(["Delete"], "扔掉")}{@render keys(["Tab"], "看全")}{@render keys(["Esc"], panel.searching ? "清空搜索" : "收回")}
+          {@render keys([isMac && panel.mode === "quick" ? "Backspace" : "Delete"], "扔掉")}{@render keys(["Tab"], "看全")}{@render keys(["Esc"], panel.searching ? "清空搜索" : "收回")}
         {:else if panel.heldModifier === "shift"}
           {@render keys(["Shift", "↵"], "只复制这一张，不粘贴")}
         {:else if panel.heldModifier === "ctrl"}

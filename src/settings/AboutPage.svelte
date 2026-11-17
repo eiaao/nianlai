@@ -127,7 +127,7 @@
     {#if isMac}
       <div class="setting">
         <span class="setting-copy"><strong>辅助功能</strong><small>{accessibility}</small></span>
-        <button type="button" onclick={() => { if (isMac) void ipc.macOpenAccessibilitySettings().catch(() => { accessibility = "系统设置没打开，请手动打开辅助功能设置"; }); }}>去设置</button>
+        <button type="button" onclick={() => { void ipc.macOpenAccessibilitySettings().catch(() => { accessibility = "系统设置没打开，请手动打开辅助功能设置"; }); }}>去设置</button>
       </div>
     {/if}
     <div class="setting">

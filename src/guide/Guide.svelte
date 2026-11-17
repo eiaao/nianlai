@@ -378,7 +378,7 @@
       {#if flow.notice}
         <div class:problem={flow.notice.kind !== "info"} class="notice" role={flow.notice.kind === "info" ? "status" : "alert"}>
           <p>{accessibilityNeeded ? "在‘系统设置 › 隐私与安全性 › 辅助功能’里打开拈来，就能直接贴进去" : flow.notice.message}</p>
-          {#if accessibilityNeeded}<button type="button" class="text-button" onclick={() => { if (isMac) void ipc.macOpenAccessibilitySettings().catch(() => { runtimeError = "系统设置没打开，请手动打开辅助功能设置"; }); }}>去设置</button>{/if}
+          {#if accessibilityNeeded}<button type="button" class="text-button" onclick={() => { void ipc.macOpenAccessibilitySettings().catch(() => { runtimeError = "系统设置没打开，请手动打开辅助功能设置"; }); }}>去设置</button>{/if}
           {#if flow.notice.settingsPage}
             <button type="button" class="text-button" data-action={`settings-${flow.notice.settingsPage}`} onclick={() => openSettings(flow.notice!.settingsPage!)}>
               打开{flow.notice.settingsPage === "data" ? "数据与备份" : flow.notice.settingsPage === "privacy" ? "记录与隐私" : "通用"}设置

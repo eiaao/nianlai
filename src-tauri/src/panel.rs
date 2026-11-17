@@ -924,7 +924,7 @@ fn run_queue_item(job: QueueJob) {
     let mut files_skipped = 0;
     let mut result = if cancelled() {
         Outcome::not_written(Reason::RequestCancelled)
-    } else if queue_target_rejected(&target, std::process::id()) {
+    } else if !cfg!(target_os = "macos") && queue_target_rejected(&target, std::process::id()) {
         Outcome::not_written(Reason::InvalidTarget)
     } else {
         let loaded = load_for_paste(&history, id);
@@ -938,10 +938,7 @@ fn run_queue_item(job: QueueJob) {
                 let permit = permits.quick(id, mode);
                 let restore = |_| Some(window::confirm(&target));
                 let sent = || {};
-                #[cfg(windows)]
                 let synchronize = || true;
-                #[cfg(target_os = "macos")]
-                let synchronize = || window::yield_queue(&app, cancel.clone()).is_ok();
                 paste::execute(
                     #[cfg(target_os = "macos")]
                     &app,
@@ -1338,7 +1335,7 @@ impl Panel {
         self.emit("panel:hidden", json!({"queue":true}));
         self.emit_queue();
         self.log(logger, "queue_started", json!({"total":total,"automatic":automatic,"mode":match mode { PasteMode::Paste => "paste", PasteMode::Copy => "copy", PasteMode::Text => "text" }}));
-        if automatic && returned {
+        if automatic && (returned || cfg!(target_os = "macos")) {
             self.begin_queue_item(app, logger)?;
         }
         Ok(())
@@ -1525,6 +1522,9 @@ impl Panel {
         match queue.state.finish(id, &result, now) {
             Finished::Stopped(reason) => {
                 self.stop_queue(logger, reason)?;
+            }
+            Finished::Ready if cfg!(target_os = "macos") && queue.state.error.is_some() => {
+                return self.fail_queue(app, logger, Stop::WriteFailed);
             }
             Finished::Ready => self.emit_queue(),
             Finished::Next => {
@@ -1832,7 +1832,7 @@ impl Panel {
             );
         #[cfg(target_os = "macos")]
         let restricted = false;
-        self.interaction = if cfg!(target_os = "macos") {
+        self.interaction = if cfg!(target_os = "macos") && automatic.is_none() {
             Interaction::Activated
         } else if restricted {
             Interaction::ActivationPending
@@ -2332,10 +2332,7 @@ impl Panel {
             reason,
         });
         // 已批准 A：归还后只保留被动反馈，不再承诺管理员目标下能截键或按键立即关闭。
-        #[cfg(windows)]
-        self.set_interaction(Interaction::Passive);
-        #[cfg(target_os = "macos")]
-        if self.interaction != Interaction::CloseOnly {
+        if cfg!(windows) || self.interaction != Interaction::CloseOnly {
             self.set_interaction(Interaction::Passive);
         }
         window::no_activate(&self.window, true)?;
@@ -2789,7 +2786,7 @@ impl Panel {
                             }
                             #[cfg(target_os = "macos")]
                             {
-                                "mac_accessibility_required"
+                                "copied_only"
                             }
                         },
                     )?,

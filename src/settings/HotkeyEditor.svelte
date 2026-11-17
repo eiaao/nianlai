@@ -101,7 +101,7 @@
     const code = event.code || keyCodeName(event);
     if (!code) { error = "这个键不行，换一个"; return; }
     if (code === "Escape" && !modifiers.length) { error = ""; await stop(); return; }
-    if (!modifiers.length) { error = keyLabel("要带上 Ctrl、Alt、Shift 或 Win", true); return; }
+    if (!modifiers.length) { error = `要带上 ${keyLabel("Ctrl", true)}、${keyLabel("Alt", true)}、${keyLabel("Shift", true)} 或 ${keyLabel("Win", true)}`; return; }
     const value = [...modifiers, code].join("+");
     const generation = operation;
     const request = guideRequest;
@@ -169,16 +169,16 @@
         onclick={() => { if (recording) void stop(); else void start(); }}
       >
         {#if recording}
-          <span class="live">{held.length ? keyLabel(`${held.map(display).join(" + ")} + …`, true) : "按下新的组合键…"}</span>
+          <span class="live">{held.length ? `${held.map(display).join(" + ")} + …` : "按下新的组合键…"}</span>
         {:else}
           <kbd>{display(hotkey)}</kbd>
         {/if}
       </button>
-      <span id="hotkey-help" class="help">{recording ? keyLabel("Esc 取消") : "点一下，再按想用的键"}</span>
+      <span id="hotkey-help" class="help">{recording ? `${keyLabel("Esc")} 取消` : "点一下，再按想用的键"}</span>
       <SaveMark state={saveState} />
     </div>
     {#if error}<p class="error" role="alert">{error}</p>{/if}
-    {#if warning && !recording}<p class="hint">{keyLabel(warning, true)}</p>{/if}
+    {#if warning && !recording}<p class="hint">{warning}</p>{/if}
     {#if runtimeError}<p class="error">{runtimeError}</p>{/if}
     {#if runtime && !recording}
       {#if runtime.error}

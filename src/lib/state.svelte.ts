@@ -7,7 +7,7 @@ import { applyPreferences, DEFAULT_PREFERENCES, normalizePreferences, type Prefe
 import { cardKind, FAN, outlineFor, pageStep, spreadLayout, timeGroup, type SpreadLayout } from "./cards";
 import { dealtGuideItems, defaultGuideSettings, GUIDE_CARD_IDS, normalizePanelGuide } from "./guideCards";
 import { matchedActionItems } from "./panelActions";
-import { isMac, keyLabel, primary, secondary } from "./platform";
+import { isMac, keyLabel, normalizePanelKey, primary, secondary } from "./platform";
 
 const HOLD_HINT_MS = 300;
 /** 后端 start_queue 一次最多接受的条数。 */
@@ -419,7 +419,7 @@ export class PanelState {
   };
 
   private guideNotice(item: HistoryItem) {
-    if (item.action) { this.showNotice("这是操作：按 ↵ 或点一下执行"); return true; }
+    if (item.action) { this.showNotice(`这是操作：按 ${keyLabel("↵")} 或点一下执行`); return true; }
     if (!item.guide_id) return false;
     this.showNotice("新手牌是说明，贴不出去");
     return true;
@@ -542,7 +542,7 @@ export class PanelState {
     if (!item.favorite) { void this.deleteCurrent(); return; }
     const session = this.session;
     this.clearHold();
-    this.holdDelete = { id: item.id, session, phase: "holding", keys: keyLabel(this.mode === "search" ? "Ctrl+Delete" : "Delete"), startedAt: Date.now(), duration: HOLD_MS };
+    this.holdDelete = { id: item.id, session, phase: "holding", keys: keyLabel(this.mode === "search" ? "Ctrl+Delete" : isMac ? "Backspace" : "Delete"), startedAt: Date.now(), duration: HOLD_MS };
     this.holdTimer = setTimeout(() => { this.holdTimer = null; this.finishHold(); }, HOLD_MS);
   };
 
@@ -1150,7 +1150,7 @@ export class PanelState {
   };
 
   isTaken = (id: number) => this.stack.some((item) => item.id === id);
-  private takenNotice() { if (this.visible) this.showNotice("这张已在已选里：↵ 一起粘贴，Backspace 放回最后一张"); }
+  private takenNotice() { if (this.visible) this.showNotice(`这张已在已选里：${keyLabel("↵")} 一起粘贴，${keyLabel("Backspace")} 放回最后一张`); }
 
   private submitQueue(session: number, ids: number[], automatic: boolean, call: () => Promise<unknown>): Promise<void> {
     const submission: QueueSubmission = { session, ids: [...ids], automatic };
@@ -1167,7 +1167,7 @@ export class PanelState {
     if (this.guideNotice(item)) return;
     if (this.isTaken(item.id)) return;
     if (this.stack.length >= STACK_LIMIT) {
-      this.showNotice(`最多选 ${STACK_LIMIT} 张：先按 ↵ 一起粘贴，或 Backspace 放回`, 3600);
+      this.showNotice(`最多选 ${STACK_LIMIT} 张：先按 ${keyLabel("↵")} 一起粘贴，或 ${keyLabel("Backspace")} 放回`, 3600);
       return;
     }
     this.dropStackUndo();
@@ -1194,7 +1194,7 @@ export class PanelState {
     this.stack = [];
     const timer = setTimeout(() => { if (this.stackUndo?.timer === timer) this.stackUndo = null; }, 5000);
     this.stackUndo = { items, session: this.session, timer };
-    this.showNotice(`已清空已选的 ${items.length} 张 · Ctrl+Z 恢复`, 5000);
+    this.showNotice(`已清空已选的 ${items.length} 张 · ${keyLabel("Ctrl+Z")} 恢复`, 5000);
   }
 
   private dropStackUndo() {
@@ -1218,7 +1218,7 @@ export class PanelState {
     const guarded = this.stack.find((item) => item.guide_id || item.action);
     if (guarded) { this.guideNotice(guarded); return; }
     if (!this.visible || !this.interactive || this.busy || this.pendingDom || !this.stack.length) {
-      if (!this.stack.length) this.message = keyLabel(isMac ? "先按空格多选几张，再按 Enter 一起粘贴" : "先按空格多选几张，再按 Ctrl+Shift+Enter 逐张放");
+      if (!this.stack.length) this.message = isMac ? `先按空格多选几张，再按 ${keyLabel("Enter")} 一起粘贴` : "先按空格多选几张，再按 Ctrl+Shift+Enter 逐张放";
       return;
     }
     const session = this.session;
@@ -1321,7 +1321,7 @@ export class PanelState {
       case "Enter": if (this.stack.length) void this.startStackQueue(true, "paste", event); else void this.choose(this.selected, "paste", event); break;
       case "Shift+Enter":
         // 有已选时不执行：不能悄悄丢掉已选的牌。
-        if (this.stack.length) this.showNotice(`已选 ${this.stack.length} 张，Shift+↵ 不会丢掉它们：↵ 一起粘贴${isMac ? "" : "，Ctrl+Shift+↵ 逐张放"}`, 3600);
+        if (this.stack.length) this.showNotice(`已选 ${this.stack.length} 张，${keyLabel("Shift+↵")} 不会丢掉它们：${keyLabel("↵")} 一起粘贴${isMac ? "" : "，Ctrl+Shift+↵ 逐张放"}`, 3600);
         else void this.choose(this.selected, "copy", event);
         break;
       case "Ctrl+Shift+Enter": void this.startStackQueue(false, "paste", event); break;
@@ -1352,7 +1352,7 @@ export class PanelState {
   keydown = (event: KeyboardEvent) => {
     this.setModifiers(primary(event), event.shiftKey);
     if (isMac && this.visible && event.metaKey && ["w", "h"].includes(event.key.toLowerCase())) { event.preventDefault(); return; }
-    const key = isMac && event.key === "Backspace" && (primary(event) || (this.mode === "quick" && !this.stack.length)) ? "Delete" : event.key;
+    const key = normalizePanelKey(isMac, this.mode, this.stack.length > 0, { key: event.key, isComposing: event.isComposing || this.composing, keyCode: event.keyCode });
     if (this.interaction === "close_only") {
       if (this.visible && event.isTrusted === true && event.type === "keydown" && event.key === "Escape"
         && !event.repeat && !primary(event) && !event.altKey && !secondary(event) && !event.shiftKey
@@ -1614,7 +1614,7 @@ export class PanelState {
         return;
       }
     }
-    if (this.stack.length) this.showNotice(`还有 ${this.stack.length} 张已选：↵ 一起粘贴，Esc 清空`, 4000);
+    if (this.stack.length) this.showNotice(`还有 ${this.stack.length} 张已选：${keyLabel("↵")} 一起粘贴，${keyLabel("Esc")} 清空`, 4000);
   }
 
   /** onMount 时调用：读版本号、订阅后端事件，全部订阅好后再发 frontend_ready；返回卸载时的清理函数。 */
@@ -1865,7 +1865,8 @@ export class PanelState {
       });
       await subscribe(ipc.onPasteResult, (payload) => {
         const permissionCopy = isMac && payload.paste_result === "copied_only" && payload.reason === "mac_accessibility_required";
-        if (payload.session !== this.session || (this.interaction === "close_only" && !permissionCopy)) return;
+        const selfCopy = isMac && payload.paste_result === "copied_only" && payload.reason === "target_is_self";
+        if (payload.session !== this.session || (this.interaction === "close_only" && !permissionCopy && !selfCopy)) return;
         // 粘贴成功不出声：结果就在目标程序里，用户看得到。下面只说需要用户知道的偏差。
         if (!this.visible) return;
         if (isMac) this.clearFeedback();
@@ -1873,7 +1874,7 @@ export class PanelState {
           this.busy = false;
           if (payload.hint_dwell_ms && this.interaction !== "close_only") this.setInteraction("passive");
           this.feedback = {
-            kind: "copied", title: "已复制", detail: keyLabel("按 Ctrl+V 贴上。打开辅助功能，就能直接贴进去"), accessibility: true,
+            kind: "copied", title: "已复制", detail: `按 ${keyLabel("Ctrl+V")} 贴上。打开辅助功能，就能直接贴进去`, accessibility: true,
             duration: payload.hint_dwell_ms ?? 5000, startedAt: Date.now(),
           };
           return;
@@ -1886,15 +1887,15 @@ export class PanelState {
         }
         // 只转换已知的粘贴提示；后端错误及其他原文不经过键名替换。
         const hint = payload.hint_message;
-        const copiedHint = hint === "已复制，按 Ctrl+V 贴上" || hint === COPIED_HINT ? keyLabel(hint) : hint || keyLabel(COPIED_HINT);
+        const copiedHint = hint === "已复制，按 Ctrl+V 贴上" || hint === COPIED_HINT ? hint.replace("Ctrl+V", keyLabel("Ctrl+V")) : hint || COPIED_HINT.replace("Ctrl+V", keyLabel("Ctrl+V"));
         // 被动提示已归还前台，不承诺按键送达；只展示后端确认的提示，留明确鼠标关闭入口。
         if (payload.hint_dwell_ms) {
           const administrator = payload.paste_result === "copied_only" && payload.reason === "target_may_be_elevated";
           const detail = administrator
-            ? keyLabel("那个程序权限更高，贴不进去。切过去按 Ctrl+V")
-            : hint ? copiedHint : keyLabel("窗口换了，怕贴错，只复制了。按 Ctrl+V 贴上");
+            ? "那个程序权限更高，贴不进去。切过去按 Ctrl+V".replace("Ctrl+V", keyLabel("Ctrl+V"))
+            : hint ? copiedHint : "窗口换了，怕贴错，只复制了。按 Ctrl+V 贴上".replace("Ctrl+V", keyLabel("Ctrl+V"));
           this.clearFeedback();
-          this.setInteraction("passive");
+          if (this.interaction !== "close_only") this.setInteraction("passive");
           this.feedback = {
             kind: "copied", title: "复制好了，没贴上", detail,
             duration: payload.hint_dwell_ms, startedAt: Date.now(),

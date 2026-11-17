@@ -4,19 +4,24 @@ export const isMac = navigator.userAgent.includes("Mac");
 export const primary = (event: KeyboardEvent | MouseEvent) => isMac ? event.metaKey : event.ctrlKey;
 export const secondary = (event: KeyboardEvent | MouseEvent) => isMac ? event.ctrlKey : event.metaKey;
 
+export function normalizePanelKey(mac: boolean, mode: string, hasSelected: boolean,
+  event: Pick<KeyboardEvent, "key" | "isComposing" | "keyCode">): string {
+  return mac && mode === "quick" && !hasSelected && !event.isComposing && event.keyCode !== 229
+    && event.key === "Backspace" ? "Delete" : event.key;
+}
+
 export function keyLabel(keys: string, physical = false): string {
   if (!isMac) return keys;
-  if (physical) keys = keys.replace(/\bKey([A-Z])\b/g, "$1").replace(/\bDigit([0-9])\b/g, "$1").replace(/\bBackquote\b/g, "`");
   const labels: Record<string, string> = {
     ctrl: physical ? "⌃" : "⌘", control: physical ? "⌃" : "⌘",
     alt: "⌥", shift: "⇧", super: "⌘", win: "⌘", meta: "⌘",
-    enter: "↩", return: "↩", "↵": "↩", backspace: "⌫", delete: physical ? "⌦" : "⌫",
+    enter: "↩", return: "↩", "↵": "↩", backspace: "⌫", delete: "⌦",
     tab: "⇥", escape: "⎋", esc: "⎋", space: "空格",
     pageup: "⇞", pgup: "⇞", pagedown: "⇟", pgdn: "⇟", home: "↖", end: "↘",
   };
-  // 小写修饰键只在组合键里识别；英文报错里的普通单词保持原样。
-  if (physical) keys = keys.replace(/\b(control|ctrl|alt|shift|super|win|meta)(?=\s*\+)/g, (key) => labels[key]);
-  return keys.replace(/\b(Control|Ctrl|Alt|Shift|Super|Win|Meta|Enter|Return|Backspace|Delete|Tab|Escape|Esc|Space|PageUp|PgUp|PageDown|PgDn|Home|End)\b|↵/g,
-    (key, _name, offset: number) => /[A-Za-z]\s+$/.test(keys.slice(0, offset)) || /^\s+[A-Za-z]/.test(keys.slice(offset + key.length))
-      ? key : labels[key.toLowerCase()]).replace(/([⌘⌃⌥⇧])\s*\+\s*/g, "$1");
+  return keys.split("+").map((part) => {
+    const key = part.trim();
+    const named = physical ? key.replace(/^Key([A-Z])$/, "$1").replace(/^Digit([0-9])$/, "$1").replace(/^Backquote$/, "`") : key;
+    return labels[named.toLowerCase()] ?? (named === key ? part : named);
+  }).join("+").replace(/([⌘⌃⌥⇧])\s*\+\s*/g, "$1");
 }

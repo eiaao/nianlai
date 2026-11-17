@@ -297,7 +297,7 @@
     </span>
   </div>
 
-  <div class="favorite-help"><span>拖动换位置，数字跟着位置走</span><span>点一张翻到背面，写标题和备注</span><span>{keyLabel("选中后 Alt+↑ / Alt+↓ 也能换位置")}</span></div>
+  <div class="favorite-help"><span>拖动换位置，数字跟着位置走</span><span>点一张翻到背面，写标题和备注</span><span>选中后 {keyLabel("Alt+↑")} / {keyLabel("Alt+↓")} 也能换位置</span></div>
 
   {#if undo}
     <div class="undo" class:failed={!!undo.error} data-favorite-undo role={undo.error ? "alert" : "status"}>
@@ -311,7 +311,7 @@
   {#if items === null}
     {#if !loadError}<p class="empty">正在读取…</p>{/if}
   {:else if !items.length}
-    <p class="empty" data-favorite-empty bind:this={emptyState} tabindex="-1">{keyLabel("还没有收藏的。呼出后选一张，按 Ctrl+D")}</p>
+    <p class="empty" data-favorite-empty bind:this={emptyState} tabindex="-1">还没有收藏的。呼出后选一张，按 {keyLabel("Ctrl+D")}</p>
   {:else}
     <ol class="favorite-grid" data-favorite-grid bind:this={grid} aria-label="收藏" aria-busy={memberBusy} class:dragging={!!drag?.moved}>
       {#each items as item, index (item.id)}

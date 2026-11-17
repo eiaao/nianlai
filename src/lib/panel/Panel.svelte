@@ -101,7 +101,7 @@
         <span>逐张放 · 还剩 <b>{panel.queue.remaining}</b> 张 · 按 <kbd>{keyLabel("Ctrl+V")}</kbd> 粘贴下一张</span>
       {/if}
       {#if panel.queue.skipped && !panel.queue.error}<span>已跳过 {panel.queue.skipped} 张</span>{/if}
-      {#if !panel.queue.error}<small>{keyLabel("Esc 取消")}</small>{/if}<button type="button" tabindex="-1" aria-label={isMac ? "取消一起粘贴" : "取消逐张放"} onclick={panel.cancelQueue}>×</button>
+      {#if !panel.queue.error}<small>{keyLabel("Esc")} 取消</small>{/if}<button type="button" tabindex="-1" aria-label={isMac ? "取消一起粘贴" : "取消逐张放"} onclick={panel.cancelQueue}>×</button>
     </div>
   {:else if !panel.visible && !panel.warming}
     <!-- 隐藏期不保留旧会话手牌。 -->

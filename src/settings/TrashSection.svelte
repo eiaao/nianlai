@@ -53,7 +53,7 @@
 </script>
 
 <div class="group"><div class="card">
-  <p class="note">{keyLabel("扔掉的放在这儿，7 天后自动清掉。可以拿回，也可以在完整列表里彻底删除。面板里按 Ctrl+Z 仍能撤销最近的删除。")}</p>
+  <p class="note">扔掉的放在这儿，7 天后自动清掉。可以拿回，也可以在完整列表里彻底删除。面板里按 {keyLabel("Ctrl+Z")} 仍能撤销最近的删除。</p>
   {#if error}<p class="note error" role="alert">{error}</p>{/if}
   {#if items === null}
     {#if !error}<p class="note">正在读取…</p>{/if}

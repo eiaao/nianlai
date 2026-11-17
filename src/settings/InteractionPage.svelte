@@ -32,7 +32,7 @@
   <div class="group">
     <span class="group-title">鼠标</span>
     <div class="card">
-      <label class="setting" data-save-row="habits.click"><span class="setting-copy"><strong>鼠标点一下牌</strong><small>{keyLabel("键盘的 Enter 不受影响。")}</small></span><SaveMark state={saveState("habits.click")} />
+      <label class="setting" data-save-row="habits.click"><span class="setting-copy"><strong>鼠标点一下牌</strong><small>键盘的 {keyLabel("Enter")} 不受影响。</small></span><SaveMark state={saveState("habits.click")} />
         <select data-setting="click" aria-label="鼠标点一下牌" value={interaction?.click ?? "paste"} disabled={off} onchange={(event) => onsave("habits.click", { interaction: { click: event.currentTarget.value as ClickAction } }, "鼠标点一下牌的行为已保存")}>
           {#each actions as action (action.id)}<option value={action.id}>{action.label}</option>{/each}
         </select>

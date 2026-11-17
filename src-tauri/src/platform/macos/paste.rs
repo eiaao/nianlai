@@ -177,6 +177,8 @@ pub fn execute(
     };
     let copy_reason = if request.mode == Mode::Copy {
         Some("user_copy")
+    } else if request.target.process == std::process::id() {
+        Some("target_is_self")
     } else if !ax::accessibility_status() {
         Some("mac_accessibility_required")
     } else {
@@ -190,15 +192,17 @@ pub fn execute(
         {
             return Outcome::not_written(error.as_str().into());
         }
-        backend.report["restore"] = json!((backend.callbacks.restore)(
-            if reason == "mac_accessibility_required" {
-                RestorePolicy::CopiedOnlyHint
-            } else {
-                RestorePolicy::LegacyBeforeSubmit
-            }
-        ));
+        let passive = matches!(reason, "mac_accessibility_required" | "target_is_self");
+        backend.report["restore"] = json!((backend.callbacks.restore)(if passive {
+            RestorePolicy::CopiedOnlyHint
+        } else {
+            RestorePolicy::LegacyBeforeSubmit
+        }));
         backend.report["reason"] = json!(reason);
-        backend.report["passive_hint"] = json!(reason == "mac_accessibility_required");
+        backend.report["passive_hint"] = json!(passive);
+        if reason == "target_is_self" {
+            backend.report["hint_message"] = json!("已复制。点一下要贴的地方，再按 Ctrl+V");
+        }
         backend.finish(None);
         return Outcome::from_report(
             Some(request::conclude(request.mode, false, false, true)),
@@ -356,7 +360,6 @@ impl Backend for Paste<'_> {
         up.post(CGEventTapLocation::HID);
         self.report["actual_key"] = json!("Cmd+V");
         (self.callbacks.on_sent)();
-        self.clipboard.record_reused(request.record_id);
         Ok(Submission::Sent)
     }
     fn observe(&mut self) -> bool {

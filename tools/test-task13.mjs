@@ -663,6 +663,25 @@ test("fan/spread × default/Shift/Ctrl 页脚只提示真实可用动作，sprea
   assert.match((await spreadT4ErrorVisibility()).text, /摊开写失败且回读失败/);
 });
 
+test("Mac 真实组件按准确键名渲染静态提示，后端英文错误保持原文", async () => {
+  const userAgent = await cdp.evaluate("navigator.userAgent");
+  await cdp.send("Emulation.setUserAgentOverride", { userAgent: "Macintosh" });
+  try {
+    const shown = await openPanel();
+    assert.match(await text(), /⌫ 扔掉/);
+    assert.match(await text('[data-guide-id="t3"]'), /⌃`/);
+    await api(`emit("panel:paste-result", ${JSON.stringify({ session: shown.session, paste_result: "copied_only", reason: "mac_accessibility_required", hint_dwell_ms: 3000 })})`);
+    await settle();
+    assert.match(await text(), /按 ⌘V 贴上。打开辅助功能，就能直接贴进去/);
+    const fresh = await openPanel();
+    await api(`emit("panel:error", ${JSON.stringify({ session: fresh.session, message: "Error: Return Home end" })})`);
+    await settle();
+    assert.match(await text(), /Error: Return Home end/);
+  } finally {
+    await cdp.send("Emulation.setUserAgentOverride", { userAgent });
+  }
+});
+
 test("输出真实 Svelte 最终帧：真实第一张+四张新手牌、t3、t4、About 可用与失败", async () => {
   await openPanel();
   await capture("task13-fan-five-cards.png");

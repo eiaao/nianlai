@@ -2,7 +2,10 @@ use crate::{history::History, log::Logger};
 use objc2_app_kit::{NSRunningApplication, NSWorkspace};
 use objc2_foundation::NSString;
 use serde_json::json;
-use std::sync::mpsc;
+use std::{
+    collections::HashSet,
+    sync::{Arc, Mutex},
+};
 
 pub(super) struct Source {
     pub pid: u32,
@@ -27,33 +30,26 @@ pub(super) fn frontmost() -> Option<Source> {
 
 #[derive(Clone)]
 pub struct Refresher {
-    sender: mpsc::Sender<String>,
+    history: History,
+    logger: Logger,
+    seen: Arc<Mutex<HashSet<String>>>,
 }
 pub fn start(history: History, logger: Logger) -> Refresher {
-    let (sender, receiver) = mpsc::channel::<String>();
-    let worker_logger = logger.clone();
-    let spawned = std::thread::Builder::new()
-        .name("source-apps".into())
-        .spawn(move || {
-            while let Ok(bundle) = receiver.recv() {
-                let outcome = objc2::rc::autoreleasepool(|_| refresh_one(&history, &bundle));
-                if let Err(error) = outcome {
-                    worker_logger.event("source_app_refresh", json!({"error":error}));
-                }
-            }
-        });
-    if let Err(error) = spawned {
-        logger.event(
-            "source_apps_thread_failed",
-            json!({"error":error.to_string()}),
-        );
+    Refresher {
+        history,
+        logger,
+        seen: Arc::new(Mutex::new(HashSet::new())),
     }
-    Refresher { sender }
 }
 impl Refresher {
     pub fn refresh(&self, bundle: &str) {
-        if !bundle.is_empty() {
-            let _ = self.sender.send(bundle.to_owned());
+        if bundle.is_empty() || !self.seen.lock().unwrap().insert(bundle.to_owned()) {
+            return;
+        }
+        let outcome = objc2::rc::autoreleasepool(|_| refresh_one(&self.history, bundle));
+        if let Err(error) = outcome {
+            self.logger
+                .event("source_app_refresh", json!({"error":error}));
         }
     }
 }

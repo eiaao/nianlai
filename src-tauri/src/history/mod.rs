@@ -1428,6 +1428,8 @@ mod startup_tests {
             let kept = newest(shared);
             set_reuse_to_top(true);
             assert_eq!(kept, c);
+            // 让当前时间越过测试写入的未来 1–3ms，保留真实 reuse 的排序语义。
+            std::thread::sleep(Duration::from_millis(10));
             shared.reuse(a);
             assert_eq!(newest(shared), a);
         }

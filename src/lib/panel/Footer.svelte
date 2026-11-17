@@ -24,7 +24,7 @@
   {:else if panel.holdDelete?.phase === "hint"}
     <span class="line" role="status">收藏的要按住 {panel.holdDelete.keys} 才删</span>
   {:else if panel.notice}
-    <span class="line" role="status" aria-live="polite">{keyLabel(panel.notice)}</span>
+    <span class="line" role="status" aria-live="polite">{panel.notice}</span>
   {:else if panel.undo}
     {#key panel.undo.startedAt}
       <span class="undo" role="status" aria-live="polite">

@@ -216,10 +216,26 @@ test("macOS 面板使用真实平台分支", async (suite) => {
     keyup(panel, { key: "Backspace" });
     for (const repeat of [false, true]) keydown(panel, { key: "Backspace", repeat });
     keyup(panel, { key: "Backspace" });
+    keydown(panel, { key: "Backspace", metaKey: true });
+    keyup(panel, { key: "Backspace", metaKey: true });
+    keyup(panel, { key: "Meta" });
     await flush();
     assert.equal(panel.mode, "search");
     assert.equal(ipc.calls.some((call) => call.command === "deleteItem"), false);
     panel.mode = "quick";
+    for (const event of [{ isComposing: true }, { keyCode: 229 }]) {
+      keydown(panel, { key: "Backspace", ...event });
+      keyup(panel, { key: "Backspace" });
+    }
+    panel.composing = true;
+    keydown(panel, { key: "Backspace" });
+    keyup(panel, { key: "Backspace" });
+    panel.composing = false;
+    panel.compositionEnded = performance.now();
+    keydown(panel, { key: "Backspace" });
+    keyup(panel, { key: "Backspace" });
+    assert.equal(ipc.calls.some((call) => call.command === "deleteItem"), false);
+    panel.compositionEnded = -Infinity;
     keydown(panel, { key: "Backspace" });
     keyup(panel, { key: "Backspace" });
     await flush();
@@ -269,6 +285,24 @@ test("macOS 面板使用真实平台分支", async (suite) => {
     assert.equal(panel.feedback.accessibility, true);
     keydown(panel, { key: "Enter" });
     keyup(panel, { key: "Enter" });
+    assert.deepEqual(ipc.calls, []);
+  });
+
+  await suite.test("自身目标队列只显示复制提示，终态仍拒绝其他迟到结果", async (context) => {
+    const { panel } = await activatedPanel(context, PanelState, ipc);
+    ipc.emit("error", { session: 37, message: "已停止", close_only: true });
+    ipc.emit("paste-result", pasteResult({ paste_result: "copied_only", reason: "target_changed", hint_dwell_ms: 3000 }));
+    assert.equal(panel.feedback, null);
+    ipc.emit("paste-result", pasteResult({ paste_result: "copied_only", reason: "target_is_self", hint_dwell_ms: 3000, hint_message: "已复制。点一下要贴的地方，再按 Ctrl+V" }));
+    assert.equal(panel.interaction, "close_only");
+    assert.equal(panel.message, "已复制。点一下要贴的地方，再按 ⌘V");
+    assert.equal(panel.feedback.detail, panel.message);
+    assert.equal(!!panel.feedback.accessibility, false);
+    ipc.emit("paste-result", pasteResult({ paste_result: "native_submission_unknown" }));
+    keydown(panel, { key: "Enter" });
+    keyup(panel, { key: "Enter" });
+    assert.equal(panel.interaction, "close_only");
+    assert.equal(panel.message, "已复制。点一下要贴的地方，再按 ⌘V");
     assert.deepEqual(ipc.calls, []);
   });
 

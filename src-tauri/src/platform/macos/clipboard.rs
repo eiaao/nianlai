@@ -128,10 +128,10 @@ pub(super) fn read(board: &NSPasteboard, logger: &Logger) -> Result<BTreeMap<Str
             formats.insert(FILES.to_owned(), Data::Files(paths.into()));
         }
     }
-    if formats.is_empty() {
-        if let Some(error) = failed {
-            return Err(error);
-        }
+    if formats.is_empty()
+        && let Some(error) = failed
+    {
+        return Err(error);
     }
     Ok(formats)
 }
@@ -237,9 +237,6 @@ impl Service {
     pub fn owner(&self) -> usize {
         std::process::id() as usize
     }
-    pub(super) fn record_reused(&self, id: usize) {
-        self.0.history.reuse(id);
-    }
     pub fn stamp(&self) -> queue::Stamp {
         objc2::rc::autoreleasepool(|_| self.sample(NSPasteboard::generalPasteboard().changeCount()))
     }
@@ -315,6 +312,7 @@ impl Service {
             }
             Ok(Arc::new(Mutex::new(Observation { stamp })))
         })
+        .inspect(|_| self.0.history.reuse(record.id))
     }
     pub fn write_for_capture(&self, content: Arc<Content>) -> Result<()> {
         let _lock = self.lock();

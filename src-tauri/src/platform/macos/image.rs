@@ -36,6 +36,31 @@ pub(super) fn png(bytes: &[u8], limit: u32) -> Result<Rendered, &'static str> {
     })
 }
 
+pub fn render(content: &Content, limit: u32) -> Result<Rendered, &'static str> {
+    png(content.raw(PNG).ok_or("no_image")?, limit)
+}
+pub fn thumbnail(content: &Content, limit: u32) -> Result<Vec<u8>, &'static str> {
+    render(content, limit).map(|image| image.png)
+}
+pub fn save_png(content: &Content, directory: &Path) -> Result<Saved, &'static str> {
+    let started = Instant::now();
+    let bytes = content.raw(PNG).ok_or("no_image")?;
+    let name: String = content.fingerprint[..8]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let path = directory.join(format!("nianlai-{name}.png"));
+    std::fs::create_dir_all(directory).map_err(|_| "export_directory_failed")?;
+    std::fs::write(&path, bytes).map_err(|_| "export_write_failed")?;
+    Ok(Saved {
+        path,
+        reused: false,
+        bytes: bytes.len() as u64,
+        source: "png",
+        encode_ms: started.elapsed().as_secs_f64() * 1000.0,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -65,28 +90,4 @@ mod tests {
     fn thumbnail_shrinks_long_side_proportionally() {
         assert_eq!(resized_size(32, 16, 8), (8, 4));
     }
-}
-pub fn render(content: &Content, limit: u32) -> Result<Rendered, &'static str> {
-    png(content.raw(PNG).ok_or("no_image")?, limit)
-}
-pub fn thumbnail(content: &Content, limit: u32) -> Result<Vec<u8>, &'static str> {
-    render(content, limit).map(|image| image.png)
-}
-pub fn save_png(content: &Content, directory: &Path) -> Result<Saved, &'static str> {
-    let started = Instant::now();
-    let bytes = content.raw(PNG).ok_or("no_image")?;
-    let name: String = content.fingerprint[..8]
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
-    let path = directory.join(format!("nianlai-{name}.png"));
-    std::fs::create_dir_all(directory).map_err(|_| "export_directory_failed")?;
-    std::fs::write(&path, bytes).map_err(|_| "export_write_failed")?;
-    Ok(Saved {
-        path,
-        reused: false,
-        bytes: bytes.len() as u64,
-        source: "png",
-        encode_ms: started.elapsed().as_secs_f64() * 1000.0,
-    })
 }
