@@ -548,7 +548,6 @@ mod tests {
             Ok(())
         }
 
-        #[cfg(windows)]
         fn candidate(&self, builtin: bool) -> bool {
             let request = crate::paste::request::Request {
                 session: 7,
@@ -740,7 +739,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(windows)]
     fn native_multiformat_i1_replay_submits_before_restore_while_generic_refuses_at_prepare_boundary()
      {
         use crate::{
@@ -815,7 +813,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(windows)]
     fn native_multiformat_pre_submit_noncurrent_switch_return_and_other_revocations_never_submit() {
         use crate::history::content::{HTML, RTF};
         for companions in [vec![HTML], vec![RTF], vec![HTML, RTF]] {

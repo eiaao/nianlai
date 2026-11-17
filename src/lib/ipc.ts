@@ -137,7 +137,7 @@ export type PasteResult = SessionEvent & {
   layer3: { conclusion: string };
   as_text: { conversion: "paths" | "image_path" | "plain_text" | null; error?: string } | null;
   selected_to_result_ms: number;
-  // 只复制后的被动提示；权限和原控件是否恢复由后端确认，前端不根据 reason 猜测。
+  // 后端确认只复制结果及被动提示时长；前端仅按明确的权限 reason 显示授权入口。
   hint_dwell_ms?: number;
   hint_message?: string;
 };

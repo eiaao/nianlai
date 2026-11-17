@@ -71,6 +71,8 @@ pub(crate) fn native_outcome(
 pub enum RestorePolicy {
     LegacyBeforeSubmit,
     GenericBeforeInput,
+    #[cfg(target_os = "macos")]
+    CopiedOnlyHint,
     #[cfg_attr(target_os = "macos", allow(dead_code))]
     NativeAfterSubmit {
         unknown: bool,

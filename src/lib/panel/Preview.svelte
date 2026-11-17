@@ -8,6 +8,7 @@
   import { cardKind, colorValue, linkParts, relativeTime, sourceName } from "../cards";
   import { SpringValue } from "./motion";
   import { displayHotkey } from "../guideCards";
+  import { PANEL_ACTION_COPY } from "../panelActions";
 
   let { panel, item, expanded = false, compact = false }: { panel: PanelState; item: HistoryItem | null; expanded?: boolean; compact?: boolean } = $props();
   let root: HTMLDivElement;
@@ -154,7 +155,7 @@
 
     {#if item.action}
       <h2 class="preview-title">{item.title}</h2>
-      <p class="preview-text">{keyLabel(item.preview)}</p>
+      <p class="preview-text">{keyLabel(PANEL_ACTION_COPY[item.action].body)}</p>
     {:else if item.guide_id}
       <h2 class="preview-title">{item.title}</h2>
       <p class="preview-text">{guideText}</p>

@@ -830,6 +830,7 @@ fn delete_moves_to_trash_then_restore_revive_and_purge() {
     store.set_favorite(3, true).unwrap().unwrap();
     // 收藏的也能删（界面先确认），恢复后仍是收藏。
     assert!(store.delete(3).unwrap());
+    std::thread::sleep(std::time::Duration::from_millis(20));
     assert!(store.delete(2).unwrap());
     assert!(!store.delete(2).unwrap());
     assert!(!store.delete(99).unwrap());
@@ -856,20 +857,13 @@ fn delete_moves_to_trash_then_restore_revive_and_purge() {
         ids.sort_unstable();
         ids
     });
-    assert!(reader.trash().unwrap().iter().all(|(_, at)| *at > 0));
-    // 固定先后，避免两次删除落在同一毫秒。
-    writable(&temp.0.join("history.db"))
-        .unwrap()
-        .execute(
-            "UPDATE trash SET deleted_ms=CASE content_id WHEN 3 THEN 1 ELSE 2 END WHERE content_id IN (2,3)",
-            [],
-        )
-        .unwrap();
     let trash = reader.trash().unwrap();
     assert_eq!(
         trash.iter().map(|(item, _)| item.id).collect::<Vec<_>>(),
         [2, 3]
     );
+    assert!(trash.iter().all(|(_, at)| *at > 0));
+    assert!(trash[0].1 > trash[1].1);
     assert!(trash[1].0.favorite);
 
     // 恢复：回到原来的位置，收藏还在。

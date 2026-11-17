@@ -839,6 +839,11 @@ pub fn run() {
                     return;
                 }
                 api.prevent_close();
+                #[cfg(target_os = "macos")]
+                if window.label() == "panel" {
+                    let _ = panel::dispatch(window.app_handle(), Action::CloseWindow);
+                    return;
+                }
                 if let Some(controller) = window.app_handle().try_state::<Controller>() {
                     controller
                         .logger

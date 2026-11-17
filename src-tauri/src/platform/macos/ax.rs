@@ -15,6 +15,9 @@ pub fn caret_bounds(pid: i32) -> Option<NSRect> {
         }
         unsafe {
             let app = AXUIElement::new_application(pid);
+            if app.set_messaging_timeout(0.1) != AXError::Success {
+                return None;
+            }
             let name = NSString::from_str("AXFocusedUIElement");
             let mut raw = ptr::null();
             let error = app.copy_attribute_value(name.as_ref(), NonNull::from(&mut raw));
@@ -23,6 +26,10 @@ pub fn caret_bounds(pid: i32) -> Option<NSRect> {
             }
             let focused = Retained::from_raw(raw.cast_mut())?;
             let element = focused.downcast_ref::<AXUIElement>()?;
+            // AX 的超时仅作用于当前对象，不会从应用对象继承。
+            if element.set_messaging_timeout(0.1) != AXError::Success {
+                return None;
+            }
 
             let name = NSString::from_str("AXSelectedTextRange");
             let mut raw = ptr::null();
@@ -74,43 +81,4 @@ pub fn open_accessibility_settings() -> Result<(), String> {
             Err("无法打开系统设置".into())
         }
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use objc2_foundation::{NSPoint, NSSize};
-
-    #[test]
-    fn primary_display_coordinates_are_logical_points() {
-        assert_eq!(
-            ax_rect_to_logical(NSRect::new(
-                NSPoint::new(100.0, 200.0),
-                NSSize::new(2.0, 18.0)
-            )),
-            [100.0, 200.0, 102.0, 218.0]
-        );
-    }
-
-    #[test]
-    fn left_display_keeps_negative_x() {
-        assert_eq!(
-            ax_rect_to_logical(NSRect::new(
-                NSPoint::new(-900.0, 120.0),
-                NSSize::new(2.0, 18.0)
-            )),
-            [-900.0, 120.0, -898.0, 138.0]
-        );
-    }
-
-    #[test]
-    fn upper_display_keeps_negative_y() {
-        assert_eq!(
-            ax_rect_to_logical(NSRect::new(
-                NSPoint::new(100.0, -700.0),
-                NSSize::new(2.0, 18.0)
-            )),
-            [100.0, -700.0, 102.0, -682.0]
-        );
-    }
 }

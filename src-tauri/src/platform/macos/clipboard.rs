@@ -27,6 +27,7 @@ const TYPES: [(&str, &str); 6] = [
     ("public.tiff", PNG),
     ("public.file-url", FILES),
 ];
+#[cfg(test)]
 fn format_name(uti: &str) -> Option<&'static str> {
     TYPES
         .iter()
@@ -62,51 +63,74 @@ fn html_body(bytes: &[u8]) -> Result<&[u8]> {
         .ok_or_else(|| "invalid_html_range".into())
 }
 
-pub(super) fn read(board: &NSPasteboard) -> Result<BTreeMap<String, Data>> {
+pub(super) fn read(board: &NSPasteboard, logger: &Logger) -> Result<BTreeMap<String, Data>> {
     let mut formats = BTreeMap::new();
+    let mut failed = None;
     let types = board.types().ok_or("clipboard_read_denied")?;
-    for uti in types.iter().map(|value| value.to_string()) {
-        let Some(name) = format_name(&uti) else {
-            continue;
-        };
-        if name == FILES
-            || (uti == "public.tiff" && types.containsObject(&NSString::from_str("public.png")))
-        {
+    // 固定先尝试 PNG；只有成功读取后才跳过备用 TIFF。
+    for (uti, name) in TYPES {
+        if !types.containsObject(&NSString::from_str(uti)) {
             continue;
         }
-        let data = if name == TEXT {
-            board
-                .stringForType(&NSString::from_str(&uti))
-                .ok_or("clipboard_read_failed")?
-                .to_string()
-                .encode_utf16()
-                .flat_map(u16::to_le_bytes)
-                .collect()
-        } else {
-            let data = board
-                .dataForType(&NSString::from_str(&uti))
-                .ok_or("clipboard_read_failed")?
-                .to_vec();
-            match uti.as_str() {
-                "public.html" => html_header(&data),
-                "public.tiff" => super::image::png(&data, 0)?.png,
-                _ => data,
+        if name == FILES || formats.contains_key(name) {
+            continue;
+        }
+        let result = (|| -> Result<Vec<u8>> {
+            Ok(if name == TEXT {
+                board
+                    .stringForType(&NSString::from_str(uti))
+                    .ok_or("clipboard_read_failed")?
+                    .to_string()
+                    .encode_utf16()
+                    .flat_map(u16::to_le_bytes)
+                    .collect()
+            } else {
+                let data = board
+                    .dataForType(&NSString::from_str(uti))
+                    .ok_or("clipboard_read_failed")?
+                    .to_vec();
+                match uti {
+                    "public.html" => html_header(&data),
+                    "public.tiff" => super::image::png(&data, 0)?.png,
+                    _ => data,
+                }
+            })
+        })();
+        match result {
+            Ok(data) => {
+                formats.insert(name.to_owned(), Data::Bytes(data.into()));
             }
-        };
-        formats.insert(name.to_owned(), Data::Bytes(data.into()));
+            Err(error) => {
+                logger.event(
+                    "capture_format_failed",
+                    serde_json::json!({"format":uti,"error":error}),
+                );
+                failed = Some(error);
+            }
+        }
     }
     if let Some(items) = board.pasteboardItems() {
         let mut paths = Vec::new();
         for item in items {
             if let Some(url) = item.stringForType(&NSString::from_str("public.file-url")) {
-                let path = NSURL::URLWithString(&url)
-                    .and_then(|url| url.path())
-                    .ok_or("invalid_file_url")?;
-                paths.push(path.to_string());
+                if let Some(path) = NSURL::URLWithString(&url).and_then(|url| url.path()) {
+                    paths.push(path.to_string());
+                } else {
+                    logger.event(
+                        "capture_format_failed",
+                        serde_json::json!({"format":"public.file-url","error":"invalid_file_url"}),
+                    );
+                    failed = Some("invalid_file_url".into());
+                }
             }
         }
         if !paths.is_empty() {
             formats.insert(FILES.to_owned(), Data::Files(paths.into()));
+        }
+    }
+    if formats.is_empty() {
+        if let Some(error) = failed {
+            return Err(error);
         }
     }
     Ok(formats)
@@ -117,6 +141,8 @@ fn prepare(
 ) -> Result<Retained<NSArray<ProtocolObject<dyn NSPasteboardWriting>>>> {
     let first = NSPasteboardItem::new();
     let mut items = vec![first];
+    let mut written = false;
+    let mut failed_html = None;
     for (name, format) in &content.formats {
         if let Data::Files(paths) = &format.data {
             for (index, path) in paths.iter().enumerate() {
@@ -129,6 +155,7 @@ fn prepare(
                 if !items[index].setString_forType(&url, &NSString::from_str("public.file-url")) {
                     return Err("clipboard_write_failed".into());
                 }
+                written = true;
             }
         } else if let Some((uti, _)) = TYPES.iter().find(|(_, stored)| *stored == name) {
             let bytes = content.raw(name).ok_or("clipboard_format_failed")?;
@@ -139,7 +166,13 @@ fn prepare(
                 )
             } else {
                 let bytes = if name == HTML {
-                    html_body(bytes)?
+                    match html_body(bytes) {
+                        Ok(body) => body,
+                        Err(error) => {
+                            failed_html = Some(error);
+                            continue;
+                        }
+                    }
                 } else {
                     bytes
                 };
@@ -148,7 +181,11 @@ fn prepare(
             if !ok {
                 return Err("clipboard_write_failed".into());
             }
+            written = true;
         }
+    }
+    if !written {
+        return Err(failed_html.unwrap_or_else(|| "clipboard_format_failed".into()));
     }
     let objects: Vec<Retained<ProtocolObject<dyn NSPasteboardWriting>>> = items
         .into_iter()
@@ -199,6 +236,9 @@ impl Service {
     }
     pub fn owner(&self) -> usize {
         std::process::id() as usize
+    }
+    pub(super) fn record_reused(&self, id: usize) {
+        self.0.history.reuse(id);
     }
     pub fn stamp(&self) -> queue::Stamp {
         objc2::rc::autoreleasepool(|_| self.sample(NSPasteboard::generalPasteboard().changeCount()))

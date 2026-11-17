@@ -94,7 +94,7 @@
     <div class="queue-pill" data-hit role="status" aria-live="polite">
       <span class="queue-count">{panel.queue.error ? "!" : panel.queue.remaining}</span>
       {#if panel.queue.error}
-        <span class="queue-error">{keyLabel(panel.queue.error)}</span>
+        <span class="queue-error">{panel.queue.error}</span>
       {:else if panel.queue.automatic}
         <span>正在一起粘贴 · 还剩 <b>{panel.queue.remaining}</b> 张</span>
       {:else if !isMac}
@@ -108,7 +108,8 @@
   {:else if panel.interaction === "close_only"}
     <section class="terminal-feedback" data-hit>
       <span class="terminal-mark" aria-hidden="true">△</span>
-      <p role="status">{keyLabel(panel.message || "这次没贴。收起再呼出一次")}</p>
+      <p role="status">{panel.feedback?.accessibility ? `${panel.feedback.title}：${panel.feedback.detail}` : panel.message || "这次没贴。收起再呼出一次"}</p>
+      {#if panel.feedback?.accessibility}<button type="button" onpointerdown={(event) => event.preventDefault()} onclick={panel.openAccessibilitySettings}>去设置</button>{/if}
       <button type="button" onclick={panel.close}>关闭面板</button>
     </section>
   {:else if !panel.interactive && !panel.warming && panel.interaction !== "passive" && !panel.inputSurface}

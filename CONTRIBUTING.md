@@ -1,36 +1,24 @@
 # 参与开发
 
-从 `main` 新建分支，完成后提 PR。跨平台改动需同时通过 Windows 与 macOS CI；Mac 系统交互还需要真机验证。不要把 CI 通过写成安装、权限、粘贴或多屏行为已经验收。
+问题和建议欢迎提 [Issue](https://github.com/eiaao/nianlai/issues)。
 
-## 开发前提
+## 从源码构建
 
-- rustup：仓库的 `rust-toolchain.toml` 固定 Rust 及 rustfmt、clippy 版本，首次执行 Cargo 时会安装。
-- Node.js 22、pnpm 10，与 CI 一致。
-- Windows：Visual Studio 生成工具中的 C++ 桌面开发组件，以及 Microsoft Edge WebView2 运行时。
-- Mac：macOS 13 或更新版本，安装 Xcode 命令行工具：
+技术栈：Tauri 2 + Rust，前端 Svelte 5 + TypeScript。
 
-```bash
-xcode-select --install
-```
-
-在仓库根目录安装依赖并开发运行：
+准备 rustup（Rust 版本由 `rust-toolchain.toml` 固定，首次构建时自动安装）、Node.js 22 和 pnpm 10。Windows 还需要 Visual Studio 生成工具和 WebView2；Mac 需要 macOS 13 或更新版本与 Xcode 命令行工具（`xcode-select --install`）。
 
 ```bash
-pnpm install --frozen-lockfile
-pnpm tauri dev
+pnpm install
+pnpm tauri dev                 # 开发运行
+pnpm tauri build --no-bundle   # 正式版构建
 ```
 
-Mac 会自动合并 `src-tauri/tauri.macos.conf.json`。应用名称为 `Nianlai.app`，最低系统版本为 13，Beta 使用 ad-hoc 签名。无需配置开发者证书即可构建；这不等于 Developer ID 签名或 Apple 公证。
+打便携版：`powershell -NoProfile -ExecutionPolicy Bypass -File tools\release.ps1`，输出到 `release\`。开发和验证用的工具见 [tools/README.md](tools/README.md)。
 
-## 构建与产物
+### macOS 构建与安装验证
 
-Windows 便携版继续使用现有 PowerShell 脚本：
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File tools\release.ps1
-```
-
-产物位于 `release\`，脚本同时生成校验值与来源信息。不要为 Mac 改写这条 Windows 路径。
+Mac 自动合并 `src-tauri/tauri.macos.conf.json`，生成 `Nianlai.app`。Beta 使用 ad-hoc 签名，无需开发者证书；不代表 Developer ID 签名或公证。
 
 在 Mac 上构建同时包含 Apple Silicon 与 Intel 的安装包：
 
@@ -60,9 +48,9 @@ shasum -a 256 -c *.dmg.sha256
 
 CI artifact 保留 30 天，是对应提交的测试构建。不要把旧提交的包或开发运行结果当成当前提交的安装验收结果。
 
-## 提交前检查
+## 参与开发
 
-在 Windows 与 Mac 上运行共用检查：
+从 `main` 新建分支，完成后提 PR。提交前在仓库根目录跑一遍 CI 用到的检查：
 
 ```bash
 cargo fmt --all -- --check
@@ -70,9 +58,14 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 pnpm check
 pnpm build
-node tools/test-panel-key-repeat.mjs
 node tools/test-platform.mjs
+node tools/test-panel-key-repeat.mjs
+python -X utf8 -I tools/check_release_versions.py
+python -X utf8 -I tools/check_ps1_encoding.py
+python -X utf8 -I -m unittest discover -s tools -p "test_release*.py" -v
 ```
+
+CI（`.github/workflows/ci.yml`）在 PR、推送到 `main` 和手动触发时运行：Windows 检查后构建便携版；复用 `.github/workflows/macos.yml` 在 Intel 与 Apple Silicon runner 上分别执行检查和测试，再构建 universal DMG。产物保留 30 天。面板状态机测试显式覆盖 Windows 与 Mac 分支。CI 不代替真实 App 的输入法、权限、粘贴与多屏验收。
 
 涉及设置、引导或面板页面时，运行对应的现有浏览器回归：
 
@@ -91,17 +84,17 @@ export EDGE_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 
 部分现有浏览器断言针对 Windows 键名，应在 Windows 上保持通过；指定 Mac 浏览器运行并不代替下方的真实 App 验收。
 
-Windows CI 还会检查发布脚本及版本来源：
+### 发版
 
-```powershell
-python -X utf8 -I tools/check_release_versions.py
-python -X utf8 -I tools/check_ps1_encoding.py
-python -X utf8 -I -m unittest discover -s tools -p "test_release*.py" -v
-```
+1. 改版本号：`powershell -NoProfile -ExecutionPolicy Bypass -File tools\release.ps1 -Version "<新版本>" -AllowDirty`，会同步 `src-tauri/Cargo.toml`、`package.json` 和 `Cargo.lock`。
+2. 提交版本号改动，推送到 `main`。
+3. 打标签并推送：`git tag v<新版本>`，再运行 `git push origin v<新版本>`（替换为尚未发布的版本号，不覆盖已有标签）。
+
+推送 `v*` 标签后，`.github/workflows/release.yml` 核对标签与版本，再并行运行 Windows 与 Mac 检查构建。Windows 通过来源提交与校验值检查后先创建 Release；Mac 成功后向同一 Release 追加 DMG、校验文件和 Beta 安装说明，保留原说明，不覆盖已有附件。Mac 失败或排队不阻塞 Windows。版本号带 `-` 的 Release 标为预发布。只有 Release 中确实出现 DMG 后，才在 README 的下载部分加入 Mac 下载说明。
 
 ## Mac 真机验收
 
-在 macOS 13 或更新的真实 Mac 上记录系统版本、CPU 架构、屏幕排列、缩放及被测提交。安装验收使用实际 DMG：将 `Nianlai.app` 拖入“应用程序”，从该位置打开；未签名来源提示与辅助功能授权步骤见 [README](README.md#macosbeta)。至少在一台未安装开发工具的 Mac 上完成安装、打开、授权及下列第 1–6 项。
+在 macOS 13 或更新的真实 Mac 上记录系统版本、CPU 架构、屏幕排列、缩放及被测提交。安装验收使用实际 DMG：将 `Nianlai.app` 拖入“应用程序”，从该位置打开；首次打开被拦截时在“系统设置 › 隐私与安全性”选择“仍要打开”，直接粘贴需在“辅助功能”里授权。至少在一台未安装开发工具的 Mac 上完成安装、打开、授权及下列第 1–6 项。
 
 以下是待执行的清单，列出条目不表示已经通过：
 
@@ -114,22 +107,12 @@ python -X utf8 -I -m unittest discover -s tools -p "test_release*.py" -v
 7. 从 1Password 或 KeePassXC 复制密码不进入历史；把备忘录的 App 名称或 Bundle ID 加入排除列表后，其复制内容不记录。
 8. 撤销辅助功能权限后，选择内容显示“已复制”与授权入口；重新授权后不重启即可恢复直接粘贴。检查光标定位，不支持读取时回退到鼠标位置。
 9. 全屏 Safari、其他桌面空间、第二块屏幕上均可呼出；检查不同缩放以及左侧、上方副屏的面板和引导位置。
-10. ⌫ 删除、⌘Z 撤销、⌘D 收藏与 ↑ 查看收藏可用；按住 ⌘⌫ 删除收藏时，进度走满才删除。
+10. 快速模式 ⌫ 删除（搜索删空后再次按 ⌫ 不删除）、⌘Z 撤销、⌘D 收藏与 ↑ 查看收藏可用；按住 ⌘⌫ 删除收藏时，进度走满才删除。
 11. 设置中修改呼出键、切换深浅主题、导出再导入备份、在访达显示文件、查看占用、恢复回收站条目、切换开机启动；菜单栏模板图在深浅色下可见。
-12. 退出重开后历史仍在；重启电脑后可开机自启；再次打开 App 不产生第二个实例。新手引导可点击，呼出面板后引导不会抢走键盘输入。
+12. 按 ⌘W / ⌘H 不退出 App、不隐藏到无法收起的状态；纯 Dvorak 布局下直接粘贴可用，目标 App 卡住时呼出仍有响应。
+13. 退出重开后历史仍在；重启电脑后可开机自启；再次打开 App 不产生第二个实例。新手引导可点击，呼出面板后引导不会抢走键盘输入。
 
 在 PR 中填写实际结果和未通过项目。CI 的双架构与签名检查不覆盖以上系统交互；未通过或未执行的条目应明确保留为待验收。
 
-## 发布
 
-选择尚未发布的版本号，不覆盖已存在的标签。Windows 维护者继续使用现有脚本同步版本，以下 `<新版本>` 需替换为选定的版本号：
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File tools\release.ps1 -Version "<新版本>" -AllowDirty
-```
-
-该脚本同步 `src-tauri/Cargo.toml`、`package.json` 与 `Cargo.lock`。提交版本改动并完成双平台 CI 和真机验收后，再创建和推送与版本一致的 `v<新版本>` 标签。
-
-标签触发 `.github/workflows/release.yml`：核对版本、运行共用 CI、构建 Mac universal DMG、校验 Windows 来源信息和两平台校验值，最后在同一个 GitHub Release 上传 Windows 便携版、Mac DMG 及各自校验文件。Mac 构建步骤直接位于 workflow 中，不另写发布脚本。普通 PR 和手动 CI 提供开发产物；标签发布时由 release workflow 构建 Mac 包，避免重复构建。
-
-Release 说明须标注 macOS Beta、最低系统版本、Apple Silicon/Intel、首次打开与辅助功能授权方式，以及 [README 中的 Beta 限制](README.md#macosbeta)。Beta 只使用 ad-hoc 签名；Developer ID 签名和公证不在本阶段范围内。版本号包含 `-` 时整个 Release 为预发布，不为 Mac 单独创建另一份 Release。
+Beta 不含手动逐张粘贴、原生编辑控件直投、Windows 内存采样与 WebView2 挂起，以及正式签名与公证。

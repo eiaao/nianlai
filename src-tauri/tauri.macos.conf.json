@@ -13,6 +13,7 @@
         "visible": false,
         "focus": false,
         "focusable": true,
+        "acceptFirstMouse": true,
         "resizable": false,
         "shadow": false
       }

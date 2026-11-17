@@ -274,6 +274,7 @@ export class PanelState {
   private selectionEvents = new WeakSet<KeyboardEvent | MouseEvent>();
   private domEvents = new WeakSet<KeyboardEvent>();
   private heldDomKeys = new Map<string, number>();
+  private commandDomKeys = new Set<string>();
   private pendingDom: DomChoice | null = null;
   private focusGeneration = 0;
   private focusTimer: ReturnType<typeof setTimeout> | null = null;
@@ -751,7 +752,7 @@ export class PanelState {
     this.closeOnlyEscape = null;
     this.pendingDom = null;
     this.awaitingRelease = false;
-    if (clearHeld) this.heldDomKeys.clear();
+    if (clearHeld) { this.heldDomKeys.clear(); this.commandDomKeys.clear(); }
     if (["松开就贴", "松开就收起", "松开就开始逐张放"].includes(this.message)) this.message = "";
   }
 
@@ -916,13 +917,15 @@ export class PanelState {
     if (event.timeStamp < (this.pendingDom?.downAt ?? -Infinity)
       || event.timeStamp < (this.heldDomKeys.get(code) ?? -Infinity)) return;
     this.heldDomKeys.delete(code);
+    this.commandDomKeys.delete(code);
     for (const [key, held] of [["Control", event.ctrlKey], ["Shift", event.shiftKey], ["Alt", event.altKey], ["Meta", event.metaKey]] as const) {
       if ((event.key === key || event.key === `${key}Graph`) && !held && event.timeStamp >= (this.heldDomKeys.get(`@${key}`) ?? -Infinity)) this.heldDomKeys.delete(`@${key}`);
     }
     // macOS 按住 ⌘ 时可能没有主键 keyup，由可信的 ⌘ 松开结清。
     const commandReleased = isMac && event.key === "Meta" && !event.metaKey;
     if (commandReleased) {
-      this.heldDomKeys.clear();
+      for (const held of this.commandDomKeys) this.heldDomKeys.delete(held);
+      this.commandDomKeys.clear();
       this.observeModifiers(event);
     }
     if (this.pendingDom && (this.pendingDom.code === code || commandReleased)) {
@@ -1152,16 +1155,7 @@ export class PanelState {
   private submitQueue(session: number, ids: number[], automatic: boolean, call: () => Promise<unknown>): Promise<void> {
     const submission: QueueSubmission = { session, ids: [...ids], automatic };
     this.queueSubmission = submission;
-    return this.command(isMac && automatic ? async () => {
-      const enabled = await ipc.macAccessibilityStatus();
-      if (this.queueSubmission !== submission || session !== this.session || !this.visible) return;
-      if (this.pendingDom || !this.interactive || ids.length !== this.stack.length || ids.some((id, index) => id !== this.stack[index].id)) {
-        this.queueSubmission = null; this.busy = false; return;
-      }
-      if (enabled) { await call(); return; }
-      this.queueSubmission = null; this.busy = false; this.clearFeedback();
-      this.feedback = { kind: "failed", title: "还没一起粘贴", detail: "打开辅助功能后，就能一起贴进去", accessibility: true, duration: 5000, startedAt: Date.now() };
-    } : call, session, true).then((started) => {
+    return this.command(call, session, true).then((started) => {
       // IPC 失败表示没有可等待的入队确认；保留 stack，不能让后续无关事件误清。
       if (!started && this.queueSubmission === submission) this.queueSubmission = null;
     });
@@ -1224,7 +1218,7 @@ export class PanelState {
     const guarded = this.stack.find((item) => item.guide_id || item.action);
     if (guarded) { this.guideNotice(guarded); return; }
     if (!this.visible || !this.interactive || this.busy || this.pendingDom || !this.stack.length) {
-      if (!this.stack.length) this.message = isMac ? "先按空格多选几张，再按 Enter 一起粘贴" : "先按空格多选几张，再按 Ctrl+Shift+Enter 逐张放";
+      if (!this.stack.length) this.message = keyLabel(isMac ? "先按空格多选几张，再按 Enter 一起粘贴" : "先按空格多选几张，再按 Ctrl+Shift+Enter 逐张放");
       return;
     }
     const session = this.session;
@@ -1357,7 +1351,8 @@ export class PanelState {
   // 普通 Quick 走钩子；Activated 在同一真实输入框中处理快速键和自然搜索输入。
   keydown = (event: KeyboardEvent) => {
     this.setModifiers(primary(event), event.shiftKey);
-    const key = isMac && event.key === "Backspace" && (primary(event) || (!this.searching && !this.stack.length)) ? "Delete" : event.key;
+    if (isMac && this.visible && event.metaKey && ["w", "h"].includes(event.key.toLowerCase())) { event.preventDefault(); return; }
+    const key = isMac && event.key === "Backspace" && (primary(event) || (this.mode === "quick" && !this.stack.length)) ? "Delete" : event.key;
     if (this.interaction === "close_only") {
       if (this.visible && event.isTrusted === true && event.type === "keydown" && event.key === "Escape"
         && !event.repeat && !primary(event) && !event.altKey && !secondary(event) && !event.shiftKey
@@ -1371,6 +1366,9 @@ export class PanelState {
       if (!this.ensureDomInput(event) || event.type !== "keydown" || this.domEvents.has(event)
         || !Number.isFinite(event.timeStamp) || event.timeStamp < 0 || event.timeStamp > performance.now()) return;
       this.domEvents.add(event);
+      // WebKit 可能省略 Command 组合的 keyup；保留在 Command 之前已按住的键。
+      if (isMac && event.metaKey && !event.repeat && !this.heldDomKeys.has(this.domCode(event))
+        && !["Meta", "Control", "Alt", "Shift"].includes(event.key)) this.commandDomKeys.add(this.domCode(event));
       this.heldDomKeys.set(this.domCode(event), event.timeStamp);
       this.observeModifiers(event);
       if (event.isComposing || this.composing || event.keyCode === 229) { this.clearDomChoice(); return; }
@@ -1866,15 +1864,16 @@ export class PanelState {
         }
       });
       await subscribe(ipc.onPasteResult, (payload) => {
-        if (payload.session !== this.session || this.interaction === "close_only") return;
+        const permissionCopy = isMac && payload.paste_result === "copied_only" && payload.reason === "mac_accessibility_required";
+        if (payload.session !== this.session || (this.interaction === "close_only" && !permissionCopy)) return;
         // 粘贴成功不出声：结果就在目标程序里，用户看得到。下面只说需要用户知道的偏差。
         if (!this.visible) return;
         if (isMac) this.clearFeedback();
-        if (isMac && payload.paste_result === "copied_only" && payload.reason === "mac_accessibility_required") {
+        if (permissionCopy) {
           this.busy = false;
-          if (payload.hint_dwell_ms) this.setInteraction("passive");
+          if (payload.hint_dwell_ms && this.interaction !== "close_only") this.setInteraction("passive");
           this.feedback = {
-            kind: "copied", title: "已复制", detail: "按 Ctrl+V 贴上。打开辅助功能，就能直接贴进去", accessibility: true,
+            kind: "copied", title: "已复制", detail: keyLabel("按 Ctrl+V 贴上。打开辅助功能，就能直接贴进去"), accessibility: true,
             duration: payload.hint_dwell_ms ?? 5000, startedAt: Date.now(),
           };
           return;
@@ -1885,25 +1884,28 @@ export class PanelState {
           this.message = "不确定贴上没有，先看一眼，别贴两遍";
           return;
         }
+        // 只转换已知的粘贴提示；后端错误及其他原文不经过键名替换。
+        const hint = payload.hint_message;
+        const copiedHint = hint === "已复制，按 Ctrl+V 贴上" || hint === COPIED_HINT ? keyLabel(hint) : hint || keyLabel(COPIED_HINT);
         // 被动提示已归还前台，不承诺按键送达；只展示后端确认的提示，留明确鼠标关闭入口。
         if (payload.hint_dwell_ms) {
           const administrator = payload.paste_result === "copied_only" && payload.reason === "target_may_be_elevated";
           const detail = administrator
-            ? "那个程序权限更高，贴不进去。切过去按 Ctrl+V"
-            : payload.hint_message || "窗口换了，怕贴错，只复制了。按 Ctrl+V 贴上";
+            ? keyLabel("那个程序权限更高，贴不进去。切过去按 Ctrl+V")
+            : hint ? copiedHint : keyLabel("窗口换了，怕贴错，只复制了。按 Ctrl+V 贴上");
           this.clearFeedback();
           this.setInteraction("passive");
           this.feedback = {
             kind: "copied", title: "复制好了，没贴上", detail,
             duration: payload.hint_dwell_ms, startedAt: Date.now(),
           };
-          this.message = payload.hint_message || COPIED_HINT;
+          this.message = copiedHint;
           return;
         }
         if (this.interaction === "passive") return;
         this.busy = false;
         const notes: string[] = [];
-        if (payload.paste_result === "copied_only") notes.push(payload.hint_message || COPIED_HINT);
+        if (payload.paste_result === "copied_only") notes.push(copiedHint);
         if (payload.paste_result === "sent" && payload.layer2?.timed_out) notes.push("贴了，但那边可能没收到");
         if (payload.as_text?.error) notes.push("没能转成纯文字，按原样贴了");
         this.message = notes.join(" · ");

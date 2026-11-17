@@ -6,13 +6,20 @@ use objc2_app_kit::{
     NSPopUpMenuWindowLevel, NSScreen, NSWindowCollectionBehavior, NSWindowStyleMask,
 };
 use serde::Deserialize;
-use std::sync::mpsc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+    mpsc,
+};
 use tauri::{AppHandle, LogicalPosition, LogicalSize, WebviewWindow};
 use tauri_nspanel::{ManagerExt, WebviewWindowExt};
 
 tauri_nspanel::tauri_panel! {
     panel!(NianlaiPanel {
         config: { can_become_key_window: true, can_become_main_window: false }
+    })
+    panel!(NianlaiGuidePanel {
+        config: { can_become_key_window: false, can_become_main_window: false }
     })
 }
 
@@ -24,12 +31,12 @@ pub(super) fn initialize(window: &WebviewWindow) -> PlatformResult<()> {
     panel
         .add_style_mask(NSWindowStyleMask::NonactivatingPanel)
         .map_err(|error| error.to_string())?;
+    panel.set_floating_panel(true);
     panel.set_level(NSPopUpMenuWindowLevel as i64);
     panel.set_collection_behavior(
         NSWindowCollectionBehavior::CanJoinAllSpaces
             | NSWindowCollectionBehavior::FullScreenAuxiliary,
     );
-    panel.set_floating_panel(true);
     panel.set_hides_on_deactivate(false);
     panel.set_becomes_key_only_if_needed(false);
     // 保留 Tao 的 delegate，由它继续转发面板失焦事件。
@@ -116,14 +123,10 @@ pub fn set_hit_regions(
 }
 // macOS 没有 Windows 命中区域，这里不需要。
 pub fn clear_hit_regions(_: &WebviewWindow) {}
-pub fn window_scale(panel: &WebviewWindow) -> f64 {
-    match panel.scale_factor() {
-        Ok(scale) => scale,
-        Err(error) => {
-            log::error!("窗口缩放读取失败：{error}");
-            1.0
-        }
-    }
+pub fn window_scale(panel: &WebviewWindow) -> PlatformResult<f64> {
+    panel
+        .scale_factor()
+        .map_err(|error| format!("窗口缩放读取失败：{error}"))
 }
 pub fn default_avoid(layout: &Layout) -> NativeRegion {
     NativeRegion {
@@ -194,17 +197,15 @@ fn placement(target: &Target, mode: PlacementMode) -> PlatformResult<Layout> {
         let primary = screens.firstObject().ok_or("没有可用的显示器")?;
         let primary_top = primary.frame().origin.y + primary.frame().size.height;
         let screen = screens.iter().find(|screen| {
-            let frame = screen.frame();
-            let top = primary_top - frame.origin.y - frame.size.height;
+            let frame = super::monitor::logical_screen_rect(screen.frame(), primary_top);
+            let top = frame.origin.y;
             anchor[0] >= frame.origin.x
                 && anchor[0] < frame.origin.x + frame.size.width
                 && anchor[1] >= top
                 && anchor[1] < top + frame.size.height
         });
         if let Some(screen) = screen {
-            let mut work = screen.visibleFrame();
-            // 只转换 AppKit 的屏幕边界；AX 光标已经是左上原点逻辑点。
-            work.origin.y = primary_top - work.origin.y - work.size.height;
+            let work = super::monitor::logical_screen_rect(screen.visibleFrame(), primary_top);
             return Ok(layout(anchor, work, screen.backingScaleFactor(), mode));
         }
     }
@@ -247,6 +248,22 @@ pub fn show(panel: &WebviewWindow, target: &Target, mode: PlacementMode) -> Plat
         })
     })
 }
+pub fn show_feedback(
+    panel: &WebviewWindow,
+    target: &Target,
+    mode: PlacementMode,
+) -> PlatformResult<Shown> {
+    let layout = placement(target, mode)?;
+    position(panel, &layout)?;
+    let native = native(panel)?;
+    native.hide();
+    native.set_becomes_key_only_if_needed(true);
+    native.order_front_regardless();
+    Ok(Shown {
+        cursor_known: true,
+        layout,
+    })
+}
 pub fn show_auto(panel: &WebviewWindow) -> PlatformResult<()> {
     show(panel, &Target::default(), PlacementMode::Center).map(|_| ())
 }
@@ -255,29 +272,43 @@ pub fn show_queue(panel: &WebviewWindow, target: &Target) -> PlatformResult<bool
         position(panel, &placement(target, PlacementMode::Mouse)?)?;
         let native = native(panel)?;
         native.set_becomes_key_only_if_needed(true);
-        native.resign_key_window();
+        native.hide();
         native.order_front_regardless();
         Ok(true)
     })
 }
 
-pub fn resign_queue(app: &AppHandle) -> PlatformResult<()> {
+pub fn yield_queue(app: &AppHandle, cancelled: Arc<AtomicBool>) -> PlatformResult<()> {
     let panel = app
         .get_webview_panel("panel")
         .map_err(|error| format!("面板读取失败：{error:?}"))?;
-    let resign = move || autoreleasepool(|_| panel.resign_key_window());
+    let pending = cancelled.clone();
+    let yield_key = move || {
+        autoreleasepool(|_| {
+            if !pending.load(Ordering::Acquire) && panel.as_panel().isKeyWindow() {
+                panel.hide();
+                panel.set_becomes_key_only_if_needed(true);
+                panel.order_front_regardless();
+            }
+        })
+    };
     if MainThreadMarker::new().is_some() {
-        resign();
+        yield_key();
         return Ok(());
     }
     // 点击进度可能重新接收键盘，工作线程发键前须等主线程退让完成。
     let (reply, receiver) = mpsc::sync_channel(1);
     app.run_on_main_thread(move || {
-        resign();
+        yield_key();
         let _ = reply.send(());
     })
     .map_err(|error| error.to_string())?;
-    receiver.recv().map_err(|error| error.to_string())
+    receiver
+        .recv_timeout(crate::platform::REPLAY_WAIT)
+        .map_err(|error| {
+            cancelled.store(true, Ordering::Release);
+            error.to_string()
+        })
 }
 pub fn move_to(panel: &WebviewWindow, x: i32, y: i32) -> PlatformResult<()> {
     let scale = panel.scale_factor().map_err(|error| error.to_string())?;
@@ -293,9 +324,18 @@ pub fn hide(panel: &WebviewWindow) -> PlatformResult<()> {
     Ok(())
 }
 pub fn show_no_activate(panel: &WebviewWindow) -> PlatformResult<()> {
-    // 引导使用普通窗口，只在首次打开和主动重开时接受键盘输入。
-    panel.show().map_err(|error| error.to_string())?;
-    panel.set_focus().map_err(|error| error.to_string())
+    // 引导也使用非激活面板，点击示例或“呼出”不会把自身变成粘贴目标。
+    if native(panel).is_err() {
+        let native = panel
+            .to_panel::<NianlaiGuidePanel>()
+            .map_err(|error| error.to_string())?;
+        native
+            .add_style_mask(NSWindowStyleMask::NonactivatingPanel)
+            .map_err(|error| error.to_string())?;
+        native.set_hides_on_deactivate(false);
+    }
+    native(panel)?.order_front_regardless();
+    Ok(())
 }
 pub fn present_guide(
     panel: &WebviewWindow,
@@ -332,6 +372,9 @@ pub fn activate(window: usize) -> ForegroundResult {
     }
 }
 pub fn valid(target: &Target) -> bool {
+    if target.process == 0 {
+        return false;
+    }
     autoreleasepool(|_| {
         objc2_app_kit::NSRunningApplication::runningApplicationWithProcessIdentifier(
             target.process as i32,

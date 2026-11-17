@@ -20,7 +20,7 @@ pub struct Saved {
 pub(super) fn png(bytes: &[u8], limit: u32) -> Result<Rendered, &'static str> {
     let decoded = image::load_from_memory(bytes).map_err(|_| "image_decode_failed")?;
     let (width, height) = (decoded.width(), decoded.height());
-    let resized = if limit > 0 {
+    let resized = if limit > 0 && (width > limit || height > limit) {
         decoded.thumbnail(limit, limit)
     } else {
         decoded
@@ -34,6 +34,37 @@ pub(super) fn png(bytes: &[u8], limit: u32) -> Result<Rendered, &'static str> {
         width,
         height,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn resized_size(width: u32, height: u32, limit: u32) -> (u32, u32) {
+        let mut input = Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(width, height)
+            .write_to(&mut input, image::ImageFormat::Png)
+            .unwrap();
+        let rendered = png(input.get_ref(), limit).unwrap();
+        assert_eq!((rendered.width, rendered.height), (width, height));
+        let output = image::load_from_memory(&rendered.png).unwrap();
+        (output.width(), output.height())
+    }
+
+    #[test]
+    fn original_preview_preserves_dimensions() {
+        assert_eq!(resized_size(8, 4, u32::MAX), (8, 4));
+    }
+
+    #[test]
+    fn thumbnail_does_not_enlarge_small_images() {
+        assert_eq!(resized_size(8, 4, 64), (8, 4));
+    }
+
+    #[test]
+    fn thumbnail_shrinks_long_side_proportionally() {
+        assert_eq!(resized_size(32, 16, 8), (8, 4));
+    }
 }
 pub fn render(content: &Content, limit: u32) -> Result<Rendered, &'static str> {
     png(content.raw(PNG).ok_or("no_image")?, limit)

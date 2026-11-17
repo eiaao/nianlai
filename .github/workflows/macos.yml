@@ -1,0 +1,129 @@
+name: macOS 检查与 universal 构建
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TARGET_DIR: ${{ github.workspace }}/target
+
+jobs:
+  check:
+    name: macOS 检查 (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15-intel
+            arch: x86_64
+          - runner: macos-15
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - name: 核对本机执行架构
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: test "$(uname -m)" = "$EXPECTED_ARCH"
+      - name: 检出代码
+        uses: actions/checkout@v7
+      - name: 安装 pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10
+      - name: 安装 Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      - name: 安装 Rust 工具链
+        run: rustup toolchain install && rustc -V
+      - name: 缓存 Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: macos-check-${{ matrix.arch }}
+          cache-on-failure: true
+      - name: 安装前端依赖
+        run: pnpm install --frozen-lockfile
+      - name: 检查前端
+        run: pnpm check
+      - name: 面板状态机回归
+        run: node tools/test-panel-key-repeat.mjs
+      - name: 平台键名映射回归
+        run: node tools/test-platform.mjs
+      - name: 检查 Rust 格式
+        run: cargo fmt --all -- --check
+      - name: 检查 Rust 代码
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: 运行 Rust 测试
+        run: cargo test --workspace
+
+  build:
+    name: 构建 macOS universal 安装包
+    needs: check
+    runs-on: macos-15-intel
+    timeout-minutes: 90
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v7
+      - name: 安装 pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10
+      - name: 安装 Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+      - name: 安装 Rust 工具链与双架构目标
+        run: |
+          rustup toolchain install
+          rustc -V
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - name: 缓存 Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: macos-release
+          cache-on-failure: true
+      - name: 安装前端依赖
+        run: pnpm install --frozen-lockfile
+      - name: 构建 macOS universal
+        run: pnpm tauri build --target universal-apple-darwin
+      - name: 核对安装包并生成校验值
+        shell: bash
+        run: |
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("src-tauri/Cargo.toml","rb"))["package"]["version"])')
+          bundle="${CARGO_TARGET_DIR}/universal-apple-darwin/release/bundle"
+          shopt -s nullglob
+          apps=("$bundle/macos/"*.app)
+          images=("$bundle/dmg/"*.dmg)
+          test "${#apps[@]}" -eq 1
+          test "${#images[@]}" -eq 1
+          app="${apps[0]}"
+          plist="$app/Contents/Info.plist"
+          executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$plist")
+          app_version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist")
+          test "$app_version" = "$version"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleName' "$plist")" = "Nianlai"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$plist")" = "13.0"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :LSUIElement' "$plist")" = "true"
+          lipo "$app/Contents/MacOS/$executable" -verify_arch arm64 x86_64
+          codesign --verify --deep --strict "$app"
+          hdiutil verify "${images[0]}"
+          mkdir -p release
+          name="nianlai-${version}-macos-universal.dmg"
+          cp "${images[0]}" "release/$name"
+          (cd release && shasum -a 256 "$name" > "$name.sha256")
+      - name: 上传 macOS 安装包与校验值
+        uses: actions/upload-artifact@v7
+        with:
+          name: nianlai-macos
+          path: |
+            release/nianlai-*-macos-universal.dmg
+            release/nianlai-*-macos-universal.dmg.sha256
+          if-no-files-found: error
+          retention-days: 30

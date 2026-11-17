@@ -21,42 +21,34 @@ pub mod disk {
 }
 
 pub mod time {
-    use std::mem::MaybeUninit;
+    use objc2::rc::{Retained, autoreleasepool};
+    use objc2_foundation::{
+        NSCalendar, NSCalendarIdentifierGregorian, NSCalendarUnit, NSDate, NSTimeZone,
+    };
 
-    fn local() -> Option<libc::tm> {
-        let now = (crate::log::now_ms() / 1000) as libc::time_t;
-        let mut local = MaybeUninit::uninit();
-        if unsafe { libc::localtime_r(&now, local.as_mut_ptr()) }.is_null() {
-            eprintln!("读取本地日期失败：{}", std::io::Error::last_os_error());
-            return None;
-        }
-        Some(unsafe { local.assume_init() })
+    fn local_calendar() -> Retained<NSCalendar> {
+        let calendar = NSCalendar::calendarWithIdentifier(unsafe { NSCalendarIdentifierGregorian })
+            .expect("Foundation must support the Gregorian calendar");
+        calendar.setTimeZone(&NSTimeZone::localTimeZone());
+        calendar
     }
 
     pub fn local_date() -> (u16, u8, u8) {
-        match local() {
-            Some(local) => (
-                (local.tm_year + 1900) as u16,
-                (local.tm_mon + 1) as u8,
-                local.tm_mday as u8,
-            ),
-            None => (1970, 1, 1),
-        }
+        autoreleasepool(|_| {
+            let date = local_calendar().components_fromDate(
+                NSCalendarUnit::Year | NSCalendarUnit::Month | NSCalendarUnit::Day,
+                &NSDate::now(),
+            );
+            (date.year() as u16, date.month() as u8, date.day() as u8)
+        })
     }
 
     pub fn local_day_start_ms() -> u64 {
-        let Some(mut local) = local() else { return 0 };
-        local.tm_hour = 0;
-        local.tm_min = 0;
-        local.tm_sec = 0;
-        // 由系统按零点重新判断夏令时，不能沿用当前时刻的值。
-        local.tm_isdst = -1;
-        let midnight = unsafe { libc::mktime(&mut local) };
-        if midnight == -1 {
-            eprintln!("读取本地零点失败：{}", std::io::Error::last_os_error());
-            return 0;
-        }
-        midnight as u64 * 1000
+        autoreleasepool(|_| {
+            // Calendar 按本地时区解析当日起点，包含夏令时切换的日期。
+            let midnight = local_calendar().startOfDayForDate(&NSDate::now());
+            (midnight.timeIntervalSince1970() * 1000.0) as u64
+        })
     }
 }
 
@@ -306,27 +298,32 @@ pub mod monitor {
         }
     }
 
+    // AppKit 为左下原点；只在平台边界转为左上原点的逻辑坐标。
+    pub(crate) fn logical_screen_rect(mut frame: NSRect, primary_top: f64) -> NSRect {
+        frame.origin.y = primary_top - frame.origin.y - frame.size.height;
+        frame
+    }
+
+    fn contains(frame: NSRect, point: NSPoint) -> bool {
+        point.x >= frame.origin.x
+            && point.x < frame.origin.x + frame.size.width
+            && point.y >= frame.origin.y
+            && point.y < frame.origin.y + frame.size.height
+    }
+
     pub(crate) fn current_target_screen() -> Result<(NSPoint, NSRect, f64), String> {
         let mtm = MainThreadMarker::new().ok_or("显示器查询需要在主线程执行")?;
         let screens = NSScreen::screens(mtm);
         let primary = screens.firstObject().ok_or("没有可用的显示器")?;
         let primary_top = primary.frame().origin.y + primary.frame().size.height;
         let mouse = NSEvent::mouseLocation();
+        let mouse = NSPoint::new(mouse.x, primary_top - mouse.y);
         let screen = screens
             .iter()
-            .find(|screen| {
-                let frame = screen.frame();
-                mouse.x >= frame.origin.x
-                    && mouse.x < frame.origin.x + frame.size.width
-                    && mouse.y >= frame.origin.y
-                    && mouse.y < frame.origin.y + frame.size.height
-            })
+            .find(|screen| contains(logical_screen_rect(screen.frame(), primary_top), mouse))
             .unwrap_or(primary);
-        let mut work = screen.visibleFrame();
-        let scale = screen.backingScaleFactor();
-        // AppKit 为左下原点；只在平台边界转为左上原点的逻辑坐标。
-        work.origin.y = primary_top - work.origin.y - work.size.height;
-        Ok((NSPoint::new(mouse.x, primary_top - mouse.y), work, scale))
+        let work = logical_screen_rect(screen.visibleFrame(), primary_top);
+        Ok((mouse, work, screen.backingScaleFactor()))
     }
 
     #[cfg(test)]
@@ -335,24 +332,42 @@ pub mod monitor {
         use objc2_foundation::NSSize;
 
         #[test]
-        fn guide_keeps_left_display_in_logical_points() {
-            let monitor = logical_monitor(NSRect::new(
-                NSPoint::new(-1920.0, 25.0),
-                NSSize::new(1920.0, 1015.0),
-            ));
+        fn converts_left_display_from_appkit_coordinates() {
+            let work = logical_screen_rect(
+                NSRect::new(NSPoint::new(-1920.0, 40.0), NSSize::new(1920.0, 1015.0)),
+                1080.0,
+            );
+            let monitor = logical_monitor(work);
             assert_eq!(
-                (monitor.work.left, monitor.work.right, monitor.scale),
-                (-1920, 0, 1.0)
+                (
+                    monitor.work.left,
+                    monitor.work.top,
+                    monitor.work.bottom,
+                    monitor.scale
+                ),
+                (-1920, 25, 1040, 1.0)
             );
         }
 
         #[test]
-        fn guide_keeps_upper_display_in_logical_points() {
-            let monitor = logical_monitor(NSRect::new(
-                NSPoint::new(0.0, -1055.0),
-                NSSize::new(1920.0, 1015.0),
-            ));
+        fn converts_upper_display_from_appkit_coordinates() {
+            let work = logical_screen_rect(
+                NSRect::new(NSPoint::new(0.0, 1120.0), NSSize::new(1920.0, 1015.0)),
+                1080.0,
+            );
+            let monitor = logical_monitor(work);
             assert_eq!((monitor.work.top, monitor.work.bottom), (-1055, -40));
+        }
+
+        #[test]
+        fn monitor_contains_top_edge_and_excludes_bottom_edge() {
+            let frame = logical_screen_rect(
+                NSRect::new(NSPoint::new(-1920.0, 0.0), NSSize::new(1920.0, 1080.0)),
+                1080.0,
+            );
+            assert!(contains(frame, NSPoint::new(-100.0, 0.0)));
+            assert!(!contains(frame, NSPoint::new(-100.0, 1080.0)));
+            assert!(!contains(frame, NSPoint::new(0.0, 100.0)));
         }
     }
 }

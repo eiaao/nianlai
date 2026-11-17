@@ -26,7 +26,7 @@ const GUIDE_PAPER_WIDTH: f64 = 320.0;
 const GUIDE_TRANSPARENT: bool = true;
 const GUIDE_ALWAYS_ON_TOP: bool = true;
 const GUIDE_SKIP_TASKBAR: bool = true;
-const GUIDE_FOCUSABLE: bool = cfg!(target_os = "macos");
+const GUIDE_FOCUSABLE: bool = false;
 const GUIDE_RESIZABLE: bool = false;
 const GUIDE_DECORATIONS: bool = false;
 const GUIDE_MARGIN: f64 = 16.0;
@@ -197,6 +197,7 @@ pub fn open(app: &AppHandle) -> Result<(), String> {
                 .visible(false)
                 .focused(false)
                 .focusable(GUIDE_FOCUSABLE)
+                .accept_first_mouse(cfg!(target_os = "macos"))
                 .shadow(false)
                 .build()
                 .map_err(|error| error.to_string())

@@ -15,18 +15,103 @@ use core_graphics::{
     event::{CGEvent, CGEventFlags, CGEventTapLocation},
     event_source::{CGEventSource, CGEventSourceStateID},
 };
+use objc2::MainThreadMarker;
 use serde_json::{Value, json};
 use std::{
     path::Path,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
+        mpsc,
     },
     time::{Duration, Instant},
 };
+use tauri::AppHandle;
 
 unsafe extern "C" {
     fn CGEventSourceFlagsState(state: CGEventSourceStateID) -> CGEventFlags;
+}
+
+// Carbon 按当前布局的 Command 层找 V；Dvorak-QWERTY 的快捷键层也由系统处理。
+#[link(name = "Carbon", kind = "framework")]
+unsafe extern "C" {
+    fn TISCopyCurrentKeyboardLayoutInputSource() -> *const std::ffi::c_void;
+    fn TISGetInputSourceProperty(
+        source: *const std::ffi::c_void,
+        key: *const std::ffi::c_void,
+    ) -> *const std::ffi::c_void;
+    static kTISPropertyUnicodeKeyLayoutData: *const std::ffi::c_void;
+    fn LMGetKbdType() -> u8;
+    fn UCKeyTranslate(
+        layout: *const u8,
+        key: u16,
+        action: u16,
+        modifiers: u32,
+        keyboard: u32,
+        options: u32,
+        dead: *mut u32,
+        capacity: std::ffi::c_ulong,
+        length: *mut std::ffi::c_ulong,
+        output: *mut u16,
+    ) -> i32;
+}
+#[link(name = "CoreFoundation", kind = "framework")]
+unsafe extern "C" {
+    fn CFDataGetBytePtr(data: *const std::ffi::c_void) -> *const u8;
+    fn CFRelease(value: *const std::ffi::c_void);
+}
+fn paste_key(app: &AppHandle) -> Result<u16, &'static str> {
+    if let Some(main) = MainThreadMarker::new() {
+        return command_paste_key(main);
+    }
+    // Carbon 只能在主线程读取布局；超时后迟到的只读结果直接丢弃。
+    let (reply, receiver) = mpsc::sync_channel(1);
+    app.run_on_main_thread(move || {
+        let key = MainThreadMarker::new()
+            .ok_or("keyboard_layout_unavailable")
+            .and_then(command_paste_key);
+        let _ = reply.send(key);
+    })
+    .map_err(|_| "keyboard_layout_unavailable")?;
+    receiver
+        .recv_timeout(crate::platform::REPLAY_WAIT)
+        .map_err(|_| "keyboard_layout_unavailable")?
+}
+
+fn command_paste_key(_: MainThreadMarker) -> Result<u16, &'static str> {
+    unsafe {
+        let source = TISCopyCurrentKeyboardLayoutInputSource();
+        if source.is_null() {
+            return Err("keyboard_layout_unavailable");
+        }
+        let data = TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData);
+        let key = if data.is_null() {
+            None
+        } else {
+            let layout = CFDataGetBytePtr(data);
+            (0..128).find(|key| {
+                let mut dead = 0;
+                let mut length = 0;
+                let mut output = [0; 4];
+                UCKeyTranslate(
+                    layout,
+                    *key,
+                    0,
+                    1,
+                    u32::from(LMGetKbdType()),
+                    1,
+                    &mut dead,
+                    4,
+                    &mut length,
+                    output.as_mut_ptr(),
+                ) == 0
+                    && length == 1
+                    && matches!(output[0], 0x56 | 0x76)
+            })
+        };
+        CFRelease(source);
+        key.ok_or("keyboard_layout_unavailable")
+    }
 }
 
 fn modifiers_released() -> bool {
@@ -60,6 +145,7 @@ pub fn key_state_counts() -> key_state::Counts {
     key_state::Counts::default()
 }
 pub fn execute(
+    app: &AppHandle,
     request: Request,
     table: &Table,
     clipboard: &clipboard::Service,
@@ -79,6 +165,7 @@ pub fn execute(
         written = as_text::append_separator(&written, Separator::Newline, sha256);
     }
     let mut backend = Paste {
+        app,
         request: &request,
         written,
         clipboard,
@@ -104,7 +191,11 @@ pub fn execute(
             return Outcome::not_written(error.as_str().into());
         }
         backend.report["restore"] = json!((backend.callbacks.restore)(
-            RestorePolicy::LegacyBeforeSubmit
+            if reason == "mac_accessibility_required" {
+                RestorePolicy::CopiedOnlyHint
+            } else {
+                RestorePolicy::LegacyBeforeSubmit
+            }
         ));
         backend.report["reason"] = json!(reason);
         backend.report["passive_hint"] = json!(reason == "mac_accessibility_required");
@@ -120,6 +211,7 @@ pub fn execute(
 }
 
 struct Paste<'a> {
+    app: &'a AppHandle,
     request: &'a Request,
     written: Arc<Content>,
     clipboard: &'a clipboard::Service,
@@ -228,11 +320,15 @@ impl Backend for Paste<'_> {
         Ok(())
     }
     fn send(&mut self) -> Result<Submission, &'static str> {
+        if self.request.target.process == std::process::id() {
+            return Err("invalid_target");
+        }
         let source =
             CGEventSource::new(CGEventSourceStateID::HIDSystemState).map_err(|()| "send_failed")?;
+        let key = paste_key(self.app)?;
         let down =
-            CGEvent::new_keyboard_event(source.clone(), 9, true).map_err(|()| "send_failed")?;
-        let up = CGEvent::new_keyboard_event(source, 9, false).map_err(|()| "send_failed")?;
+            CGEvent::new_keyboard_event(source.clone(), key, true).map_err(|()| "send_failed")?;
+        let up = CGEvent::new_keyboard_event(source, key, false).map_err(|()| "send_failed")?;
         down.set_flags(CGEventFlags::CGEventFlagCommand);
         up.set_flags(CGEventFlags::CGEventFlagCommand);
         self.check_before_publish()?;
@@ -260,6 +356,7 @@ impl Backend for Paste<'_> {
         up.post(CGEventTapLocation::HID);
         self.report["actual_key"] = json!("Cmd+V");
         (self.callbacks.on_sent)();
+        self.clipboard.record_reused(request.record_id);
         Ok(Submission::Sent)
     }
     fn observe(&mut self) -> bool {

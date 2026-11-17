@@ -58,7 +58,8 @@ impl Service {
                         Ok(Some(recorded)) => {
                             history.set_recording(true);
                             history.notify_health_changed();
-                            if recorded {
+                            if let Some(bundle) = recorded {
+                                history.refresh_source_app(&bundle);
                                 changed();
                             }
                         }
@@ -85,7 +86,12 @@ impl Service {
         }
     }
 }
-fn capture(board: &NSPasteboard, count: isize, history: &History, logger: &Logger) -> Result<bool> {
+fn capture(
+    board: &NSPasteboard,
+    count: isize,
+    history: &History,
+    logger: &Logger,
+) -> Result<Option<String>> {
     let source = apps::frontmost();
     let (bundle, name) = source
         .as_ref()
@@ -99,11 +105,11 @@ fn capture(board: &NSPasteboard, count: isize, history: &History, logger: &Logge
     if let Some(reason) = blocked {
         history.skipped_sequence(count as u32);
         logger.event("capture_skipped", json!({"reason":reason}));
-        return Ok(false);
+        return Ok(None);
     }
-    let mut data = clipboard::read(board)?;
+    let mut data = clipboard::read(board, logger)?;
     if data.is_empty() {
-        return Ok(false);
+        return Ok(None);
     }
     if let Err(skip) = rules::gate().after_read(&mut data) {
         history.skipped_sequence(count as u32);
@@ -111,7 +117,7 @@ fn capture(board: &NSPasteboard, count: isize, history: &History, logger: &Logge
             "capture_skipped",
             json!({"reason":skip.reason,"rule":skip.rule}),
         );
-        return Ok(false);
+        return Ok(None);
     }
     let content = Content::new(data, super::hash::sha256)?;
     let now = Instant::now();
@@ -130,8 +136,5 @@ fn capture(board: &NSPasteboard, count: isize, history: &History, logger: &Logge
         now,
     )?;
     let recorded = matches!(captured, Captured::Stored(result) if result.record_id.is_some());
-    if recorded {
-        history.refresh_source_app(bundle);
-    }
-    Ok(recorded)
+    Ok(recorded.then(|| bundle.to_owned()))
 }

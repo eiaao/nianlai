@@ -14,6 +14,9 @@ export function keyLabel(keys: string, physical = false): string {
     tab: "⇥", escape: "⎋", esc: "⎋", space: "空格",
     pageup: "⇞", pgup: "⇞", pagedown: "⇟", pgdn: "⇟", home: "↖", end: "↘",
   };
-  return keys.replace(/\b(Control|Ctrl|Alt|Shift|Super|Win|Meta|Enter|Return|Backspace|Delete|Tab|Escape|Esc|Space|PageUp|PgUp|PageDown|PgDn|Home|End)\b|↵/gi,
-    (key) => labels[key.toLowerCase()]).replace(/([⌘⌃⌥⇧])\s*\+\s*/g, "$1");
+  // 小写修饰键只在组合键里识别；英文报错里的普通单词保持原样。
+  if (physical) keys = keys.replace(/\b(control|ctrl|alt|shift|super|win|meta)(?=\s*\+)/g, (key) => labels[key]);
+  return keys.replace(/\b(Control|Ctrl|Alt|Shift|Super|Win|Meta|Enter|Return|Backspace|Delete|Tab|Escape|Esc|Space|PageUp|PgUp|PageDown|PgDn|Home|End)\b|↵/g,
+    (key, _name, offset: number) => /[A-Za-z]\s+$/.test(keys.slice(0, offset)) || /^\s+[A-Za-z]/.test(keys.slice(offset + key.length))
+      ? key : labels[key.toLowerCase()]).replace(/([⌘⌃⌥⇧])\s*\+\s*/g, "$1");
 }

@@ -101,7 +101,7 @@
     const code = event.code || keyCodeName(event);
     if (!code) { error = "这个键不行，换一个"; return; }
     if (code === "Escape" && !modifiers.length) { error = ""; await stop(); return; }
-    if (!modifiers.length) { error = "要带上 Ctrl、Alt、Shift 或 Win"; return; }
+    if (!modifiers.length) { error = keyLabel("要带上 Ctrl、Alt、Shift 或 Win", true); return; }
     const value = [...modifiers, code].join("+");
     const generation = operation;
     const request = guideRequest;
@@ -177,12 +177,12 @@
       <span id="hotkey-help" class="help">{recording ? keyLabel("Esc 取消") : "点一下，再按想用的键"}</span>
       <SaveMark state={saveState} />
     </div>
-    {#if error}<p class="error" role="alert">{keyLabel(error, true)}</p>{/if}
+    {#if error}<p class="error" role="alert">{error}</p>{/if}
     {#if warning && !recording}<p class="hint">{keyLabel(warning, true)}</p>{/if}
-    {#if runtimeError}<p class="error">{keyLabel(runtimeError, true)}</p>{/if}
+    {#if runtimeError}<p class="error">{runtimeError}</p>{/if}
     {#if runtime && !recording}
       {#if runtime.error}
-        <p class="error">{keyLabel(runtime.error, true)}{#if runtime.detail}（{keyLabel(runtime.detail, true)}）{/if}</p>
+        <p class="error">{runtime.error}{#if runtime.detail}（{runtime.detail}）{/if}</p>
       {/if}
       {#if runtime.overridden}<p class="hint">本进程由 NIANLAI_HOTKEY 测试覆盖为 {display(runtime.requested)}；保存值下次启动使用。</p>{/if}
       {#if runtime.disabled}<p class="hint">自动循环测试已暂停呼出键。</p>{/if}

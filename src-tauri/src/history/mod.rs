@@ -765,8 +765,6 @@ impl History {
         }
         found
     }
-    // M3 的 macOS 粘贴成功后接回历史复用。
-    #[cfg_attr(target_os = "macos", allow(dead_code))]
     pub fn reuse(&self, id: usize) {
         if !REUSE_TO_TOP.load(Ordering::Acquire) {
             return;
@@ -1800,6 +1798,8 @@ mod deferred_tests {
         ready
             .recv_timeout(Duration::from_secs(10))
             .expect("暂存内容写入通知超时");
+        // 保留完整窗口后的观察期，迟到的重复写入也必须被发现。
+        std::thread::sleep(WINDOW * 3);
         assert_eq!(previews(&history), [("留下的内容".to_owned(), 1)]);
         assert_eq!(notified.load(Ordering::Relaxed), 1);
     }

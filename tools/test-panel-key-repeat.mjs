@@ -17,7 +17,7 @@ const transpile = (path) => ts.transpileModule(readFileSync(join(root, path), "u
   compilerOptions: { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.ESNext },
 }).outputText;
 
-async function compilePanel() {
+async function compilePanel(userAgent = "Windows NT 10.0") {
   const temporaryBase = resolve(tmpdir());
   const temporary = mkdtempSync(join(temporaryBase, "nianlai-panel-key-repeat-"));
   const ipcPath = join(temporary, "ipc.mjs");
@@ -149,7 +149,7 @@ export function emit(name, payload) { return handlers.get(name)?.(payload); }
     writeFileSync(cardsPath, transpile("src/lib/cards.ts"));
     writeFileSync(guideCardsPath, transpile("src/lib/guideCards.ts").replace('"./platform"', JSON.stringify(pathToFileURL(platformPath).href)));
     writeFileSync(panelActionsPath, transpile("src/lib/panelActions.ts"));
-    writeFileSync(platformPath, transpile("src/lib/platform.ts"));
+    writeFileSync(platformPath, `const navigator = { userAgent: ${JSON.stringify(userAgent)} };\n` + transpile("src/lib/platform.ts"));
     // 真实的 preferences.ts 一并转译，面板与设置页用同一份偏好映射。
     writeFileSync(preferencesPath, ts.transpileModule(readFileSync(join(root, "src/lib/preferences.ts"), "utf8"), {
       compilerOptions: { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.ESNext },
@@ -202,6 +202,92 @@ const items = () => Array.from({ length: 9 }, (_, index) => ({
 const shown = (options = {}) => ({
   session: 37, interaction: "quick", foregroundRevision: 3, hotkeyToShowMs: 1,
   history: { items: items(), total: 9, recording: true, last_recorded_ms: null, store_status: null }, ...options,
+});
+
+test("macOS 面板使用真实平台分支", async (suite) => {
+  const { PanelState, ipc, cleanup } = await compilePanel("Macintosh");
+  suite.after(cleanup);
+
+  await suite.test("搜索删空后重复 Backspace 不会删除牌，快速模式仍可删除", async (context) => {
+    const { panel } = await activatedSearch(context, PanelState, ipc);
+    panel.query = "字";
+    keydown(panel, { key: "Backspace" });
+    panel.query = "";
+    keyup(panel, { key: "Backspace" });
+    for (const repeat of [false, true]) keydown(panel, { key: "Backspace", repeat });
+    keyup(panel, { key: "Backspace" });
+    await flush();
+    assert.equal(panel.mode, "search");
+    assert.equal(ipc.calls.some((call) => call.command === "deleteItem"), false);
+    panel.mode = "quick";
+    keydown(panel, { key: "Backspace" });
+    keyup(panel, { key: "Backspace" });
+    await flush();
+    assert.equal(ipc.calls.filter((call) => call.command === "deleteItem").length, 1);
+  });
+
+  for (const held of ["ArrowRight", "Shift"]) {
+    await suite.test(`释放 Command 不清除仍按住的 ${held}`, async (context) => {
+      const { panel } = await activatedPanel(context, PanelState, ipc);
+      if (held === "ArrowRight") keydown(panel, { key: held });
+      keydown(panel, { key: "Meta", metaKey: true });
+      keydown(panel, { key: "Enter", metaKey: true });
+      if (held === "Shift") keydown(panel, { key: held, shiftKey: true, metaKey: true });
+      keyup(panel, { key: "Meta", shiftKey: held === "Shift" });
+      assert.deepEqual(ipc.calls, []);
+      keyup(panel, { key: held });
+      assert.equal(ipc.calls.filter((call) => call.command === "pasteItem").length, 1);
+      assert.equal(ipc.calls[0].mode, "text");
+    });
+  }
+
+  await suite.test("Command 数字在省略主键 keyup 时仍能在 Command 释放后取用", async (context) => {
+    const { panel } = await activatedSearch(context, PanelState, ipc);
+    keydown(panel, { key: "1", metaKey: true });
+    assert.deepEqual(ipc.calls, []);
+    keyup(panel, { key: "Meta" });
+    assert.equal(ipc.calls[0].command, "pasteItem");
+    assert.equal(ipc.calls[0].id, 101);
+  });
+
+  await suite.test("一起粘贴直接交给后端决定权限降级", async (context) => {
+    const { panel } = await activatedPanel(context, PanelState, ipc);
+    keydown(panel, { key: " ", code: "Space" });
+    keyup(panel, { key: " ", code: "Space" });
+    keydown(panel, { key: "Enter" });
+    keyup(panel, { key: "Enter" });
+    await flush();
+    assert.deepEqual(ipc.calls, [{ command: "startQueue", session: 37, ids: [102], automatic: true, mode: "paste" }]);
+  });
+
+  await suite.test("终态权限降级显示已复制且不恢复输入", async (context) => {
+    const { panel } = await activatedPanel(context, PanelState, ipc);
+    ipc.emit("error", { session: 37, message: "已停止", close_only: true });
+    ipc.emit("paste-result", pasteResult({ paste_result: "copied_only", reason: "mac_accessibility_required", hint_dwell_ms: 3000 }));
+    assert.equal(panel.interaction, "close_only");
+    assert.equal(panel.feedback.title, "已复制");
+    assert.equal(panel.feedback.accessibility, true);
+    keydown(panel, { key: "Enter" });
+    keyup(panel, { key: "Enter" });
+    assert.deepEqual(ipc.calls, []);
+  });
+
+  await suite.test("面板阻止 Command W 与 H 的 WebView 默认动作", async (context) => {
+    const { panel } = await activatedPanel(context, PanelState, ipc);
+    for (const key of ["w", "h"]) assert.equal(keydown(panel, { key, metaKey: true }).defaultPrevented, true);
+    assert.deepEqual(ipc.calls, []);
+  });
+
+  for (const message of ["Error: Return", "invalid field 'Home'"]) {
+    await suite.test(`后端错误和未知提示保留原文：${message}`, async (context) => {
+      const { panel } = await activatedPanel(context, PanelState, ipc);
+      ipc.emit("error", { session: 37, message });
+      assert.equal(panel.message, message);
+      ipc.emit("paste-result", pasteResult({ paste_result: "copied_only", reason: "target_changed", hint_dwell_ms: 3000, hint_message: message }));
+      assert.equal(panel.feedback.detail, message);
+      assert.equal(panel.message, message);
+    });
+  }
 });
 
 test("通用终止反馈只恢复当前隐藏会话的关闭提示", async (suite) => {
