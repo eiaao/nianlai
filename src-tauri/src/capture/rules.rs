@@ -194,6 +194,7 @@ mod tests {
         Data::Bytes(vec![1u8; 16].into())
     }
 
+    #[cfg(windows)]
     #[test]
     fn pause_and_excluded_apps_skip_before_reading() {
         let gate = Gate::default();

@@ -389,6 +389,7 @@ fn native_error_refusal_unknown_and_cancellation_release_before_cleanup_once() {
 }
 
 #[test]
+#[cfg(windows)]
 fn after_wait_original_selection_and_input_desktop_guards_still_refuse_submission() {
     use crate::{
         paste::{

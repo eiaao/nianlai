@@ -1,4 +1,5 @@
 // 通用键盘粘贴的生产编排；平台副作用通过 Backend 注入。
+#[cfg(windows)]
 pub fn availability_reason(reason: &'static str) -> &'static str {
     match reason {
         super::native_access::BUSY => "generic_clipboard_busy",
@@ -12,10 +13,13 @@ pub fn availability_reason(reason: &'static str) -> &'static str {
 pub enum Submission {
     Sent,
     Confirmed,
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     Unknown,
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     Refused,
 }
 
+#[cfg(windows)]
 impl Submission {
     pub fn from_input_count(sent: u32, expected: usize) -> Self {
         if sent == 0 {
@@ -81,6 +85,6 @@ pub fn run(backend: &mut impl Backend) -> Result<Completion, String> {
     result
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 #[path = "generic_tests.rs"]
 mod tests;

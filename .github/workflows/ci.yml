@@ -1,4 +1,4 @@
-name: Windows 检查与构建
+name: Windows 与 macOS 检查构建
 
 on:
   push:
@@ -7,6 +7,11 @@ on:
   workflow_dispatch:
   # 发布工作流复用整套检查和构建，产物由调用方取用。
   workflow_call:
+    inputs:
+      windows_only:
+        description: 标签发布独立调度 Mac，避免其失败阻塞 Windows
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -54,6 +59,8 @@ jobs:
         run: pnpm check
       - name: 面板状态机回归
         run: node tools/test-panel-key-repeat.mjs
+      - name: 平台键名映射回归
+        run: node tools/test-platform.mjs
       # Windows runner 的控制台编码是 cp1252，-X utf8 才能输出中文；-I 会忽略 PYTHONUTF8 环境变量。
       - name: 核对发布版本来源
         run: python -X utf8 -I tools/check_release_versions.py
@@ -107,3 +114,8 @@ jobs:
             release/build-info.json
           if-no-files-found: error
           retention-days: 30
+
+  macos:
+    name: macOS 检查与构建
+    if: ${{ !inputs.windows_only }}
+    uses: ./.github/workflows/macos.yml

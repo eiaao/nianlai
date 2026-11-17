@@ -323,10 +323,12 @@ pub fn setup(app: &AppHandle, logger: &Logger, automatic: bool, requested: &str,
         active_id: AtomicU64::new(0),
     });
     // 固定退出键失败同样不能中断初始化；托盘始终提供退出入口。
+    #[cfg(windows)]
     let exit = Shortcut::new(
         Some(Modifiers::CONTROL | Modifiers::ALT | Modifiers::SHIFT),
         tauri_plugin_global_shortcut::Code::KeyQ,
     );
+    #[cfg(windows)]
     match app.global_shortcut().on_shortcut(exit, |app, _, event| {
         if event.state == ShortcutState::Pressed {
             app.state::<Controller>()

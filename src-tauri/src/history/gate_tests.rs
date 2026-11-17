@@ -11,7 +11,9 @@ use crate::{
     settings::{Capture, Directories, tests::Directory},
 };
 use content::{Data, TEXT};
-use std::{collections::BTreeMap, fs, path::Path};
+use std::collections::BTreeMap;
+#[cfg(windows)]
+use std::{fs, path::Path};
 
 fn directories(directory: &Directory) -> Directories {
     Directories {
@@ -115,6 +117,7 @@ fn gate5_trash_chain_delete_restore_delete_and_expire_in_both_modes() {
 // ---------------------------------------------------------------- 门槛 6
 
 /// 目录下任何文件里是否有这段正文（UTF-8 或 UTF-16LE 原样字节），返回命中的文件。
+#[cfg(windows)]
 fn hits(directory: &Path, body: &str) -> Vec<String> {
     let needles = [body.as_bytes().to_vec(), utf16(body)];
     let mut found = Vec::new();
@@ -140,6 +143,7 @@ fn hits(directory: &Path, body: &str) -> Vec<String> {
 
 /// 一次“系统剪贴板变化”走的规则链：暂停/排除 → 不要记录标记 → 内容规则 → 写入。
 /// 返回结论（"stored" 或跳过的原因）。日志里只记原因，和真实采集一致。
+#[cfg(windows)]
 fn offer(
     gate: &Gate,
     history: &History,
@@ -269,6 +273,7 @@ fn task2_health_copied_today_excludes_every_gate_skip() {
 }
 
 #[test]
+#[cfg(windows)]
 fn gate6_excluded_paused_marked_and_sensitive_content_leaves_no_trace() {
     let directory = Directory::new();
     let directories = directories(&directory);

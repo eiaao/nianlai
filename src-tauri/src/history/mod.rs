@@ -7,7 +7,9 @@ pub mod storage;
 
 use crate::log::{Logger, now_ms};
 use content::{Content, Fingerprint, Hash};
-pub use nianlai_store::{CopyEvent, Ingest, older};
+#[cfg(any(windows, test))]
+pub use nianlai_store::older;
+pub use nianlai_store::{CopyEvent, Ingest};
 use nianlai_store::{MemoryOptions, Metadata, Store};
 use serde::Serialize;
 use serde_json::json;
@@ -275,6 +277,7 @@ impl History {
             .expect("记录健康迁移总是产生新状态");
     }
     /// 读取线程 panic、协调失败或意外返回是持久事实，监听重挂不能把它擦掉。
+    #[cfg(windows)]
     pub fn fail_capture_reader(&self) {
         self.recording.store(false, Ordering::Release);
         self.capture
@@ -343,6 +346,7 @@ impl History {
         }
         failed
     }
+    #[cfg(windows)]
     pub fn last_write(&self) -> Option<Instant> {
         *self.last_write.lock().unwrap()
     }
@@ -772,6 +776,7 @@ impl History {
             );
         }
     }
+    #[cfg(any(windows, test))]
     pub fn latest_sequence(&self) -> Option<u32> {
         self.db().latest_sequence()
     }
@@ -916,7 +921,7 @@ impl History {
 
 #[cfg(test)]
 mod gate_tests;
-#[cfg(all(test, windows))]
+#[cfg(test)]
 mod tests;
 
 #[cfg(test)]
@@ -1271,6 +1276,7 @@ mod startup_tests {
 
     // 命令层（lib.rs）拿到的就是这个 History 句柄，磁盘与内存模式行为一致（M1-S）。
     #[test]
+    #[cfg(windows)]
     fn history_serves_favorites_for_stored_and_memory_modes() {
         for persistent in [false, true] {
             let directory = Directory::new();
@@ -1422,6 +1428,8 @@ mod startup_tests {
             let kept = newest(shared);
             set_reuse_to_top(true);
             assert_eq!(kept, c);
+            // 让当前时间越过测试写入的未来 1–3ms，保留真实 reuse 的排序语义。
+            std::thread::sleep(Duration::from_millis(10));
             shared.reuse(a);
             assert_eq!(newest(shared), a);
         }
@@ -1526,6 +1534,7 @@ mod startup_tests {
         }
     }
 
+    #[cfg(windows)]
     #[test]
     fn full_text_comes_in_chunks_and_images_render_with_original_size() {
         let directory = Directory::new();
@@ -1778,14 +1787,20 @@ mod deferred_tests {
         let history = history(&directory);
         let notified = Arc::new(AtomicUsize::new(0));
         let counter = notified.clone();
+        let (completed, ready) = std::sync::mpsc::channel();
         history.set_changed(Arc::new(move || {
             counter.fetch_add(1, Ordering::Relaxed);
+            let _ = completed.send(());
         }));
         assert!(matches!(
             capture(&history, "留下的内容", 1, Some(WINDOW)),
             Captured::Deferred
         ));
         assert!(previews(&history).is_empty());
+        ready
+            .recv_timeout(Duration::from_secs(10))
+            .expect("暂存内容写入通知超时");
+        // 保留完整窗口后的观察期，迟到的重复写入也必须被发现。
         std::thread::sleep(WINDOW * 3);
         assert_eq!(previews(&history), [("留下的内容".to_owned(), 1)]);
         assert_eq!(notified.load(Ordering::Relaxed), 1);

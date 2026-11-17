@@ -3,23 +3,10 @@
 //! 窗口按需用代码创建；普通 panel 的窗口、会话、命中区域和粘贴状态机不在这里复用或改写。
 
 use crate::{app::Controller, paste::outcome::Outcome, platform, settings_window};
+use platform::monitor::{TargetMonitor, WorkArea, current_target_monitor};
 use serde_json::{Value, json};
-use std::{
-    mem::size_of,
-    sync::{Mutex, mpsc},
-};
+use std::sync::{Mutex, mpsc};
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
-use windows::Win32::{
-    Foundation::{POINT, RECT},
-    Graphics::Gdi::{
-        GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY, MONITORINFO,
-        MonitorFromPoint,
-    },
-    UI::{
-        HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI},
-        WindowsAndMessaging::GetCursorPos,
-    },
-};
 
 pub const LABEL: &str = "guide";
 pub const SAMPLE_TEXT: &str = "这是拈来的一句示例，复制后就会记下。";
@@ -59,31 +46,6 @@ pub(crate) fn close_action(label: &str) -> CloseAction {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct WorkArea {
-    left: i32,
-    top: i32,
-    right: i32,
-    bottom: i32,
-}
-
-impl From<RECT> for WorkArea {
-    fn from(rect: RECT) -> Self {
-        Self {
-            left: rect.left,
-            top: rect.top,
-            right: rect.right,
-            bottom: rect.bottom,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct TargetMonitor {
-    work: WorkArea,
-    scale: f64,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum GuideCorner {
     Tray,
     Panel,
@@ -120,36 +82,6 @@ fn guide_layout(work: WorkArea, scale: f64, corner: GuideCorner) -> GuideLayout 
         },
         width,
         height,
-    }
-}
-
-fn current_target_monitor() -> Result<TargetMonitor, String> {
-    unsafe {
-        let mut point = POINT::default();
-        let primary = GetCursorPos(&mut point).is_err();
-        let monitor = MonitorFromPoint(
-            point,
-            if primary {
-                MONITOR_DEFAULTTOPRIMARY
-            } else {
-                MONITOR_DEFAULTTONEAREST
-            },
-        );
-        let mut info = MONITORINFO {
-            cbSize: size_of::<MONITORINFO>() as u32,
-            ..Default::default()
-        };
-        if !GetMonitorInfoW(monitor, &mut info).as_bool() {
-            return Err(windows::core::Error::from_thread().to_string());
-        }
-        // 与 panel 一致：先由指针选定目标 monitor，再读同一 monitor 的 DPI。
-        // 绝不能读尚未移过去的新窗口 scale，那仍是创建屏的 DPI。
-        let (mut dpi_x, mut dpi_y) = (96, 96);
-        let _ = GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y);
-        Ok(TargetMonitor {
-            work: info.rcWork.into(),
-            scale: dpi_x as f64 / 96.0,
-        })
     }
 }
 
@@ -265,6 +197,7 @@ pub fn open(app: &AppHandle) -> Result<(), String> {
                 .visible(false)
                 .focused(false)
                 .focusable(GUIDE_FOCUSABLE)
+                .accept_first_mouse(cfg!(target_os = "macos"))
                 .shadow(false)
                 .build()
                 .map_err(|error| error.to_string())
@@ -476,6 +409,7 @@ mod tests {
         thread,
         time::Duration,
     };
+    #[cfg(windows)]
     use windows::Win32::UI::WindowsAndMessaging::WS_EX_NOACTIVATE;
 
     fn outcome(result: PasteResult) -> Outcome {
@@ -669,6 +603,7 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
     #[test]
     fn task11_window_spec_is_transparent_topmost_unfocused_and_taskbarless() {
         assert_eq!(GUIDE_SIZE, (360.0, 360.0));
@@ -736,6 +671,7 @@ mod tests {
         assert_eq!((small.x, small.y), (26, 36));
     }
 
+    #[cfg(windows)]
     #[test]
     fn task11_guide_hit_regions_use_independent_dpi_conversion() {
         let regions = [platform::HitRegion {
@@ -899,6 +835,7 @@ mod tests {
         main_thread.join().unwrap();
     }
 
+    #[cfg(windows)]
     #[test]
     fn task11_fix_initial_layout_uses_target_monitor_dpi_not_creation_monitor() {
         struct CreatedWindow {

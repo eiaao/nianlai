@@ -73,12 +73,14 @@ async function compilePanel(baseline) {
   const preferencesPath = join(temporary, "preferences.mjs");
   const guideCardsPath = join(temporary, "guideCards.mjs");
   const panelActionsPath = join(temporary, "panelActions.mjs");
+  const platformPath = join(temporary, "platform.mjs");
   const statePath = join(temporary, "state.mjs");
   writeFileSync(ipcPath, IPC);
   const transpile = (text) => ts.transpileModule(text, { compilerOptions: { target: ts.ScriptTarget.ESNext, module: ts.ModuleKind.ESNext, useDefineForClassFields: true } }).outputText;
   writeFileSync(cardsPath, transpile(source("src/lib/cards.ts", baseline)));
   writeFileSync(preferencesPath, transpile(source("src/lib/preferences.ts", baseline)));
-  if (!baseline) writeFileSync(guideCardsPath, transpile(source("src/lib/guideCards.ts", false)));
+  if (!baseline) writeFileSync(platformPath, transpile(source("src/lib/platform.ts", false)));
+  if (!baseline) writeFileSync(guideCardsPath, transpile(source("src/lib/guideCards.ts", false)).replace('"./platform"', JSON.stringify(pathToFileURL(platformPath).href)));
   if (!baseline) writeFileSync(panelActionsPath, transpile(source("src/lib/panelActions.ts", false)));
   const stripped = transpile(source("src/lib/state.svelte.ts", baseline));
   const clientUrl = pathToFileURL(require.resolve("svelte/internal/client")).href;
@@ -87,9 +89,10 @@ async function compilePanel(baseline) {
     ["./ipc", pathToFileURL(ipcPath).href], ["./preferences", pathToFileURL(preferencesPath).href],
     ["./cards", pathToFileURL(cardsPath).href], ["./guideCards", pathToFileURL(guideCardsPath).href],
     ["./panelActions", pathToFileURL(panelActionsPath).href],
+    ["./platform", pathToFileURL(platformPath).href],
   ]);
   const compiled = compileModule(stripped, { filename: "state.svelte.js", generate: "client", dev: false }).js.code
-    .replace(/(from\s+)(["'])(svelte\/internal\/client|svelte|\.\/ipc|\.\/preferences|\.\/cards|\.\/guideCards|\.\/panelActions)\2/g,
+    .replace(/(from\s+)(["'])(svelte\/internal\/client|svelte|\.\/ipc|\.\/preferences|\.\/cards|\.\/guideCards|\.\/panelActions|\.\/platform)\2/g,
       (_, prefix, _quote, specifier) => prefix + JSON.stringify(imports.get(specifier)));
   writeFileSync(statePath, compiled);
   const [{ PanelState }, ipc] = await Promise.all([import(pathToFileURL(statePath).href), import(pathToFileURL(ipcPath).href)]);

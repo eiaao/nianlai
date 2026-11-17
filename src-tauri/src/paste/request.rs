@@ -44,6 +44,7 @@ pub(crate) fn generic_outcome(
 }
 
 // 只用于已选择原生策略的结果；锁前/写入错误也结束旧选择，不能重新开放已卸监听的面板。
+#[cfg(any(windows, test))]
 pub(crate) fn native_outcome(
     result: Result<super::native::Completion, String>,
     report: &mut serde_json::Value,
@@ -70,7 +71,12 @@ pub(crate) fn native_outcome(
 pub enum RestorePolicy {
     LegacyBeforeSubmit,
     GenericBeforeInput,
-    NativeAfterSubmit { unknown: bool },
+    #[cfg(target_os = "macos")]
+    CopiedOnlyHint,
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
+    NativeAfterSubmit {
+        unknown: bool,
+    },
 }
 
 pub struct Callbacks<'a> {
@@ -94,6 +100,7 @@ pub fn conclude(mode: Mode, sent: bool, confirmed: bool, degraded: bool) -> Past
 pub struct Request {
     pub session: u64,
     pub target: Target,
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     pub panel: usize,
     pub record_id: usize,
     pub content: Arc<Content>,

@@ -45,6 +45,7 @@ pub fn reliable_control(target: &Target) -> bool {
         ) || class.starts_with("windowsforms10.edit."))
 }
 
+#[cfg(windows)]
 struct Return {
     armed_at: u32,
     observed: bool,
@@ -54,7 +55,9 @@ struct State {
     alive: bool,
     revision: u64,
     first_external: usize,
+    #[cfg(windows)]
     last_event: Option<u32>,
+    #[cfg(windows)]
     returning: Option<Return>,
     quick_uncertain: bool,
     target_lost: bool,
@@ -62,6 +65,7 @@ struct State {
 }
 
 pub struct Monitor {
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     panel: usize,
     target: usize,
     state: Mutex<State>,
@@ -85,10 +89,11 @@ impl Monitor {
     pub fn revision(&self) -> u64 {
         self.state.lock().unwrap().revision
     }
-    #[cfg(test)]
+    #[cfg(all(test, windows))]
     pub fn first_external(&self) -> usize {
         self.state.lock().unwrap().first_external
     }
+    #[cfg(windows)]
     pub fn target_destroyed(&self) -> u64 {
         let mut state = self.state.lock().unwrap();
         state.target_lost = true;
@@ -104,6 +109,7 @@ impl Monitor {
     }
 
     // 既保留首次外部锁存，又对每次后续事件计数；目标窗口也只有武装归还的一次转换能豁免。
+    #[cfg(windows)]
     pub fn observe(&self, window: usize, time: u32, current: usize) -> Option<u64> {
         let mut state = self.state.lock().unwrap();
         let before = state.revision;
@@ -137,6 +143,7 @@ impl Monitor {
         (before != state.revision).then_some(state.revision)
     }
 }
+#[cfg(windows)]
 fn ordered(time: u32, previous: u32) -> bool {
     time.wrapping_sub(previous) <= i32::MAX as u32
 }
@@ -175,10 +182,14 @@ impl Session {
         }
         self.last_nonce = selection.nonce;
         let mut state = self.monitor.state.lock().unwrap();
+        #[cfg(windows)]
+        let expected = self.monitor.panel;
+        #[cfg(target_os = "macos")]
+        let expected = self.monitor.target;
         if !state.alive
             || state.target_lost
             || selection.revision != state.revision
-            || foreground != self.monitor.panel
+            || foreground != expected
         {
             return Err("selection_boundary_changed");
         }
@@ -218,11 +229,12 @@ pub struct Permit {
     mode: Mode,
     target: Identity,
     source: Source,
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     nonce: u64,
     monitor: Arc<Monitor>,
 }
 impl Permit {
-    #[cfg(test)]
+    #[cfg(all(test, windows))]
     pub fn current_revision(&self) -> u64 {
         self.monitor.revision()
     }
@@ -253,14 +265,23 @@ impl Permit {
             return false;
         }
         let state = self.monitor.state.lock().unwrap();
-        self.valid_state(&state)
-            && if state.returning.is_some() {
-                foreground == self.monitor.target
-            } else {
-                foreground == self.monitor.panel
-                    || (matches!(self.source, Source::Quick) && foreground == self.monitor.target)
-            }
+        #[cfg(target_os = "macos")]
+        {
+            self.valid_state(&state) && foreground == self.monitor.target
+        }
+        #[cfg(windows)]
+        {
+            self.valid_state(&state)
+                && if state.returning.is_some() {
+                    foreground == self.monitor.target
+                } else {
+                    foreground == self.monitor.panel
+                        || (matches!(self.source, Source::Quick)
+                            && foreground == self.monitor.target)
+                }
+        }
     }
+    #[cfg(windows)]
     pub fn arm_return(&self, foreground: usize, now: u32) -> bool {
         let mut state = self.monitor.state.lock().unwrap();
         if !self.valid_state(&state) || state.returning.is_some() {
@@ -294,16 +315,25 @@ impl Permit {
         {
             return false;
         }
+        #[cfg(windows)]
         if self.search() && !reliable_control(target) {
             return false;
         }
         let state = self.monitor.state.lock().unwrap();
+        #[cfg(target_os = "macos")]
+        {
+            self.valid_state(&state)
+        }
         // 搜索发键前必须收到已武装的归还事件；还在等待异步 WinEvent 时不能抢先发送。
-        self.valid_state(&state)
-            && (matches!(self.source, Source::Quick)
-                || state.returning.as_ref().is_some_and(|ret| ret.observed))
+        #[cfg(windows)]
+        {
+            self.valid_state(&state)
+                && (matches!(self.source, Source::Quick)
+                    || state.returning.as_ref().is_some_and(|ret| ret.observed))
+        }
     }
     // 原生提交在面板仍为前台时完成，不能借用要求目标前台的发键许可。
+    #[cfg(windows)]
     pub fn can_submit_native(
         &self,
         session: u64,
@@ -327,12 +357,14 @@ impl Permit {
         let state = self.monitor.state.lock().unwrap();
         self.valid_state(&state) && state.returning.is_none() && self.nonce == state.selection_nonce
     }
+    #[cfg(windows)]
     pub fn search(&self) -> bool {
         matches!(self.source, Source::Selection(_))
     }
     pub fn current(&self, target: &Target, foreground: usize) -> bool {
         self.check(self.session, self.record, self.mode, target, foreground)
     }
+    #[cfg(windows)]
     pub fn return_pending(&self, target: &Target, foreground: usize) -> bool {
         if Identity::from(target) != self.target || foreground != self.monitor.panel {
             return false;
@@ -343,7 +375,7 @@ impl Permit {
 }
 
 // 搜索许可的反例测试先于实现落地；测试只操作状态，不访问窗口或发送按键。
-#[cfg(test)]
+#[cfg(all(test, windows))]
 mod tests {
     use super::*;
 

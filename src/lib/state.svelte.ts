@@ -7,6 +7,7 @@ import { applyPreferences, DEFAULT_PREFERENCES, normalizePreferences, type Prefe
 import { cardKind, FAN, outlineFor, pageStep, spreadLayout, timeGroup, type SpreadLayout } from "./cards";
 import { dealtGuideItems, defaultGuideSettings, GUIDE_CARD_IDS, normalizePanelGuide } from "./guideCards";
 import { matchedActionItems } from "./panelActions";
+import { isMac, keyLabel, normalizePanelKey, primary, queueErrorMessage, secondary } from "./platform";
 
 const HOLD_HINT_MS = 300;
 /** 后端 start_queue 一次最多接受的条数。 */
@@ -40,6 +41,7 @@ function normalizeMouseActions(interaction: import("./ipc").AppSettings["interac
 
 export type PasteFeedback = {
   kind: "copied" | "failed"; title: string; detail: string; duration: number; startedAt: number;
+  accessibility?: boolean;
 };
 
 // 缺少后端确认时不猜权限或原输入控件是否恢复。
@@ -272,6 +274,7 @@ export class PanelState {
   private selectionEvents = new WeakSet<KeyboardEvent | MouseEvent>();
   private domEvents = new WeakSet<KeyboardEvent>();
   private heldDomKeys = new Map<string, number>();
+  private commandDomKeys = new Set<string>();
   private pendingDom: DomChoice | null = null;
   private focusGeneration = 0;
   private focusTimer: ReturnType<typeof setTimeout> | null = null;
@@ -416,7 +419,7 @@ export class PanelState {
   };
 
   private guideNotice(item: HistoryItem) {
-    if (item.action) { this.showNotice("这是操作：按 ↵ 或点一下执行"); return true; }
+    if (item.action) { this.showNotice(`这是操作：按 ${keyLabel("↵")} 或点一下执行`); return true; }
     if (!item.guide_id) return false;
     this.showNotice("新手牌是说明，贴不出去");
     return true;
@@ -539,7 +542,7 @@ export class PanelState {
     if (!item.favorite) { void this.deleteCurrent(); return; }
     const session = this.session;
     this.clearHold();
-    this.holdDelete = { id: item.id, session, phase: "holding", keys: this.mode === "search" ? "Ctrl+Delete" : "Delete", startedAt: Date.now(), duration: HOLD_MS };
+    this.holdDelete = { id: item.id, session, phase: "holding", keys: keyLabel(this.mode === "search" ? "Ctrl+Delete" : isMac ? "Backspace" : "Delete"), startedAt: Date.now(), duration: HOLD_MS };
     this.holdTimer = setTimeout(() => { this.holdTimer = null; this.finishHold(); }, HOLD_MS);
   };
 
@@ -677,6 +680,13 @@ export class PanelState {
     this.feedbackTimer = setTimeout(() => { this.clearFeedback(); }, 5000);
   }
 
+  openAccessibilitySettings = async () => {
+    if (!isMac) return;
+    const feedback = this.feedback;
+    try { await ipc.macOpenAccessibilitySettings(); }
+    catch { if (feedback && this.feedback === feedback) feedback.detail = `${feedback.kind === "copied" ? "按 Ctrl+V 贴上。" : ""}系统设置没打开，请手动打开辅助功能设置`; }
+  };
+
   search = async (value: string) => {
     const requestId = ++this.searchRequest;
     const currentSession = this.session;
@@ -742,7 +752,7 @@ export class PanelState {
     this.closeOnlyEscape = null;
     this.pendingDom = null;
     this.awaitingRelease = false;
-    if (clearHeld) this.heldDomKeys.clear();
+    if (clearHeld) { this.heldDomKeys.clear(); this.commandDomKeys.clear(); }
     if (["松开就贴", "松开就收起", "松开就开始逐张放"].includes(this.message)) this.message = "";
   }
 
@@ -851,7 +861,7 @@ export class PanelState {
     if (this.pendingDom) return;
     this.pendingDom = choice;
     this.awaitingRelease = true;
-    this.message = choice.id === null ? "松开就收起" : choice.queueIds ? "松开就开始逐张放" : "松开就贴";
+    this.message = choice.id === null ? "松开就收起" : choice.queueIds && !isMac ? "松开就开始逐张放" : "松开就贴";
     this.releaseDomChoice();
   }
 
@@ -886,9 +896,9 @@ export class PanelState {
   }
 
   keyup = (event: KeyboardEvent) => {
-    this.setModifiers(event.ctrlKey, event.shiftKey);
-    // 页面自己收到的 Delete（activated 快速模式、搜索模式的 Ctrl+Delete）在这里松开；松开 Ctrl 不算。
-    if (event.key === "Delete" && event.isTrusted === true) this.releaseDelete();
+    this.setModifiers(primary(event), event.shiftKey);
+    // Mac 的 ⌘ 组合可能漏发 ⌫ 松开，任一松开都结束删除。
+    if ((event.key === "Delete" || (isMac && ["Backspace", "Meta"].includes(event.key))) && event.isTrusted === true) this.releaseDelete();
     if (this.interaction === "close_only") {
       const downAt = this.closeOnlyEscape;
       this.closeOnlyEscape = null;
@@ -907,10 +917,18 @@ export class PanelState {
     if (event.timeStamp < (this.pendingDom?.downAt ?? -Infinity)
       || event.timeStamp < (this.heldDomKeys.get(code) ?? -Infinity)) return;
     this.heldDomKeys.delete(code);
+    this.commandDomKeys.delete(code);
     for (const [key, held] of [["Control", event.ctrlKey], ["Shift", event.shiftKey], ["Alt", event.altKey], ["Meta", event.metaKey]] as const) {
       if ((event.key === key || event.key === `${key}Graph`) && !held && event.timeStamp >= (this.heldDomKeys.get(`@${key}`) ?? -Infinity)) this.heldDomKeys.delete(`@${key}`);
     }
-    if (this.pendingDom?.code === code) {
+    // macOS 按住 ⌘ 时可能没有主键 keyup，由可信的 ⌘ 松开结清。
+    const commandReleased = isMac && event.key === "Meta" && !event.metaKey;
+    if (commandReleased) {
+      for (const held of this.commandDomKeys) this.heldDomKeys.delete(held);
+      this.commandDomKeys.clear();
+      this.observeModifiers(event);
+    }
+    if (this.pendingDom && (this.pendingDom.code === code || commandReleased)) {
       event.preventDefault();
       if (event.timeStamp < this.pendingDom.downAt || event.isComposing || this.composing) this.clearDomChoice();
       else this.pendingDom.released = true;
@@ -944,13 +962,13 @@ export class PanelState {
       || now - this.compositionEnded < 50 || event.timeStamp - this.compositionEnded < 50) return null;
     if (event.type === "keydown") {
       const key = event as KeyboardEvent;
-      if (key.repeat || key.isComposing || key.keyCode === 229 || key.altKey || key.metaKey) return null;
+      if (key.repeat || key.isComposing || key.keyCode === 229 || key.altKey || secondary(key)) return null;
       if (forQueue) {
         // 一叠的普通 Enter / Ctrl+Enter / Ctrl+Shift+Enter 都是有效提交；Shift+Enter 始终只复制单张。
-        if (!(key.key === "Enter" && (!key.shiftKey || key.ctrlKey))) return null;
-      } else if (!(key.key === "Enter" && !(key.ctrlKey && key.shiftKey)) && !(key.ctrlKey && /^[1-7]$/.test(key.key))
+        if (!(key.key === "Enter" && (!key.shiftKey || primary(key)))) return null;
+      } else if (!(key.key === "Enter" && !(primary(key) && key.shiftKey)) && !(primary(key) && /^[1-7]$/.test(key.key))
         // 搜索框空着（回到扇面）时数字不再是输入，直接取用对应的牌。
-        && !(!this.searching && !key.ctrlKey && !key.shiftKey && /^[1-7]$/.test(key.key))) return null;
+        && !(!this.searching && !primary(key) && !key.shiftKey && /^[1-7]$/.test(key.key))) return null;
     } else if (event.type === "click" || event.type === "auxclick" || event.type === "pointerup") {
       const pointer = event as MouseEvent;
       if (pointer.button !== (event.type === "auxclick" ? 1 : 0) || (event.type !== "pointerup" && pointer.detail <= 0)) return null;
@@ -1132,7 +1150,7 @@ export class PanelState {
   };
 
   isTaken = (id: number) => this.stack.some((item) => item.id === id);
-  private takenNotice() { if (this.visible) this.showNotice("这张已在已选里：↵ 一起粘贴，Backspace 放回最后一张"); }
+  private takenNotice() { if (this.visible) this.showNotice(`这张已在已选里：${keyLabel("↵")} 一起粘贴，${keyLabel("Backspace")} 放回最后一张`); }
 
   private submitQueue(session: number, ids: number[], automatic: boolean, call: () => Promise<unknown>): Promise<void> {
     const submission: QueueSubmission = { session, ids: [...ids], automatic };
@@ -1149,7 +1167,7 @@ export class PanelState {
     if (this.guideNotice(item)) return;
     if (this.isTaken(item.id)) return;
     if (this.stack.length >= STACK_LIMIT) {
-      this.showNotice(`最多选 ${STACK_LIMIT} 张：先按 ↵ 一起粘贴，或 Backspace 放回`, 3600);
+      this.showNotice(`最多选 ${STACK_LIMIT} 张：先按 ${keyLabel("↵")} 一起粘贴，或 ${keyLabel("Backspace")} 放回`, 3600);
       return;
     }
     this.dropStackUndo();
@@ -1176,7 +1194,7 @@ export class PanelState {
     this.stack = [];
     const timer = setTimeout(() => { if (this.stackUndo?.timer === timer) this.stackUndo = null; }, 5000);
     this.stackUndo = { items, session: this.session, timer };
-    this.showNotice(`已清空已选的 ${items.length} 张 · Ctrl+Z 恢复`, 5000);
+    this.showNotice(`已清空已选的 ${items.length} 张 · ${keyLabel("Ctrl+Z")} 恢复`, 5000);
   }
 
   private dropStackUndo() {
@@ -1196,10 +1214,11 @@ export class PanelState {
 
   /** Ctrl+Shift+Enter 只负责逐张放；Shift+Enter 永远只复制当前一张，不再按上下文换义。 */
   startStackQueue = async (automatic: boolean, pasteMode: "paste" | "text", event?: KeyboardEvent) => {
+    if (isMac && !automatic) { this.message = "macOS 版暂不支持逐张粘贴"; return; }
     const guarded = this.stack.find((item) => item.guide_id || item.action);
     if (guarded) { this.guideNotice(guarded); return; }
     if (!this.visible || !this.interactive || this.busy || this.pendingDom || !this.stack.length) {
-      if (!this.stack.length) this.message = "先按空格多选几张，再按 Ctrl+Shift+Enter 逐张放";
+      if (!this.stack.length) this.message = isMac ? `先按空格多选几张，再按 ${keyLabel("Enter")} 一起粘贴` : "先按空格多选几张，再按 Ctrl+Shift+Enter 逐张放";
       return;
     }
     const session = this.session;
@@ -1302,7 +1321,7 @@ export class PanelState {
       case "Enter": if (this.stack.length) void this.startStackQueue(true, "paste", event); else void this.choose(this.selected, "paste", event); break;
       case "Shift+Enter":
         // 有已选时不执行：不能悄悄丢掉已选的牌。
-        if (this.stack.length) this.showNotice(`已选 ${this.stack.length} 张，Shift+↵ 不会丢掉它们：↵ 一起粘贴，Ctrl+Shift+↵ 逐张放`, 3600);
+        if (this.stack.length) this.showNotice(`已选 ${this.stack.length} 张，${keyLabel("Shift+↵")} 不会丢掉它们：${keyLabel("↵")} 一起粘贴${isMac ? "" : "，Ctrl+Shift+↵ 逐张放"}`, 3600);
         else void this.choose(this.selected, "copy", event);
         break;
       case "Ctrl+Shift+Enter": void this.startStackQueue(false, "paste", event); break;
@@ -1331,10 +1350,12 @@ export class PanelState {
 
   // 普通 Quick 走钩子；Activated 在同一真实输入框中处理快速键和自然搜索输入。
   keydown = (event: KeyboardEvent) => {
-    this.setModifiers(event.ctrlKey, event.shiftKey);
+    this.setModifiers(primary(event), event.shiftKey);
+    if (isMac && this.visible && event.metaKey && ["w", "h"].includes(event.key.toLowerCase())) { event.preventDefault(); return; }
+    const key = normalizePanelKey(isMac, this.mode, this.stack.length > 0, { key: event.key, isComposing: event.isComposing || this.composing, keyCode: event.keyCode });
     if (this.interaction === "close_only") {
       if (this.visible && event.isTrusted === true && event.type === "keydown" && event.key === "Escape"
-        && !event.repeat && !event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey
+        && !event.repeat && !primary(event) && !event.altKey && !secondary(event) && !event.shiftKey
         && !event.isComposing && !this.composing && Number.isFinite(event.timeStamp) && event.timeStamp <= performance.now()
         && event.timeStamp >= 0 && event.timeStamp - this.compositionEnded >= 50 && document.hasFocus()) {
         event.preventDefault(); this.closeOnlyEscape = event.timeStamp;
@@ -1345,6 +1366,9 @@ export class PanelState {
       if (!this.ensureDomInput(event) || event.type !== "keydown" || this.domEvents.has(event)
         || !Number.isFinite(event.timeStamp) || event.timeStamp < 0 || event.timeStamp > performance.now()) return;
       this.domEvents.add(event);
+      // WebKit 可能省略 Command 组合的 keyup；保留在 Command 之前已按住的键。
+      if (isMac && event.metaKey && !event.repeat && !this.heldDomKeys.has(this.domCode(event))
+        && !["Meta", "Control", "Alt", "Shift"].includes(event.key)) this.commandDomKeys.add(this.domCode(event));
       this.heldDomKeys.set(this.domCode(event), event.timeStamp);
       this.observeModifiers(event);
       if (event.isComposing || this.composing || event.keyCode === 229) { this.clearDomChoice(); return; }
@@ -1366,16 +1390,16 @@ export class PanelState {
       if (this.busy || this.searchStartFailed) { event.preventDefault(); return; }
       if (this.mode === "quick") {
         if (this.searchStarting) return;
-        if ((!event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey && event.key === "/")
-          || (event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey && event.key.toLowerCase() === "f")) {
+        if ((!primary(event) && !event.altKey && !secondary(event) && !event.shiftKey && event.key === "/")
+          || (primary(event) && !event.altKey && !secondary(event) && !event.shiftKey && event.key.toLowerCase() === "f")) {
           event.preventDefault();
           if (!event.repeat) this.requestActivatedSearch();
           return;
         }
-        const unmodified = !event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey;
+        const unmodified = !primary(event) && !event.altKey && !secondary(event) && !event.shiftKey;
         const horizontal = event.key === "ArrowLeft" || event.key === "ArrowRight";
-        const ctrlOnly = event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey;
-        const ctrlShiftOnly = event.ctrlKey && event.shiftKey && !event.altKey && !event.metaKey;
+        const ctrlOnly = primary(event) && !event.altKey && !secondary(event) && !event.shiftKey;
+        const ctrlShiftOnly = primary(event) && event.shiftKey && !event.altKey && !secondary(event);
         const action = ctrlShiftOnly && event.key === "Enter"
           ? "Ctrl+Shift+Enter"
           : ctrlOnly && event.key.toLowerCase() === "d"
@@ -1386,39 +1410,44 @@ export class PanelState {
           ? "Ctrl+C"
           : this.previewOpen && unmodified && event.key.toLowerCase() === "z"
           ? "Z"
-          : unmodified && event.key === "Delete"
+          : unmodified && key === "Delete"
           ? "Delete:down"
-          : event.key === "Enter" && !event.altKey && !event.metaKey && !(event.ctrlKey && event.shiftKey)
-          ? event.ctrlKey ? "Ctrl+Enter" : event.shiftKey ? "Shift+Enter" : "Enter"
+          : event.key === "Enter" && !event.altKey && !secondary(event) && !(primary(event) && event.shiftKey)
+          ? primary(event) ? "Ctrl+Enter" : event.shiftKey ? "Shift+Enter" : "Enter"
           : unmodified && (horizontal || /^[1-7]$/.test(event.key) || event.key === " " || ["Tab", "Backspace", "Escape", "ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End"].includes(event.key)) ? event.key === " " ? "Space" : event.key : null;
         if (action) {
           event.preventDefault();
           const navigation = ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "PageUp", "PageDown", "Home", "End"].includes(action);
           if (performance.now() - this.compositionEnded < 50 || event.timeStamp - this.compositionEnded < 50 || (!navigation && event.repeat)) return;
           this.navigate(action, event);
-        } else if ((event.ctrlKey && ["p", "r", "+", "-", "=", "0"].includes(event.key.toLowerCase())) || ["F5", "F7"].includes(event.key)) event.preventDefault();
+        } else if ((primary(event) && ["p", "r", "+", "-", "=", "0"].includes(event.key.toLowerCase())) || ["F5", "F7"].includes(event.key)) event.preventDefault();
         return;
       }
     }
     if (!this.visible || !this.interactive || this.mode !== "search") return;
     if (event.isComposing || this.composing || event.keyCode === 229) return;
     const settled = performance.now() - this.compositionEnded >= 50;
-    const ctrlOnly = event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey;
-    const unmodified = !event.ctrlKey && !event.altKey && !event.metaKey && !event.shiftKey;
+    const ctrlOnly = primary(event) && !event.altKey && !secondary(event) && !event.shiftKey;
+    const unmodified = !primary(event) && !event.altKey && !secondary(event) && !event.shiftKey;
     const navigation = ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "PageUp", "PageDown", "Home", "End"];
     // 看全开着：Z 切换原图、Ctrl+C 复制选中文字，方向和翻页键用于看全，不进输入框。
     if (this.previewOpen) {
       if (unmodified && event.key.toLowerCase() === "z") { event.preventDefault(); if (!event.repeat) this.navigate("Z", event); return; }
       if (ctrlOnly && event.key.toLowerCase() === "c") { event.preventDefault(); if (!event.repeat) this.navigate("Ctrl+C", event); return; }
     }
+    if (isMac && ctrlOnly && event.key.toLowerCase() === "d") {
+      event.preventDefault();
+      if (!event.repeat && settled) this.navigate("Ctrl+D", event);
+      return;
+    }
     // 提交动作忽略长按重复；保留原 50ms 组合上屏保护和方向键长按导航。
-    if (event.ctrlKey && event.shiftKey && !event.altKey && !event.metaKey && event.key === "Enter") {
+    if (primary(event) && event.shiftKey && !event.altKey && !secondary(event) && event.key === "Enter") {
       event.preventDefault();
       if (!event.repeat && settled) this.navigate("Ctrl+Shift+Enter", event);
       return;
     }
     // Ctrl+数字取用：只认 1–7，对应键帽上标的那一张（看得见的第 n 条）；Ctrl+8/9 只拦截。
-    if (event.ctrlKey && !event.altKey && !event.metaKey && /^[0-9]$/.test(event.key)) {
+    if (primary(event) && !event.altKey && !secondary(event) && /^[0-9]$/.test(event.key)) {
       event.preventDefault();
       if (!event.repeat && /^[1-7]$/.test(event.key) && settled) {
         const index = this.digitTarget(Number(event.key));
@@ -1432,7 +1461,7 @@ export class PanelState {
       return;
     }
     // 搜索模式删除当前结果：Delete 留给搜索框删字，这里用 Ctrl+Delete。
-    if (ctrlOnly && event.key === "Delete") {
+    if (ctrlOnly && key === "Delete") {
       event.preventDefault();
       if (!event.repeat && settled) this.pressDelete();
       return;
@@ -1442,18 +1471,18 @@ export class PanelState {
       if (!event.repeat) this.restoreStack();
       return;
     }
-    if ((event.ctrlKey && ["f", "p", "r", "+", "-", "=", "0"].includes(event.key.toLowerCase())) || event.key === "F5" || event.key === "F7") {
+    if ((primary(event) && ["f", "p", "r", "+", "-", "=", "0"].includes(event.key.toLowerCase())) || event.key === "F5" || event.key === "F7") {
       event.preventDefault();
       if (event.key.toLowerCase() === "f") this.input?.focus({ preventScroll: true });
       return;
     }
     // Tab 是看全，不移动焦点。
-    if (event.key === "Tab" && !event.ctrlKey && !event.altKey && !event.metaKey) {
+    if (event.key === "Tab" && !primary(event) && !event.altKey && !secondary(event)) {
       event.preventDefault();
       if (!event.repeat && settled) this.navigate("Tab", event);
       return;
     }
-    if (event.ctrlKey || event.altKey || event.metaKey || (event.target !== this.input && event.key !== "Escape")) return;
+    if (primary(event) || event.altKey || secondary(event) || (event.target !== this.input && event.key !== "Escape")) return;
     // ← → 也是上一张 / 下一张，不移动输入光标；Shift+方向同样拦住，免得选中搜索框里的字。
     if (navigation.includes(event.key)) {
       event.preventDefault();
@@ -1469,8 +1498,8 @@ export class PanelState {
     // 搜索框空着时回到了扇面：空格多选、Backspace 放回、数字直接取用、Delete 删除，都不进输入框。
     if (!this.searching && unmodified) {
       if (event.key === " ") { event.preventDefault(); if (!event.repeat) this.navigate("Space", event); return; }
-      if (event.key === "Backspace") { event.preventDefault(); if (!event.repeat) this.navigate("Backspace", event); return; }
-      if (event.key === "Delete") { event.preventDefault(); if (!event.repeat) this.pressDelete(); return; }
+      if (key === "Backspace") { event.preventDefault(); if (!event.repeat) this.navigate("Backspace", event); return; }
+      if (key === "Delete") { event.preventDefault(); if (!event.repeat) this.pressDelete(); return; }
       if (/^[1-7]$/.test(event.key)) { event.preventDefault(); if (!event.repeat && settled) this.navigate(event.key, event); return; }
     }
   };
@@ -1585,7 +1614,7 @@ export class PanelState {
         return;
       }
     }
-    if (this.stack.length) this.showNotice(`还有 ${this.stack.length} 张已选：↵ 一起粘贴，Esc 清空`, 4000);
+    if (this.stack.length) this.showNotice(`还有 ${this.stack.length} 张已选：${keyLabel("↵")} 一起粘贴，${keyLabel("Esc")} 清空`, 4000);
   }
 
   /** onMount 时调用：读版本号、订阅后端事件，全部订阅好后再发 frontend_ready；返回卸载时的清理函数。 */
@@ -1796,6 +1825,7 @@ export class PanelState {
       });
       await subscribe(ipc.onQueueChanged, (payload) => {
         if (payload.session !== this.session) return;
+        if (payload.error) payload = { ...payload, error: queueErrorMessage(payload.error) };
         const submission = this.queueSubmission;
         if (submission && submission.session === payload.session && payload.remaining > 0
           && payload.total === submission.ids.length && payload.automatic === submission.automatic) {
@@ -1824,6 +1854,7 @@ export class PanelState {
       });
       await subscribe(ipc.onPanelTiming, (payload) => { if (payload.session === this.session) this.timing = payload; });
       await subscribe(ipc.onPanelError, (payload) => {
+        payload = { ...payload, message: queueErrorMessage(payload.message) };
         if (payload.session === this.session) this.queueSubmission = null;
         if (this.visible && payload.session === this.session && this.interaction !== "passive"
           && (this.interaction !== "close_only" || payload.close_only === true)) {
@@ -1835,34 +1866,49 @@ export class PanelState {
         }
       });
       await subscribe(ipc.onPasteResult, (payload) => {
-        if (payload.session !== this.session || this.interaction === "close_only") return;
+        const permissionCopy = isMac && payload.paste_result === "copied_only" && payload.reason === "mac_accessibility_required";
+        const selfCopy = isMac && payload.paste_result === "copied_only" && payload.reason === "target_is_self";
+        if (payload.session !== this.session || (this.interaction === "close_only" && !permissionCopy && !selfCopy)) return;
         // 粘贴成功不出声：结果就在目标程序里，用户看得到。下面只说需要用户知道的偏差。
         if (!this.visible) return;
+        if (isMac) this.clearFeedback();
+        if (permissionCopy) {
+          this.busy = false;
+          if (payload.hint_dwell_ms && this.interaction !== "close_only") this.setInteraction("passive");
+          this.feedback = {
+            kind: "copied", title: "已复制", detail: `按 ${keyLabel("Ctrl+V")} 贴上。打开辅助功能，就能直接贴进去`, accessibility: true,
+            duration: payload.hint_dwell_ms ?? 5000, startedAt: Date.now(),
+          };
+          return;
+        }
         if (payload.paste_result === "native_submission_unknown") {
           this.clearFeedback();
           this.setInteraction("passive");
           this.message = "不确定贴上没有，先看一眼，别贴两遍";
           return;
         }
+        // 只转换已知的粘贴提示；后端错误及其他原文不经过键名替换。
+        const hint = payload.hint_message;
+        const copiedHint = hint === "已复制，按 Ctrl+V 贴上" || hint === COPIED_HINT ? hint.replace("Ctrl+V", keyLabel("Ctrl+V")) : hint || COPIED_HINT.replace("Ctrl+V", keyLabel("Ctrl+V"));
         // 被动提示已归还前台，不承诺按键送达；只展示后端确认的提示，留明确鼠标关闭入口。
         if (payload.hint_dwell_ms) {
           const administrator = payload.paste_result === "copied_only" && payload.reason === "target_may_be_elevated";
           const detail = administrator
-            ? "那个程序权限更高，贴不进去。切过去按 Ctrl+V"
-            : payload.hint_message || "窗口换了，怕贴错，只复制了。按 Ctrl+V 贴上";
+            ? "那个程序权限更高，贴不进去。切过去按 Ctrl+V".replace("Ctrl+V", keyLabel("Ctrl+V"))
+            : hint ? copiedHint : "窗口换了，怕贴错，只复制了。按 Ctrl+V 贴上".replace("Ctrl+V", keyLabel("Ctrl+V"));
           this.clearFeedback();
-          this.setInteraction("passive");
+          if (this.interaction !== "close_only") this.setInteraction("passive");
           this.feedback = {
             kind: "copied", title: "复制好了，没贴上", detail,
             duration: payload.hint_dwell_ms, startedAt: Date.now(),
           };
-          this.message = payload.hint_message || COPIED_HINT;
+          this.message = copiedHint;
           return;
         }
         if (this.interaction === "passive") return;
         this.busy = false;
         const notes: string[] = [];
-        if (payload.paste_result === "copied_only") notes.push(payload.hint_message || COPIED_HINT);
+        if (payload.paste_result === "copied_only") notes.push(copiedHint);
         if (payload.paste_result === "sent" && payload.layer2?.timed_out) notes.push("贴了，但那边可能没收到");
         if (payload.as_text?.error) notes.push("没能转成纯文字，按原样贴了");
         this.message = notes.join(" · ");

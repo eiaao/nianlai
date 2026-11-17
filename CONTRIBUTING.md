@@ -16,6 +16,16 @@ pnpm tauri build --no-bundle   # 正式版构建
 
 打便携版：`powershell -NoProfile -ExecutionPolicy Bypass -File tools\release.ps1`，输出到 `release\`。开发和验证用的工具见 [tools/README.md](tools/README.md)。
 
+### macOS
+
+Mac 需要 macOS 13 或更新版本和 Xcode 命令行工具（`xcode-select --install`），无需 Windows 的 Visual Studio 生成工具和 WebView2。
+在 Mac 上运行 `pnpm install`、`pnpm tauri dev` 即可开发；构建 Apple Silicon 与 Intel 通用安装包：
+
+```bash
+rustup target add aarch64-apple-darwin x86_64-apple-darwin
+pnpm tauri build --target universal-apple-darwin
+```
+
 ## 参与开发
 
 从 `main` 新建分支，完成后提 PR。提交前在仓库根目录跑一遍 CI 用到的检查：

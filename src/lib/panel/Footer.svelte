@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { keyLabel } from "../platform";
   // 轻提示条：粘贴结果、撤销删除、轻提示（notice）、错误说明。只在有话要说时出现；按键提示不在这里（见 HandPanel 的 .hint）。
   import type { PanelState } from "../state.svelte";
 
@@ -11,6 +12,7 @@
       <div class="result" class:copied={panel.feedback.kind === "copied"} class:failed={panel.feedback.kind === "failed"} role="status" aria-live="polite">
         <i class="result-line" class:animated={panel.motion !== "none"} style={`animation-duration: ${panel.feedback.duration}ms`}></i>
         <div class="result-copy"><strong>{panel.feedback.title}</strong><small>{panel.feedback.detail}</small></div>
+        {#if panel.feedback.accessibility}<button type="button" tabindex="-1" onpointerdown={(event) => event.preventDefault()} onclick={panel.openAccessibilitySettings}>去设置</button>{/if}
         {#if panel.interaction === "passive"}<button type="button" tabindex="-1" onpointerdown={(event) => event.preventDefault()} onclick={panel.close}>知道了</button>{/if}
       </div>
     {/key}
@@ -27,7 +29,7 @@
     {#key panel.undo.startedAt}
       <span class="undo" role="status" aria-live="polite">
         <span class="undo-text">已放进回收站 ·</span>
-        <button type="button" tabindex="-1" onpointerdown={(event) => event.preventDefault()} onclick={() => { void panel.undoDelete(); }}>撤销</button><kbd>Ctrl+Z</kbd>
+        <button type="button" tabindex="-1" onpointerdown={(event) => event.preventDefault()} onclick={() => { void panel.undoDelete(); }}>撤销</button><kbd>{keyLabel("Ctrl+Z")}</kbd>
         <i class="undo-progress" style={`animation-duration: ${panel.undo.duration}ms`}></i>
       </span>
     {/key}

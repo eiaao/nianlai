@@ -8,29 +8,20 @@ use crate::{
     settings::Store,
     settings_window,
 };
+#[cfg(windows)]
+pub(crate) use platform::theme::window_message;
+use platform::theme::{current_small_icon_width, taskbar_uses_light_theme};
 use serde_json::json;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tauri::{
-    AppHandle, Emitter, Manager, Position, Rect, Size, Wry,
+    AppHandle, Emitter, Manager, Wry,
     menu::{CheckMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuItem},
     plugin::TauriPlugin,
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
 use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_global_shortcut::Modifiers;
-use windows::{
-    Win32::{
-        Foundation::{LPARAM, POINT},
-        Graphics::Gdi::{MONITOR_DEFAULTTONEAREST, MonitorFromPoint},
-        System::Registry::{RRF_RT_REG_DWORD, RegGetValueW},
-        UI::{
-            HiDpi::{GetDpiForMonitor, GetSystemMetricsForDpi, MDT_EFFECTIVE_DPI},
-            WindowsAndMessaging::{SM_CXSMICON, WM_DPICHANGED, WM_SETTINGCHANGE},
-        },
-    },
-    core::PCWSTR,
-};
 
 const OPEN_PANEL: &str = "tray_open_panel";
 const STATUS: &str = "tray_status";
@@ -105,7 +96,10 @@ fn hotkey_label(value: &str) -> String {
 
 /// 生产菜单构造、后续刷新和测试共用；Tab 只是菜单文字，accelerator 参数仍为 None。
 fn open_panel_label(hotkey: &str) -> String {
-    format!("打开拈来\t{}", hotkey_label(hotkey))
+    let label = hotkey_label(hotkey);
+    #[cfg(target_os = "macos")]
+    let label = platform::theme::hotkey_label(&label);
+    format!("打开拈来\t{label}")
 }
 
 /// refresh 与测试共用同一 setter 路径；测试用 fake sink 观察真实刷新调用，而非另算标签自证。
@@ -144,97 +138,6 @@ pub fn select_tray_bitmap(px: i32) -> u32 {
         .into_iter()
         .min_by_key(|candidate| ((i64::from(px) - i64::from(*candidate)).abs(), *candidate))
         .unwrap()
-}
-
-/// 任务栏是浅色还是深色：读系统的 SystemUsesLightTheme；读不到按浅色处理（保守）。
-const PERSONALIZE_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize";
-const PERSONALIZE_KEY_WIDE: [u16; 64] = utf16(PERSONALIZE_KEY);
-
-pub fn taskbar_uses_light_theme() -> bool {
-    const VALUE: &[u16] = &utf16("SystemUsesLightTheme");
-    let mut value: u32 = 0;
-    let mut size = std::mem::size_of::<u32>() as u32;
-    let ok = unsafe {
-        RegGetValueW(
-            windows::Win32::System::Registry::HKEY_CURRENT_USER,
-            PCWSTR(PERSONALIZE_KEY_WIDE.as_ptr()),
-            PCWSTR(VALUE.as_ptr()),
-            RRF_RT_REG_DWORD,
-            None,
-            Some(&mut value as *mut u32 as _),
-            Some(&mut size),
-        )
-    };
-    let read = (ok.is_ok() && size == std::mem::size_of::<u32>() as u32).then_some(value);
-    taskbar_theme_from_registry(read)
-}
-
-fn taskbar_theme_from_registry(value: Option<u32>) -> bool {
-    // 只有系统明确给出 0 才用深色任务栏版；失败和异常值都回浅色版。
-    value != Some(0)
-}
-
-const fn utf16(text: &str) -> [u16; 64] {
-    let mut out = [0u16; 64];
-    let bytes = text.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() && i < 63 {
-        out[i] = bytes[i] as u16;
-        i += 1;
-    }
-    out
-}
-
-fn physical_rect_center(rect: Rect) -> Option<(i32, i32)> {
-    let (Position::Physical(position), Size::Physical(size)) = (rect.position, rect.size) else {
-        return None;
-    };
-    let x = i64::from(position.x) + i64::from(size.width) / 2;
-    let y = i64::from(position.y) + i64::from(size.height) / 2;
-    Some((
-        x.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
-        y.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
-    ))
-}
-
-fn monitor_dpi(point: (i32, i32)) -> Option<u32> {
-    let monitor = unsafe {
-        MonitorFromPoint(
-            POINT {
-                x: point.0,
-                y: point.1,
-            },
-            MONITOR_DEFAULTTONEAREST,
-        )
-    };
-    let (mut dpi_x, mut dpi_y) = (0, 0);
-    unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) }.ok()?;
-    (dpi_x > 0).then_some(dpi_x)
-}
-
-fn small_icon_width_from_dpi(dpi: Option<u32>, metric: impl FnOnce(u32) -> i32) -> i32 {
-    const FALLBACK: i32 = 16;
-    let Some(dpi) = dpi.filter(|dpi| *dpi > 0) else {
-        return FALLBACK;
-    };
-    let width = metric(dpi);
-    if width > 0 { width } else { FALLBACK }
-}
-
-fn small_icon_width_from_rect(
-    rect: Option<Rect>,
-    dpi_at: impl FnOnce((i32, i32)) -> Option<u32>,
-    metric: impl FnOnce(u32) -> i32,
-) -> i32 {
-    let dpi = rect.and_then(physical_rect_center).and_then(dpi_at);
-    small_icon_width_from_dpi(dpi, metric)
-}
-
-/// 每次刷新都通过 Tauri 实时调用 Shell_NotifyIconGetRect；失败回 16，绝不复用鼠标旧坐标。
-fn current_small_icon_width(tray: &tauri::tray::TrayIcon<Wry>) -> i32 {
-    small_icon_width_from_rect(tray.rect().ok().flatten(), monitor_dpi, |dpi| unsafe {
-        GetSystemMetricsForDpi(SM_CXSMICON, dpi)
-    })
 }
 
 fn tray_png(state: TrayState, light_taskbar: bool, size: u32) -> &'static [u8] {
@@ -342,9 +245,12 @@ pub fn apply(app: &AppHandle, health: HealthSnapshot) {
     let view = tray_view(&health, paused, ignore_next);
     let light = taskbar_uses_light_theme();
     if let Some(tray) = app.tray_by_id("nianlai") {
-        let size = select_tray_bitmap(current_small_icon_width(&tray));
-        if let Ok(image) = tauri::image::Image::from_bytes(tray_png(view.state, light, size)) {
-            let _ = tray.set_icon(Some(image));
+        // tray-icon 0.25 的 set_icon 会取消模板属性；Mac 保留静态模板，只刷新文字。
+        if cfg!(windows) {
+            let size = select_tray_bitmap(current_small_icon_width(&tray));
+            if let Ok(image) = tauri::image::Image::from_bytes(tray_png(view.state, light, size)) {
+                let _ = tray.set_icon(Some(image));
+            }
         }
         let _ = tray.set_tooltip(Some(view.tooltip));
     }
@@ -391,6 +297,7 @@ pub fn single_instance() -> TauriPlugin<Wry> {
 
 pub fn autostart() -> TauriPlugin<Wry> {
     // 初始化只建立管理器；仅用户点击菜单时才修改自启设置。
+    // tauri-plugin-autostart 2.5.1 的 Builder 默认使用 MacosLauncher::LaunchAgent。
     tauri_plugin_autostart::Builder::new().build()
 }
 
@@ -540,13 +447,17 @@ pub fn setup(app: &AppHandle, logger: &Logger) -> Result<(), Box<dyn std::error:
         autostart: autostart.clone(),
     });
     let menu_autostart = autostart.clone();
+    #[cfg(windows)]
     let initial = tauri::image::Image::from_bytes(RECORDING_16)?;
+    #[cfg(target_os = "macos")]
+    let initial = tauri::image::Image::from_bytes(platform::theme::TRAY_TEMPLATE)?;
 
     TrayIconBuilder::with_id("nianlai")
         .icon(initial)
+        .icon_as_template(cfg!(target_os = "macos"))
         .tooltip("拈来")
         .menu(&menu)
-        .show_menu_on_left_click(false)
+        .show_menu_on_left_click(cfg!(target_os = "macos"))
         .on_menu_event(move |app, event| match event.id().as_ref() {
             OPEN_PANEL => open_panel(app),
             STATUS => {} // 状态行不可点。
@@ -674,6 +585,10 @@ fn route_left_click(
 }
 
 fn handle_left_click(app: &AppHandle, health: Option<HealthSnapshot>) {
+    // Mac 左键已交给原生菜单，松开时不再呼出面板。
+    if cfg!(target_os = "macos") {
+        return;
+    }
     // 出了问题：左键打开对应设置页（存储 → 数据与备份，记录 → 记录与隐私）。
     let error_page = health.and_then(|health| select_tray(&health, gate().paused()).settings_page);
     route_left_click(
@@ -896,20 +811,21 @@ fn record(app: &AppHandle, message: &'static str) {
     }
 }
 
-/// 设置与 DPI 消息只请求轻量刷新；从不解引用 LPARAM，也从不消费原消息。
-pub(crate) fn window_message(message: u32, _lp: LPARAM) -> bool {
-    if message == WM_SETTINGCHANGE || message == WM_DPICHANGED {
-        fire_settings_change();
-    }
-    false
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::health::{CaptureHealth, StoreHealth};
+    #[cfg(windows)]
+    use platform::theme::{
+        PERSONALIZE_KEY, PERSONALIZE_KEY_WIDE, small_icon_width_from_dpi,
+        small_icon_width_from_rect, taskbar_theme_from_registry,
+    };
     use tauri::{Position, Rect, Size};
-    use windows::Win32::UI::WindowsAndMessaging::WM_CLIPBOARDUPDATE;
+    #[cfg(windows)]
+    use windows::Win32::{
+        Foundation::LPARAM,
+        UI::WindowsAndMessaging::{WM_CLIPBOARDUPDATE, WM_DPICHANGED, WM_SETTINGCHANGE},
+    };
 
     static MESSAGE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -941,6 +857,7 @@ mod tests {
         assert_eq!(select_tray_bitmap(i32::MAX), 32);
     }
 
+    #[cfg(windows)]
     #[test]
     fn monitor_dpi_drives_metrics_and_failures_fall_back_to_16() {
         for (dpi, px, expected) in [(96, 16, 16), (120, 20, 16), (144, 24, 24), (192, 32, 32)] {
@@ -1047,6 +964,7 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
     #[test]
     fn every_metric_read_uses_the_new_live_rect_without_mouse_position_cache() {
         let probes = std::cell::RefCell::new(Vec::new());
@@ -1079,6 +997,7 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
     #[test]
     fn registry_path_constant_is_the_exact_personalize_key() {
         assert_eq!(
@@ -1090,6 +1009,7 @@ mod tests {
         assert_eq!(PERSONALIZE_KEY_WIDE[expected.len()], 0);
     }
 
+    #[cfg(windows)]
     #[test]
     fn registry_theme_only_explicit_zero_is_dark() {
         assert!(taskbar_theme_from_registry(None), "读取失败回浅色版");
@@ -1098,6 +1018,7 @@ mod tests {
         assert!(!taskbar_theme_from_registry(Some(0)));
     }
 
+    #[cfg(windows)]
     #[test]
     fn setting_and_dpi_messages_refresh_without_consuming_or_reading_lparam() {
         let _guard = MESSAGE_TEST_LOCK.lock().unwrap();
@@ -1392,6 +1313,7 @@ mod tests {
         assert_ne!(RECORDING_24, RECORDING_32);
     }
 
+    #[cfg(windows)]
     #[test]
     fn taskbar_theme_registry_read_defaults_to_light() {
         // 真机 / CI 上注册表多半存在；无论哪种，都不应 panic。
@@ -1499,12 +1421,14 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
     fn refreshed_open_panel_labels(hotkey: &str) -> Vec<String> {
         let mut labels = Vec::new();
         refresh_open_panel_label(hotkey, |label| labels.push(label));
         labels
     }
 
+    #[cfg(windows)]
     #[test]
     fn open_panel_label_shows_current_hotkey_with_safe_fallbacks() {
         assert_eq!(refreshed_open_panel_labels("Ctrl+`"), ["打开拈来\tCtrl+`"]);
@@ -1540,6 +1464,7 @@ mod tests {
         ));
     }
 
+    #[cfg(windows)]
     #[test]
     fn saved_and_reloaded_hotkey_drive_the_same_open_panel_label() {
         let directory = crate::settings::tests::Directory::new();

@@ -228,6 +228,13 @@ def main() -> int:
             name = special.get(size) or f"Square{size}x{size}Logo.png"
             open(os.path.join(staging, name), "wb").write(encode_png(grid))
             print(f"渲染 {size}×{size} -> {name}")
+        # Mac 菜单栏模板：同一单色轮廓的 18pt@1x/@2x，透明度交给系统染色。
+        for size in (18, 36):
+            grid = render_vector(work, size, "mono.svg")
+            grid = [[(0, 0, 0, pixel[3]) for pixel in row] for row in grid]
+            name = os.path.join("tray", f"macos-template-{size}.png")
+            open(os.path.join(staging, name), "wb").write(encode_png(grid))
+            print(f"渲染 {size}×{size} -> {name}")
         # ICO：四档 BMP + 256 PNG，共五档；16/24 用手绘源，绝不能从 256 缩小。
         entries: list[tuple[int, bytes]] = [(16, bmp_entry(app16)), (24, bmp_entry(app24))]
         for size in (32, 48):

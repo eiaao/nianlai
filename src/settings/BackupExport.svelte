@@ -1,8 +1,9 @@
 <script lang="ts">
   // 导出备份（M2-4 / B07）：先说清楚包含什么、多大、不加密；保存位置用系统的“另存为”，默认文件名带日期。
-  // 导出完成后按钮变 ✓，并给“在资源管理器里显示”。
+  // 导出完成后按钮变 ✓，并能显示保存的文件。
   import { onMount } from "svelte";
   import * as ipc from "../lib/ipc";
+  import { isMac } from "../lib/platform";
   import type { BackupExported, BackupSummary } from "../lib/ipc";
   import { count, message, size } from "./format";
 
@@ -75,7 +76,7 @@
   {#if result}
     <div class="setting result" role="status">
       <span class="setting-copy"><strong>已导出 {size(result.bytes)}</strong><small>{count(result.items)} 张复制内容 · {count(result.favorites)} 张收藏 · {count(result.icons)} 个图标</small></span>
-      <button type="button" class="link" onclick={() => result && ipc.revealInExplorer(result.path).catch((value) => { error = message(value); })}>在资源管理器里显示</button>
+      <button type="button" class="link" onclick={() => result && ipc.revealInExplorer(result.path).catch((value) => { error = message(value); })}>{isMac ? "在访达中显示" : "在资源管理器里显示"}</button>
     </div>
   {/if}
   {#if error}<p class="error" role="alert">{error}</p>{/if}
