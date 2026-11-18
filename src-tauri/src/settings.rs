@@ -41,6 +41,7 @@ pub struct Settings {
     pub interaction: Interaction,
     pub history: History,
     pub guide: Guide,
+    pub update: UpdateSettings,
     #[serde(flatten)]
     unknown: Unknown,
 }
@@ -58,7 +59,55 @@ impl Default for Settings {
             interaction: Interaction::default(),
             history: History::default(),
             guide: Guide::default(),
+            update: UpdateSettings::default(),
             unknown: Unknown::new(),
+        }
+    }
+}
+
+/// 新版本检测（见 update 模块）。`auto_check` 是用户开关；其余是程序自己维护的状态：
+/// 最近一次检查、已知的最新版本，以及每个版本的“已通知 / 已跳过 / 已查看 / 横幅已关闭”标记。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UpdateSettings {
+    pub auto_check: bool,
+    pub last_check_ms: Option<u64>,
+    pub last_result: crate::update::policy::CheckResult,
+    pub latest: Option<crate::update::feed::Latest>,
+    pub notified_version: Option<String>,
+    pub skipped_version: Option<String>,
+    pub seen_version: Option<String>,
+    pub banner_dismissed_version: Option<String>,
+    #[serde(flatten)]
+    unknown: Unknown,
+}
+
+impl Default for UpdateSettings {
+    fn default() -> Self {
+        Self {
+            auto_check: true,
+            last_check_ms: None,
+            last_result: Default::default(),
+            latest: None,
+            notified_version: None,
+            skipped_version: None,
+            seen_version: None,
+            banner_dismissed_version: None,
+            unknown: Unknown::new(),
+        }
+    }
+}
+
+impl UpdateSettings {
+    /// 程序维护的那部分状态，交给更新模块。
+    pub fn state(&self) -> crate::update::policy::State {
+        crate::update::policy::State {
+            last_check_ms: self.last_check_ms,
+            last_result: self.last_result,
+            latest: self.latest.clone(),
+            notified_version: self.notified_version.clone(),
+            skipped_version: self.skipped_version.clone(),
+            seen_version: self.seen_version.clone(),
+            banner_dismissed_version: self.banner_dismissed_version.clone(),
         }
     }
 }
@@ -478,6 +527,62 @@ fn validate(mut value: Value) -> (Settings, Vec<Issue>) {
         Value::is_boolean,
         &mut issues,
     );
+    let update = section(object, "update", &mut issues);
+    field(
+        update,
+        "auto_check",
+        "update.auto_check",
+        json!(true),
+        Value::is_boolean,
+        &mut issues,
+    );
+    field(
+        update,
+        "last_check_ms",
+        "update.last_check_ms",
+        Value::Null,
+        |v| v.is_null() || v.as_u64().is_some_and(|n| n <= MAX_SAFE_JSON_INT),
+        &mut issues,
+    );
+    field(
+        update,
+        "last_result",
+        "update.last_result",
+        json!("none"),
+        |v| matches!(v.as_str(), Some("none" | "latest" | "new" | "failed")),
+        &mut issues,
+    );
+    for name in [
+        "notified_version",
+        "skipped_version",
+        "seen_version",
+        "banner_dismissed_version",
+    ] {
+        field(
+            update,
+            name,
+            &format!("update.{name}"),
+            Value::Null,
+            |v| v.is_null() || v.as_str().is_some_and(|s| s.len() <= 64),
+            &mut issues,
+        );
+    }
+    // 缓存的最新版本必须通过与版本文件相同的校验（地址、sha256、版本号）；不合格就丢弃，等下次检查重取。
+    let latest = update.get("latest").cloned().unwrap_or(Value::Null);
+    let latest = serde_json::from_value::<crate::update::feed::Latest>(latest.clone())
+        .ok()
+        .and_then(|l| l.sanitize(crate::update::feed::PACKAGE_EXT));
+    match latest {
+        Some(latest) => {
+            update.insert("latest".into(), serde_json::to_value(latest).unwrap());
+        }
+        None => {
+            if update.get("latest").is_some_and(|v| !v.is_null()) {
+                issues.push(Issue::new("update.latest", "缓存的新版本信息无效，已丢弃"));
+            }
+            update.insert("latest".into(), Value::Null);
+        }
+    }
     let guide = section(object, "guide", &mut issues);
     field(
         guide,
@@ -1563,5 +1668,35 @@ pub(crate) mod tests {
         assert_eq!(defaults.directories.data, directory.0.join("Nianlai/data"));
         assert!(!defaults.directories.data.exists());
         assert!(!defaults.directories.test_data_dir);
+    }
+
+    #[test]
+    fn update_settings_default_validate_and_keep_unknown_fields() {
+        let (settings, issues) = validate(json!({}));
+        assert!(issues.is_empty());
+        assert!(settings.update.auto_check);
+        assert_eq!(settings.update.latest, None);
+        let sha = "a".repeat(64);
+        let url = format!(
+            "{}v0.2.0/nianlai-0.2.0-windows-x64-portable.zip",
+            crate::update::feed::DOWNLOAD_PREFIX
+        );
+        let (settings, issues) = validate(json!({"update":{
+            "auto_check": "yes", "last_result": "bogus", "skipped_version": 5,
+            "latest": {"version":"0.2.0","url":url,"sha256":sha},
+            "future_field": 1,
+        }}));
+        assert!(settings.update.auto_check);
+        assert_eq!(settings.update.skipped_version, None);
+        assert_eq!(settings.update.last_result, Default::default());
+        #[cfg(windows)]
+        assert_eq!(settings.update.latest.unwrap().version, "0.2.0");
+        assert_eq!(issues.len(), 3 + usize::from(cfg!(not(windows))));
+        let (settings, issues) = validate(
+            json!({"update":{"latest":{"version":"0.2.0","url":"https://evil.com/a.zip","sha256":sha}}}),
+        );
+        assert_eq!(settings.update.latest, None);
+        assert_eq!(issues.len(), 1);
+        assert!(serde_json::to_value(&settings).unwrap()["update"].is_object());
     }
 }

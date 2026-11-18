@@ -31,6 +31,8 @@ const PAUSE: &str = "tray_pause";
 const IGNORE_NEXT: &str = "tray_ignore_next";
 const ABOUT: &str = "tray_about";
 const QUIT: &str = "tray_quit";
+// 有新版本时动态插入菜单顶部，不属于固定布局 TRAY_MENU_LAYOUT。
+const UPDATE: &str = "tray_update";
 // Windows 原生菜单用文本中的 Tab 显示右侧键位；加速器始终为空，不注册第二个快捷键。
 const OPEN_PANEL_ACCELERATOR: Option<&str> = None;
 
@@ -287,6 +289,43 @@ struct TrayMenuItems {
     autostart: CheckMenuItem<Wry>,
 }
 
+/// 托盘菜单里“有新版本 x.y.z”这一项：版本变化时增删，点击打开设置的“关于”页。
+struct UpdateMenu {
+    menu: Menu<Wry>,
+    item: Mutex<Option<(String, MenuItem<Wry>)>>,
+}
+
+fn update_label(version: &str) -> String {
+    format!("有新版本 {version}")
+}
+
+/// `version` 为 None 时移除这一项。可在任意线程调用，菜单操作转到主线程执行。
+pub fn set_update_item(app: &AppHandle, version: Option<String>) {
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        let Some(holder) = handle.try_state::<UpdateMenu>() else {
+            return;
+        };
+        let mut slot = holder.item.lock().unwrap();
+        if slot.as_ref().map(|(shown, _)| shown) == version.as_ref() {
+            return;
+        }
+        if let Some((_, item)) = slot.take() {
+            let _ = holder.menu.remove(&item);
+        }
+        let Some(version) = version else { return };
+        let Ok(item) =
+            MenuItem::with_id(&handle, UPDATE, update_label(&version), true, None::<&str>)
+        else {
+            return;
+        };
+        // 放在状态行下面，一眼能看到。
+        if holder.menu.insert(&item, 1).is_ok() {
+            *slot = Some((version, item));
+        }
+    });
+}
+
 pub fn single_instance() -> TauriPlugin<Wry> {
     tauri_plugin_single_instance::init(|app, _args, _cwd| {
         // 次实例在插件初始化中以 0 退出，由主实例接收通知时留下固定日志。
@@ -413,6 +452,10 @@ pub fn setup(app: &AppHandle, logger: &Logger) -> Result<(), Box<dyn std::error:
         }
     }
     let menu = Menu::with_items(app, &menu_entries)?;
+    app.manage(UpdateMenu {
+        menu: menu.clone(),
+        item: Mutex::new(None),
+    });
     {
         // 暂停或“下一次复制不记”变化（含采集线程消耗掉“忽略下一次”）时同步菜单、提示、面板横幅和托盘。
         let (ignore, app) = (ignore.clone(), app.clone());
@@ -461,6 +504,7 @@ pub fn setup(app: &AppHandle, logger: &Logger) -> Result<(), Box<dyn std::error:
         .on_menu_event(move |app, event| match event.id().as_ref() {
             OPEN_PANEL => open_panel(app),
             STATUS => {} // 状态行不可点。
+            UPDATE => crate::update::open_about(app),
             ABOUT => {
                 let app = app.clone();
                 tauri::async_runtime::spawn(async move {
@@ -814,6 +858,12 @@ fn record(app: &AppHandle, message: &'static str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn update_menu_item_is_dynamic_and_not_part_of_the_fixed_layout() {
+        assert_eq!(update_label("0.1.2"), "有新版本 0.1.2");
+        assert!(!TRAY_MENU_LAYOUT.contains(&TrayMenuEntry::Action(UPDATE)));
+    }
     use crate::health::{CaptureHealth, StoreHealth};
     #[cfg(windows)]
     use platform::theme::{
