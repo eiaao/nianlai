@@ -316,14 +316,14 @@
   .about-rows, .update-card { overflow: hidden; }
   .muted { color: var(--hand-ink-2); font-weight: 400; }
   .update-actions { display: flex; flex: none; gap: 8px; }
-  button.primary { border-color: var(--state-success); background: var(--state-success-bg); color: var(--state-success); font-weight: 600; }
+  button.primary { border-color: var(--update); background: var(--update-bg); color: var(--update); font-weight: 600; }
   .update-notes { display: grid; gap: 12px; padding: 4px 16px 12px; border-bottom: 1px solid var(--hand-line); }
   .update-notes h3 { margin: 0 0 4px; font-size: 12px; color: var(--hand-ink-2); font-weight: 600; }
   .update-notes ul { margin: 0; padding-left: 18px; font-size: 13px; line-height: 1.7; }
   .update-line { display: flex; align-items: center; gap: 12px; margin: 0; padding: 10px 16px; border-bottom: 1px solid var(--hand-line); font-size: 12px; line-height: 1.6; color: var(--hand-ink-2); }
   .update-line.error { color: var(--state-critical); }
   .update-line.error span { flex: 1; }
-  .update-line progress { flex: 1; max-width: 240px; height: 6px; accent-color: var(--state-success); }
+  .update-line progress { flex: 1; max-width: 240px; height: 6px; accent-color: var(--update); }
   .setting { min-height: 64px; }
   .setting strong span { font-weight: 400; }
   .path { font-family: var(--font-mono); overflow-wrap: anywhere; user-select: text; }
