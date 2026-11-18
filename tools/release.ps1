@@ -65,6 +65,18 @@ function Assert-Command([string]$Name) {
     }
 }
 
+# Windows PowerShell 5 下 Get-FileHash 可能不可用，直接用 .NET 计算小写十六进制 SHA-256。
+function Get-Sha256([string]$Path) {
+    $sha = [Security.Cryptography.SHA256]::Create()
+    $stream = [IO.File]::OpenRead($Path)
+    try {
+        return ([BitConverter]::ToString($sha.ComputeHash($stream)) -replace '-', '').ToLowerInvariant()
+    } finally {
+        $stream.Dispose()
+        $sha.Dispose()
+    }
+}
+
 function Resolve-ReleasePath([string]$Path, [string]$BasePath) {
     if ([IO.Path]::IsPathRooted($Path)) {
         return [IO.Path]::GetFullPath($Path)
@@ -198,7 +210,7 @@ try {
     $gitStatus = @(& git status --porcelain=v1 --untracked-files=all)
     Assert-Command '记录最终 Git 状态'
     Assert-PortableExecutable $exePath
-    $sourceExeHash = (Get-FileHash -LiteralPath $exePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $sourceExeHash = Get-Sha256 $exePath
     $sourceExeTime = (Get-Item -LiteralPath $exePath).LastWriteTimeUtc.ToString('o')
 
     [IO.Directory]::CreateDirectory($outputPath) | Out-Null
@@ -207,7 +219,7 @@ try {
     [IO.Directory]::CreateDirectory($payload) | Out-Null
     $packagedExe = Join-Path $payload 'nianlai.exe'
     Copy-Item -LiteralPath $exePath -Destination $packagedExe
-    $packagedExeHash = (Get-FileHash -LiteralPath $packagedExe -Algorithm SHA256).Hash.ToLowerInvariant()
+    $packagedExeHash = Get-Sha256 $packagedExe
     if ($packagedExeHash -cne $sourceExeHash) {
         throw '打包复制后的程序哈希与构建结束时不一致，文件可能被其他构建覆盖；已停止发布。'
     }
@@ -235,7 +247,7 @@ $($script:UsageDefaults.AutoStart)
     $temporaryZip = Join-Path $staging $zipName
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     [IO.Compression.ZipFile]::CreateFromDirectory($payload, $temporaryZip, [IO.Compression.CompressionLevel]::Optimal, $false)
-    $zipHash = (Get-FileHash -LiteralPath $temporaryZip -Algorithm SHA256).Hash.ToLowerInvariant()
+    $zipHash = Get-Sha256 $temporaryZip
     Write-ReleaseText (Join-Path $staging $checksumName) ("$zipHash *$zipName`r`n")
     $buildInfo = [ordered]@{
         version = $Version

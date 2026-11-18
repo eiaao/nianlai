@@ -9,7 +9,7 @@
 <p align="center">
   <a href="https://github.com/eiaao/nianlai/actions/workflows/ci.yml"><img src="https://github.com/eiaao/nianlai/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
   <a href="https://github.com/eiaao/nianlai/releases"><img src="https://img.shields.io/github/v/release/eiaao/nianlai?include_prereleases&label=release" alt="Release" /></a>
-  <img src="https://img.shields.io/badge/platform-Windows%20x64-0078D4" alt="Windows x64" />
+  <img src="https://img.shields.io/badge/platform-Windows%20x64%20%7C%20macOS%20Beta-0078D4" alt="Windows x64 | macOS Beta" />
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT" /></a>
 </p>
 
@@ -17,14 +17,14 @@
   <a href="#下载">下载</a> · <a href="#使用">使用</a> · <a href="#数据与隐私">数据与隐私</a> · <a href="#反馈与参与">反馈与参与</a> · <a href="#english">English</a>
 </p>
 
-拈来是一个开源的 Windows 剪贴板历史工具：复制过的内容都留在本机，按一下快捷键呼出，挑一条直接粘贴到你正在用的程序里。呼出面板时**不抢焦点**，光标还在原来的位置；打字就能搜，中文也能搜。
+拈来是一个开源的剪贴板历史工具（Windows，macOS Beta）：复制过的内容都留在本机，按一下快捷键呼出，挑一条直接粘贴到你正在用的程序里。呼出面板时**不抢焦点**，光标还在原来的位置；打字就能搜，中文也能搜。
 
 <p align="center">
   <img src="docs/images/demo-hand.gif" width="800" alt="演示：呼出一手牌，左右换牌，↑ 切到收藏，↓ 摊开成一列" />
   <br /><sub>Ctrl+` 呼出 → ← → 换牌 → ↑ 收藏 → ↓ 摊开</sub>
 </p>
 
-> **0.1.0**：只支持 Windows x64。数据库格式升级时会自动迁移，升级前自动备份。
+> **0.1.1**：支持 Windows x64，以及 macOS 13+（Beta）。数据库格式升级时会自动迁移，升级前自动备份。
 
 ## 特点
 
@@ -100,6 +100,12 @@
 - 程序暂未签名。首次运行时 Windows SmartScreen 可能拦截，确认文件来自本仓库后，点“更多信息 → 仍要运行”。每个版本都附有 SHA-256 校验值。
 - 开机自启：在托盘菜单里勾选。
 
+**macOS（Beta）**：支持 macOS 13 及更新版本，在 Releases 下载 `nianlai-<版本>-macos-universal.dmg`（Apple Silicon 与 Intel 通用）。
+
+- 程序暂未签名。首次打开被拦截时，在“系统设置 › 隐私与安全性”里选择“仍要打开”。
+- 直接粘贴需要在“辅助功能”里允许拈来；升级后可能需要重新勾选授权。
+- macOS 上默认呼出键是 **⌃`**（Control+`），可在菜单栏图标的“设置…”里改。
+
 ## 使用
 
 按 **Ctrl+`**（Esc 下面的反引号键）呼出面板，再按一次收起。快捷键可以在托盘菜单的“设置…”里改。
@@ -153,7 +159,7 @@
 
 ## English
 
-Nianlai (拈来) is an open-source clipboard history manager for Windows. Press <kbd>Ctrl</kbd>+<kbd>`</kbd> to open the panel **without stealing focus**, type to search (including Chinese), and press Enter or 1–7 to paste straight into the app you were using. Everything stays on your machine — no network access. Version 0.1.0: Windows x64 only, portable zip from [Releases](https://github.com/eiaao/nianlai/releases). macOS is planned for v0.5.
+Nianlai (拈来) is an open-source clipboard history manager for Windows and macOS. Press <kbd>Ctrl</kbd>+<kbd>`</kbd> to open the panel **without stealing focus**, type to search (including Chinese), and press Enter or 1–7 to paste straight into the app you were using. Everything stays on your machine — no network access. Downloads are on [Releases](https://github.com/eiaao/nianlai/releases): a portable zip for Windows x64, and a macOS 13+ Beta as a universal DMG (unsigned; allow it under Accessibility to paste directly). On macOS the default hotkey is <kbd>Control</kbd>+<kbd>`</kbd>.
 
 ## 许可证
 
