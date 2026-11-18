@@ -41,10 +41,3 @@ export function dealtGuideItems(guide: GuideSettings): HistoryItem[] {
   if (!guide.cards_dealt || (guide.phase !== "completed" && guide.phase !== "skipped")) return [];
   return GUIDE_CARD_IDS.filter((id) => !guide.dismissed.includes(id)).map(guideCardItem);
 }
-
-export function displayHotkey(value: string): string {
-  return value.split("+").filter(Boolean).map((part) => part
-    .replace(/^control$/i, "Ctrl").replace(/^super$/i, "Win")
-    .replace(/^Key([A-Z])$/, "$1").replace(/^Digit([0-9])$/, "$1")
-    .replace(/^Backquote$/, "`")).join(" + ");
-}

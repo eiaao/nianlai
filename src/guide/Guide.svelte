@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { isMac, keyLabel } from "../lib/platform";
+  import { displayHotkey, isMac, keyLabel } from "../lib/platform";
   import { onMount } from "svelte";
   import * as ipc from "../lib/ipc";
   import {
@@ -338,7 +338,7 @@
         <h1>这句已经记下</h1>
         {#if sample}<blockquote data-sample>{sample.preview || "这条没有文字摘要"}</blockquote>{/if}
         <p><strong>先点一下能打字的地方，再呼出拈来。</strong>比如点一下记事本里要写文字的位置。</p>
-        <p class="hint">确认后打开面板；你的呼出键是 <kbd>{keyLabel(hotkey, true)}</kbd>。</p>
+        <p class="hint">确认后打开面板；你的呼出键是 <kbd>{displayHotkey(hotkey)}</kbd>。</p>
         <div class="actions">
           <button type="button" class="primary" data-action="confirm-target" aria-label="我已选好位置，呼出拈来" disabled={!loaded} onclick={() => dispatch({ type: "input_target_confirmed" })}>我已选好位置</button>
         </div>

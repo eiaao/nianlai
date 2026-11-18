@@ -45,3 +45,14 @@ export function keyLabel(keys: string, physical = false): string {
     return labels[named.toLowerCase()] ?? (named === key ? part : named);
   }).join("+").replace(/([⌘⌃⌥⇧])\s*\+\s*/g, "$1");
 }
+
+// 快捷键显示的唯一格式化：修饰键统一 Ctrl → Alt → Shift → Win，再接主键；Mac 转符号交给 keyLabel。
+const MODIFIER_ORDER = ["control", "ctrl", "alt", "shift", "super", "win"];
+const modifierRank = (part: string) => { const at = MODIFIER_ORDER.indexOf(part.toLowerCase()); return at < 0 ? 99 : at; };
+export function displayHotkey(value: string): string {
+  return keyLabel(value.split("+").filter(Boolean).sort((a, b) => modifierRank(a) - modifierRank(b)).map((part) => part
+    .replace(/^control$/i, "Ctrl").replace(/^super$/i, "Win").replace(/^shift$/i, "Shift").replace(/^alt$/i, "Alt")
+    .replace(/^Key([A-Z])$/, "$1").replace(/^Digit([0-9])$/, "$1").replace(/^Backquote$/, "`")
+    .replace(/^Numpad(.+)$/, "小键盘 $1").replace(/^Arrow(Up|Down|Left|Right)$/, (_, side: string) => ({ Up: "↑", Down: "↓", Left: "←", Right: "→" })[side] ?? side))
+    .join(" + "), true);
+}

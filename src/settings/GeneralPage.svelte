@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { isMac, keyLabel } from "../lib/platform";
+  import { displayHotkey, isMac } from "../lib/platform";
   import { onDestroy, onMount, untrack } from "svelte";
   import * as ipc from "../lib/ipc";
   import type {
@@ -41,21 +41,6 @@
   const reduceMotion = $derived(preferences.motion === "none" || (preferences.followSystemMotion && systemReduced));
   const saveHotkey = (update: SettingsUpdate, message: string) => onsave("general.hotkey", update, message);
   const errorMessage = (value: unknown) => value instanceof Error ? value.message : typeof value === "string" ? value : "操作没有完成，再试一次";
-
-  function displayHotkey(value: string) {
-    const order = ["control", "ctrl", "alt", "shift", "super", "win"];
-    const parts = (value.trim() || "Ctrl+`").split("+").filter(Boolean);
-    return keyLabel(parts.sort((a, b) => {
-      const ai = order.indexOf(a.toLowerCase());
-      const bi = order.indexOf(b.toLowerCase());
-      return (ai < 0 ? 99 : ai) - (bi < 0 ? 99 : bi);
-    }).map((part) => part
-      .replace(/^control$/i, "Ctrl").replace(/^super$/i, "Win")
-      .replace(/^shift$/i, "Shift").replace(/^alt$/i, "Alt")
-      .replace(/^Key([A-Z])$/, "$1").replace(/^Digit([0-9])$/, "$1")
-      .replace(/^Backquote$/, "`"))
-      .join(" + "), true);
-  }
 
   // 预览只持有自己的演示次数。设置改变会重播，但不写存储，也不调用任何面板命令。
   let demoCount = $state(0);
@@ -182,7 +167,7 @@
       {/key}
     </div>
     <div class="preview-caption">
-      <span>当前呼出键 <kbd>{displayHotkey(hotkey)}</kbd>。用按钮只在这里演示，不会打开真实面板。</span>
+      <span>当前呼出键 <kbd>{displayHotkey(hotkey.trim() || "Ctrl+`")}</kbd>。用按钮只在这里演示，不会打开真实面板。</span>
       <button type="button" data-action="demonstrate" disabled={disabled} onclick={demonstrate}>演示一次摊开</button>
     </div>
   </div>

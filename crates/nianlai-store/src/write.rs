@@ -257,14 +257,8 @@ impl Store {
         if since_ms > i64::MAX as u64 {
             return Ok(0);
         }
-        self.call(move |writer| {
-            let count = writer.connection.query_row(
-                "SELECT count(*) FROM copy_events WHERE time_ms >= ?1",
-                [since_ms as i64],
-                |row| row.get::<_, i64>(0),
-            )?;
-            usize::try_from(count).map_err(|_| Error::Invalid("count_overflow"))
-        })
+        // 只读计数走读连接，不占写入队列（引导页在主线程调用）。
+        self.reader()?.copied_since(since_ms as i64)
     }
     pub fn cache(&self) -> Cache {
         self.0.cache.read().unwrap().clone()

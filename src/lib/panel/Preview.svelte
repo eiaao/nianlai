@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { isMac, keyLabel } from "../platform";
+  import { displayHotkey, isMac, keyLabel } from "../platform";
   import { onDestroy, tick } from "svelte";
   import * as ipc from "../ipc";
   import type { HistoryItem, ImageView, PathCheck, TextChunk } from "../ipc";
@@ -7,7 +7,6 @@
   import { formatTime, type PanelState } from "../state.svelte";
   import { cardKind, colorValue, linkParts, relativeTime, sourceName } from "../cards";
   import { SpringValue } from "./motion";
-  import { displayHotkey } from "../guideCards";
   import { PANEL_ACTION_COPY } from "../panelActions";
 
   let { panel, item, expanded = false, compact = false }: { panel: PanelState; item: HistoryItem | null; expanded?: boolean; compact?: boolean } = $props();
@@ -15,7 +14,7 @@
   let previousId: number | null | undefined;
   const kind = $derived(item ? cardKind(item) : "short");
   const rich = $derived(item?.kind === "富文本");
-  const guideText = $derived(item?.guide_id === "t3" ? keyLabel(displayHotkey(panel.hotkey), true)
+  const guideText = $derived(item?.guide_id === "t3" ? displayHotkey(panel.hotkey)
     : item?.guide_id === "t4" ? (panel.autostart ? `电脑开机后，拈来就在${isMac ? "菜单栏" : "托盘"}里等着。` : `要用时从${isMac ? "“应用程序”" : "开始菜单"}打开拈来。`)
       : item?.preview ?? "");
   const link = $derived(item ? linkParts(item.preview ?? "") : null);

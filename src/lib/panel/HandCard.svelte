@@ -1,12 +1,12 @@
 <script lang="ts">
-  import { isMac, keyLabel } from "../platform";
+  import { displayHotkey, isMac, keyLabel } from "../platform";
   // 一张牌 = 一个元素，两种姿态：扇面（竖牌）和摊开（横条）。位置、尺寸、旋转由 HandPanel 算好传进来，
   // 姿态切换时同一个元素补间 translate / rotate / 宽高，两层内容交叉淡入（对象恒常性）。
   import * as ipc from "../ipc";
   import type { HistoryItem, ImageView } from "../ipc";
   import type { PanelState } from "../state.svelte";
   import { type Box, type CardKind, colorValue, fileExt, firstLine, imageSize, KIND_NAME, linkParts, mailParts, relativeTime, sourceName } from "../cards";
-  import { displayHotkey, GUIDE_CARD_COPY } from "../guideCards";
+  import { GUIDE_CARD_COPY } from "../guideCards";
   import { PANEL_ACTION_COPY } from "../panelActions";
 
   let { panel, item, index, kind, box, flat, selected, keycap, clip, delay, duration, inside }: {
@@ -136,7 +136,7 @@
           <strong>{guide.title}</strong>
           {#if guide.id === "t1" || guide.id === "t2"}<p>{guide.body}</p>
           {:else if guide.id === "t3"}
-            <div class="guide-key"><kbd>{keyLabel(displayHotkey(panel.hotkey), true)}</kbd></div>
+            <div class="guide-key"><kbd>{displayHotkey(panel.hotkey)}</kbd></div>
             <p><button type="button" data-guide-hotkey onpointerdown={(event) => event.stopPropagation()} onclick={(event) => { event.preventDefault(); event.stopPropagation(); void panel.openGuideHotkeySettings(item); }}>换一个</button></p>
           {:else}
             <div class="guide-switch"><input type="checkbox" role="switch" aria-label="开机时启动" data-guide-autostart checked={panel.autostart} disabled={!panel.autostartReady || panel.autostartBusy}
@@ -207,7 +207,7 @@
         {#if action}
           <div class="guide-row action-row"><b>{action.title}</b><span>{action.body.replace("↵", keyLabel("↵"))}</span></div>
         {:else if guide}
-          <div class="guide-row" class:has-error={guide.id === "t4" && !!panel.autostartError}><b>{guide.title}</b><span>{guide.id === "t3" ? keyLabel(displayHotkey(panel.hotkey), true) : guide.id === "t4" ? (panel.autostart ? `电脑开机后，拈来就在${isMac ? "菜单栏" : "托盘"}里等着。` : `要用时从${isMac ? "“应用程序”" : "开始菜单"}打开拈来。`) : guide.body}</span>
+          <div class="guide-row" class:has-error={guide.id === "t4" && !!panel.autostartError}><b>{guide.title}</b><span>{guide.id === "t3" ? displayHotkey(panel.hotkey) : guide.id === "t4" ? (panel.autostart ? `电脑开机后，拈来就在${isMac ? "菜单栏" : "托盘"}里等着。` : `要用时从${isMac ? "“应用程序”" : "开始菜单"}打开拈来。`) : guide.body}</span>
             {#if selected && flat}
               {#if guide.id === "t3"}<button type="button" data-guide-hotkey onpointerdown={(event) => event.stopPropagation()} onclick={(event) => { event.preventDefault(); event.stopPropagation(); void panel.openGuideHotkeySettings(item); }}>换一个</button>{/if}
               {#if guide.id === "t4"}<input type="checkbox" role="switch" aria-label="开机时启动" data-guide-autostart checked={panel.autostart} disabled={!panel.autostartReady || panel.autostartBusy}
