@@ -69,7 +69,7 @@
       if (!item.kind.includes("图片") || id in thumbnails) continue;
       thumbnails[id] = null;
       const commit = (url: string | null) => {
-        if (!disposed && (items ?? []).slice(0, 8).some((entry) => entry.id === id)) thumbnails[id] = url;
+        if (!disposed && recent.some((entry) => entry.id === id)) thumbnails[id] = url;
       };
       void ipc.getThumbnail(id).then(commit).catch(() => commit(null));
     }

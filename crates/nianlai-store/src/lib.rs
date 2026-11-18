@@ -366,6 +366,16 @@ impl Reader {
             Ok(items)
         })
     }
+    pub(crate) fn copied_since(&self, since_ms: i64) -> Result<usize> {
+        self.run(move |c| {
+            let count = c.query_row(
+                "SELECT count(*) FROM copy_events WHERE time_ms >= ?1",
+                [since_ms],
+                |row| row.get::<_, i64>(0),
+            )?;
+            usize::try_from(count).map_err(|_| Error::Invalid("count_overflow"))
+        })
+    }
     pub fn counts(&self) -> Result<Counts> {
         self.run(|c| {
             let tx = c.unchecked_transaction()?;
