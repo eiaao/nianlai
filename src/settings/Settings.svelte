@@ -60,10 +60,6 @@
       .then((unlisten) => { if (disposed) unlisten(); else stop = unlisten; }).catch(() => {});
     return () => { disposed = true; stop?.(); };
   });
-  // 打开“关于”页就算看过这个新版本：导航上的小绿点随之消失（横幅和托盘项不受影响）。
-  $effect(() => {
-    if (page === "about" && update?.show_dot) void ipc.markUpdateSeen().catch(() => {});
-  });
   const showBanner = $derived(page !== "about" && !!update?.show_banner && !!update.latest_version);
   const bannerVersion = $derived(update?.latest_version ?? "");
   function dismissBanner() { void ipc.dismissUpdateBanner().catch(() => {}); }

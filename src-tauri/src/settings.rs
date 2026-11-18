@@ -75,7 +75,6 @@ pub struct UpdateSettings {
     pub latest: Option<crate::update::feed::Latest>,
     pub notified_version: Option<String>,
     pub skipped_version: Option<String>,
-    pub seen_version: Option<String>,
     pub banner_dismissed_version: Option<String>,
     #[serde(flatten)]
     unknown: Unknown,
@@ -90,7 +89,6 @@ impl Default for UpdateSettings {
             latest: None,
             notified_version: None,
             skipped_version: None,
-            seen_version: None,
             banner_dismissed_version: None,
             unknown: Unknown::new(),
         }
@@ -106,7 +104,6 @@ impl UpdateSettings {
             latest: self.latest.clone(),
             notified_version: self.notified_version.clone(),
             skipped_version: self.skipped_version.clone(),
-            seen_version: self.seen_version.clone(),
             banner_dismissed_version: self.banner_dismissed_version.clone(),
         }
     }
@@ -555,7 +552,6 @@ fn validate(mut value: Value) -> (Settings, Vec<Issue>) {
     for name in [
         "notified_version",
         "skipped_version",
-        "seen_version",
         "banner_dismissed_version",
     ] {
         field(

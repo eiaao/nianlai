@@ -30,7 +30,6 @@ pub struct State {
     pub latest: Option<Latest>,
     pub notified_version: Option<String>,
     pub skipped_version: Option<String>,
-    pub seen_version: Option<String>,
     pub banner_dismissed_version: Option<String>,
 }
 
@@ -94,11 +93,10 @@ impl State {
         Self::is(&self.skipped_version, version)
     }
 
-    /// 设置里“关于”导航项的小绿点：有未跳过、未查看的新版本。
+    /// 设置里“关于”导航项的小绿点：有未跳过的新版本就一直显示，看过“关于”页也不消失。
     pub fn show_dot(&self, current: &str) -> bool {
-        self.available(current).is_some_and(|latest| {
-            !self.skipped(&latest.version) && !Self::is(&self.seen_version, &latest.version)
-        })
+        self.available(current)
+            .is_some_and(|latest| !self.skipped(&latest.version))
     }
 
     /// 设置窗口顶部横幅：有未跳过的新版本，且这个版本的横幅没被关闭过。
@@ -260,13 +258,10 @@ mod tests {
         assert!(
             state.show_dot("0.1.1") && state.show_banner("0.1.1") && state.show_tray_item("0.1.1")
         );
-        // 看过“关于”页：绿点消失，横幅和托盘项还在。
-        state.seen_version = Some("0.1.2".into());
-        assert!(
-            !state.show_dot("0.1.1") && state.show_banner("0.1.1") && state.show_tray_item("0.1.1")
-        );
-        // 关掉横幅：横幅消失，托盘项还在。
+        // 关掉横幅：横幅不再出现，绿点和托盘项还在。
         state.banner_dismissed_version = Some("0.1.2".into());
-        assert!(!state.show_banner("0.1.1") && state.show_tray_item("0.1.1"));
+        assert!(
+            !state.show_banner("0.1.1") && state.show_dot("0.1.1") && state.show_tray_item("0.1.1")
+        );
     }
 }

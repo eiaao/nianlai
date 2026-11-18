@@ -5,9 +5,25 @@ use std::{path::Path, process::Command, time::Duration};
 /// 更新后启动的新进程带这个参数，让它先等旧进程退出再初始化（否则单实例插件会把它当成“已有实例”而退出）。
 pub const WAIT_ARG: &str = "--update-wait-pid";
 
+/// 仓库主页和作者的 X，“关于”页的链接只能打开这几个固定地址。
+pub const GITHUB_URL: &str = "https://github.com/eiaao/nianlai";
+pub const AUTHOR_X_URL: &str = "https://x.com/aming_ai";
+
+/// 前端只传链接名，地址由这里的白名单决定。
+pub fn project_url(what: &str) -> Option<&'static str> {
+    match what {
+        "github" => Some(GITHUB_URL),
+        "author_x" => Some(AUTHOR_X_URL),
+        _ => None,
+    }
+}
+
 pub fn open_url(url: &str) -> Result<(), String> {
     // 只打开我们自己的固定地址，不接受前端传来的任意 URL。
-    if !url.starts_with("https://github.com/eiaao/nianlai/") {
+    let allowed = url == GITHUB_URL
+        || url == AUTHOR_X_URL
+        || url.starts_with("https://github.com/eiaao/nianlai/");
+    if !allowed {
         return Err("地址不在允许的范围内".into());
     }
     let program = if cfg!(windows) {
@@ -108,5 +124,16 @@ mod tests {
     fn only_project_urls_can_be_opened() {
         assert!(open_url("https://example.com/").is_err());
         assert!(open_url("file:///C:/Windows/System32/calc.exe").is_err());
+        assert!(open_url("https://x.com/someone_else").is_err());
+    }
+
+    #[test]
+    fn project_links_come_from_a_fixed_list() {
+        assert_eq!(
+            project_url("github"),
+            Some("https://github.com/eiaao/nianlai")
+        );
+        assert_eq!(project_url("author_x"), Some("https://x.com/aming_ai"));
+        assert_eq!(project_url("https://example.com/"), None);
     }
 }

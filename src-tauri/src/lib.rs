@@ -739,9 +739,9 @@ pub fn run() {
             update::get_update_status,
             update::check_update_now,
             update::set_update_skipped,
-            update::mark_update_seen,
             update::dismiss_update_banner,
             update::open_download_page,
+            update::open_project_link,
             update::start_update
         ])
         .setup(|app| {

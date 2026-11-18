@@ -222,7 +222,6 @@ fn changed(app: &AppHandle, persist: bool) {
             "latest": snapshot.latest,
             "notified_version": snapshot.notified_version,
             "skipped_version": snapshot.skipped_version,
-            "seen_version": snapshot.seen_version,
             "banner_dismissed_version": snapshot.banner_dismissed_version,
         }});
         if app.state::<Store>().set(value).is_err() {
@@ -479,16 +478,6 @@ pub fn set_update_skipped(app: AppHandle, skipped: bool) {
     skip_version(&app, None, skipped);
 }
 
-/// 设置窗口显示“关于”页时调用：这个版本的小绿点不再显示。
-#[tauri::command]
-pub fn mark_update_seen(app: AppHandle) {
-    mutate(&app, true, |inner| {
-        if let Some(latest) = &inner.state.latest {
-            inner.state.seen_version = Some(latest.version.clone());
-        }
-    });
-}
-
 #[tauri::command]
 pub fn dismiss_update_banner(app: AppHandle) {
     mutate(&app, true, |inner| {
@@ -501,6 +490,13 @@ pub fn dismiss_update_banner(app: AppHandle) {
 #[tauri::command]
 pub fn open_download_page() -> Result<(), String> {
     process::open_url(feed::DOWNLOAD_PAGE)
+}
+
+/// “关于”页的项目链接：GitHub 仓库、作者的 X。
+#[tauri::command]
+pub fn open_project_link(what: String) -> Result<(), String> {
+    let url = process::project_url(&what).ok_or_else(|| "未知链接".to_owned())?;
+    process::open_url(url)
 }
 
 #[tauri::command]

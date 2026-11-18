@@ -481,8 +481,8 @@ export async function invoke(command, args = {}) {
         last_check_ms: Date.now(), last_result: "new", check_error: null, checking: false, phase: "idle",
         received: 0, total: null, error: null, install_block: null, download_page: "https://github.com/eiaao/nianlai/releases/latest",
       } : null;
-    case "mark_update_seen":
-    case "dismiss_update_banner": return;
+    case "dismiss_update_banner":
+    case "open_project_link": return;
     default:
       // 本骨架不执行清理、删除或备份写入；未覆盖命令保持无副作用。
       return null;

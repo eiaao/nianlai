@@ -81,6 +81,12 @@
     try { await ipc.openDownloadPage(); }
     catch (value) { updateNotice = `下载页没打开：${message(value)}`; }
   }
+  let linkNotice = $state("");
+  async function openLink(what: "github" | "author_x") {
+    linkNotice = "";
+    try { await ipc.openProjectLink(what); }
+    catch (value) { linkNotice = `链接没打开：${message(value)}`; }
+  }
   const saveAutoCheck = (enabled: boolean) => onsave("about.update", { update: { auto_check: enabled } }, enabled ? "已开启自动检查" : "已关闭自动检查");
 
   onMount(() => {
@@ -225,6 +231,18 @@
       <div class="guide-feedback" data-save-row="about.update"><SaveMark state={saveState("about.update")} /></div>
     </div>
   {/if}
+
+  <div class="card about-rows" data-project-links>
+    <div class="setting">
+      <span class="setting-copy"><strong>源代码</strong><small>github.com/eiaao/nianlai · 拈来免费开源，觉得好用的话，去 GitHub 点个 Star 吧。</small></span>
+      <button type="button" data-project-link="github" onclick={() => { void openLink("github"); }}>打开</button>
+    </div>
+    <div class="setting">
+      <span class="setting-copy"><strong>作者的 X（Twitter）</strong><small>x.com/aming_ai</small></span>
+      <button type="button" data-project-link="author_x" onclick={() => { void openLink("author_x"); }}>打开</button>
+    </div>
+    {#if linkNotice}<p class="update-line error" role="alert">{linkNotice}</p>{/if}
+  </div>
 
   <div class="card about-rows">
     {#if isMac}

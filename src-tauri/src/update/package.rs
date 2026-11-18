@@ -100,7 +100,7 @@ pub fn validate_portable_zip(zip_path: &Path) -> Result<Vec<String>, String> {
     let bad = || "安装包内容不符合预期，已放弃".to_owned();
     let file = File::open(zip_path).map_err(|_| "读不到下载的文件".to_owned())?;
     let mut archive = zip::ZipArchive::new(file).map_err(|_| bad())?;
-    if archive.len() == 0 || archive.len() > MAX_ENTRIES {
+    if archive.is_empty() || archive.len() > MAX_ENTRIES {
         return Err(bad());
     }
     let (mut names, mut total, mut has_exe) = (Vec::new(), 0u64, false);
@@ -314,10 +314,13 @@ pub(crate) mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
 
+    /// 一个测试用例：名字和 zip 里的（文件名，内容）。
+    type Case<'a> = (&'a str, Vec<(&'a str, Vec<u8>)>);
+
     #[test]
     fn rejects_unsafe_or_incomplete_packages() {
         let dir = temp_dir("zip-bad");
-        let cases: Vec<(&str, Vec<(&str, Vec<u8>)>)> = vec![
+        let cases: Vec<Case> = vec![
             ("no-exe", vec![("readme.txt", b"x".to_vec())]),
             ("not-pe", vec![(EXE_NAME, b"MZ nope".to_vec())]),
             (
