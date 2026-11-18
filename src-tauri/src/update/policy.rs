@@ -113,6 +113,7 @@ impl State {
             .is_some_and(|latest| !self.skipped(&latest.version))
     }
 
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub fn notify_decision(&self, current: &str, panel_visible: bool) -> Notify {
         let Some(latest) = self.available(current) else {
             return Notify::No;
@@ -128,6 +129,8 @@ impl State {
     }
 }
 
+/// 系统通知只在 Windows 上发（macOS 只用菜单栏提示）。
+#[cfg_attr(not(windows), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Notify {
     No,

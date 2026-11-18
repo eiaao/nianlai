@@ -3,6 +3,9 @@
 //! 只有用户点了“立即更新”才会走到这里。用户数据（设置、历史库、日志）都在
 //! `%APPDATA%\Nianlai` 和 `%LOCALAPPDATA%\Nianlai`，不在程序所在的文件夹，
 //! 这里只处理程序文件夹里的文件，绝不碰用户数据。
+//!
+//! 便携版 zip 的校验与替换只在 Windows 上调用（macOS 走 mac.rs），其他平台只编译、由测试覆盖。
+#![cfg_attr(not(windows), allow(dead_code))]
 
 use sha2::{Digest, Sha256};
 use std::{

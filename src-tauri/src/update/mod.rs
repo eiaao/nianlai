@@ -325,6 +325,7 @@ fn check(app: &AppHandle, manual: bool) -> Result<(), String> {
 
 // ---------- 通知 ----------
 
+#[cfg(windows)]
 fn panel_visible(app: &AppHandle) -> bool {
     app.get_webview_window("panel")
         .and_then(|window| window.is_visible().ok())
