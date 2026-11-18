@@ -320,7 +320,13 @@
   .nav-pages > button.active { border-color: var(--hand-line-strong); border-left: 4px solid var(--hand-seal); background: var(--hand-card); color: var(--hand-ink); font-weight: 600; box-shadow: var(--hand-row-shadow); }
   .nav-pages svg { width: 20px; height: 20px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
   .nav-pages > button { position: relative; }
-  .update-dot { width: 8px; height: 8px; margin-left: auto; flex: none; border-radius: 50%; background: var(--state-success); }
+  /* 新版本提示点：用品牌的印章朱红，配一圈缓慢的呼吸光晕；关闭动画或系统减少动画时只保留静止的点。 */
+  .update-dot { width: 7px; height: 7px; margin-left: auto; flex: none; border-radius: 50%; background: var(--hand-seal); animation: update-breathe 2.8s ease-in-out infinite; }
+  @keyframes update-breathe {
+    0%, 100% { opacity: .5; box-shadow: 0 0 0 0 color-mix(in srgb, var(--hand-seal) 30%, transparent); }
+    50% { opacity: 1; box-shadow: 0 0 0 3px color-mix(in srgb, var(--hand-seal) 22%, transparent); }
+  }
+  :global(html[data-motion="none"]) .update-dot, :global(html[data-reduce-motion="true"]) .update-dot { animation: none; opacity: 1; }
   .update-banner { flex: none; min-height: 36px; display: flex; align-items: center; gap: 8px; padding: 6px 16px 6px 24px; border-bottom: 1px solid var(--hand-line); background: var(--state-success-bg); color: var(--state-success); font-size: 13px; }
   .update-banner > span { font-weight: 600; }
   .banner-link { min-height: 24px; padding: 0 4px; border: 0; background: transparent; color: inherit; font-size: 13px; text-decoration: underline; box-shadow: none; }
