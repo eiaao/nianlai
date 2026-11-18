@@ -7,7 +7,7 @@
   import { formatTime, type PanelState } from "../state.svelte";
   import { cardKind, colorValue, linkParts, relativeTime, sourceName } from "../cards";
   import { SpringValue } from "./motion";
-    import { PANEL_ACTION_COPY } from "../panelActions";
+  import { PANEL_ACTION_COPY } from "../panelActions";
 
   let { panel, item, expanded = false, compact = false }: { panel: PanelState; item: HistoryItem | null; expanded?: boolean; compact?: boolean } = $props();
   let root: HTMLDivElement;
