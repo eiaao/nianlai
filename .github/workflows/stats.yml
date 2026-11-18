@@ -1,0 +1,62 @@
+name: 下载统计
+
+# 每天记录一次各 Release 资产的累计下载次数，追加到 stats 分支上的 downloads.csv（日期,tag,资产名,次数）。
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: stats
+  cancel-in-progress: false
+
+jobs:
+  snapshot:
+    name: 记录下载次数
+    runs-on: ubuntu-latest
+    steps:
+      - name: 准备 stats 分支（没有就创建孤儿分支）
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git clone --quiet "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" stats-repo
+          cd stats-repo
+          if git ls-remote --exit-code --heads origin stats >/dev/null 2>&1; then
+            git fetch --quiet origin stats
+            git checkout --quiet -B stats origin/stats
+          else
+            git checkout --quiet --orphan stats
+            git rm -rf --quiet . || true
+            echo "date,tag,asset,downloads" > downloads.csv
+          fi
+      - name: 追加今天的快照
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          today=$(date -u +%F)
+          cd stats-repo
+          # 同一天重跑不重复追加。
+          grep -v "^${today}," downloads.csv > downloads.tmp || true
+          mv downloads.tmp downloads.csv
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            --jq ".[] | .tag_name as \$tag | .assets[] | [\"${today}\", \$tag, .name, .download_count] | @csv" \
+            | tr -d '"' >> downloads.csv
+          head -n 1 downloads.csv | grep -q '^date,tag,asset,downloads$'
+      - name: 提交到 stats 分支
+        run: |
+          set -euo pipefail
+          cd stats-repo
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add downloads.csv
+          if git diff --cached --quiet; then
+            echo "没有变化"
+          else
+            git commit --quiet -m "stats: $(date -u +%F)"
+            git push --quiet origin stats
+          fi
