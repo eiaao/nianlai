@@ -4,12 +4,13 @@
   import { isMac } from "../lib/platform";
   import type { AppSettings, GuideSettings, LicenseNotices, SettingsUpdate } from "../lib/ipc";
   import appIcon from "../../src-tauri/icons/128x128.png?url";
-  import { message } from "./format";
+  import { message, size, time } from "./format";
   import SaveMark, { type SaveMarkState } from "./SaveMark.svelte";
 
   const IDLE: SaveMarkState = { phase: "idle", message: "", error: "" };
-  let { guide, disabled = false, onsave, saveState = () => IDLE, openRecovery, onopenguide, dealPending, ondeal }: {
+  let { guide, update = null, disabled = false, onsave, saveState = () => IDLE, openRecovery, onopenguide, dealPending, ondeal }: {
     guide: GuideSettings;
+    update?: ipc.UpdateStatus | null;
     disabled?: boolean;
     onsave: (key: string, update: SettingsUpdate, message: string) => Promise<AppSettings | null>;
     saveState?: (key: string) => SaveMarkState;
@@ -33,6 +34,60 @@
   let accessibility = $state("正在读取权限…");
   const inFirstRun = $derived(guide.phase === "await_copy" || guide.phase === "await_show" || guide.phase === "await_paste");
   const actionDisabled = $derived(disabled || inFirstRun || dealPending || actionPending !== null || saveState("about.guide").phase === "saving");
+
+  // ---- 新版本 ----
+  let checkPending = $state(false);
+  let updateNotice = $state("");
+  const busyPhases = ["downloading", "verifying", "installing", "restarting"];
+  const updating = $derived(!!update && busyPhases.includes(update.phase));
+  const percent = $derived(update?.total ? Math.min(100, Math.floor((update.received / update.total) * 100)) : null);
+  const phaseText = $derived.by(() => {
+    if (!update) return "";
+    switch (update.phase) {
+      case "downloading": return update.total ? `正在下载 ${size(update.received)} / ${size(update.total)}` : `正在下载 ${size(update.received)}`;
+      case "verifying": return "正在校验下载的文件…";
+      case "installing": return "正在替换程序文件…";
+      case "restarting": return "更新完成，正在重新打开拈来…";
+      default: return "";
+    }
+  });
+  const lastCheckText = $derived.by(() => {
+    if (!update) return "";
+    if (update.checking) return "正在检查…";
+    if (update.last_check_ms === null) return "还没检查过";
+    const when = time(update.last_check_ms);
+    if (update.last_result === "failed") return `${when} 检查失败${update.check_error ? `：${update.check_error}` : ""}`;
+    return `${when} 检查过，${update.has_update ? `发现新版本 ${update.latest_version}` : "已是最新版本"}`;
+  });
+  async function checkNow() {
+    if (checkPending || update?.checking || updating) return;
+    checkPending = true;
+    updateNotice = "";
+    try { await ipc.checkUpdateNow(); }
+    catch (value) { updateNotice = message(value); }
+    finally { checkPending = false; }
+  }
+  async function updateNow() {
+    updateNotice = "";
+    try { await ipc.startUpdate(); }
+    catch (value) { updateNotice = message(value); }
+  }
+  async function toggleSkip() {
+    if (!update?.has_update) return;
+    try { await ipc.setUpdateSkipped(!update.skipped); }
+    catch (value) { updateNotice = message(value); }
+  }
+  async function openDownloadPage() {
+    try { await ipc.openDownloadPage(); }
+    catch (value) { updateNotice = `下载页没打开：${message(value)}`; }
+  }
+  let linkNotice = $state("");
+  async function openLink(what: "github" | "author_x") {
+    linkNotice = "";
+    try { await ipc.openProjectLink(what); }
+    catch (value) { linkNotice = `链接没打开：${message(value)}`; }
+  }
+  const saveAutoCheck = (enabled: boolean) => onsave("about.update", { update: { auto_check: enabled } }, enabled ? "已开启自动检查" : "已关闭自动检查");
 
   onMount(() => {
     let alive = true;
@@ -123,6 +178,72 @@
     <p class="gloss"><strong>拈</strong><span>用两三个指头，轻轻拿起来。</span></p>
   </div>
 
+  {#if update}
+    <div class="card update-card" data-update-card>
+      <div class="setting">
+        <span class="setting-copy">
+          <strong>{update.has_update ? `发现新版本 ${update.latest_version}` : "更新"}{#if update.has_update && update.date}<span class="muted"> · {update.date}</span>{/if}</strong>
+          <small>当前版本 {update.current}{update.has_update ? "" : update.last_result === "latest" ? "，已是最新版本" : ""}{#if update.preview} · 预览模式{/if}</small>
+        </span>
+        {#if update.has_update}
+          <span class="update-actions">
+            {#if update.install_block}
+              <button type="button" class="primary" data-update-action="download-page" onclick={openDownloadPage}>去下载页</button>
+            {:else}
+              <button type="button" class="primary" data-update-action="install" disabled={disabled || updating || update.checking} onclick={updateNow}>{updating ? "更新中…" : "立即更新"}</button>
+            {/if}
+            <button type="button" data-update-action="skip" disabled={updating} onclick={toggleSkip}>{update.skipped ? "取消跳过" : "跳过这个版本"}</button>
+          </span>
+        {/if}
+      </div>
+      {#if update.has_update}
+        {#if update.notes.length}
+          <div class="update-notes" data-update-notes>
+            {#each update.notes as note (note.version)}
+              <section>
+                <h3>{note.version}</h3>
+                <ul>{#each note.items as item}<li>{item}</li>{/each}</ul>
+              </section>
+            {/each}
+          </div>
+        {/if}
+        {#if update.install_block}<p class="update-line" data-update-block>{update.install_block}</p>{/if}
+        {#if update.skipped}<p class="update-line">已跳过这个版本，有更新的版本时会再提醒。</p>{/if}
+        {#if updating}
+          <div class="update-line" data-update-progress role="status">
+            <span>{phaseText}</span>
+            {#if update.phase === "downloading" && percent !== null}<progress max="100" value={percent}></progress>{/if}
+          </div>
+        {/if}
+        {#if update.phase === "failed" && update.error}
+          <div class="update-line error" data-update-error role="alert">
+            <span>没更新成：{update.error}。现在的版本不受影响。</span>
+            <button type="button" data-update-action="download-page" onclick={openDownloadPage}>去下载页</button>
+          </div>
+        {/if}
+      {/if}
+      {#if updateNotice}<p class="update-line error" role="alert">{updateNotice}</p>{/if}
+      <div class="setting">
+        <span class="setting-copy"><strong>自动检查新版本</strong><small>启动后和每天检查一次，只从 GitHub 读取一个版本文件，不上传任何数据。{lastCheckText}</small></span>
+        <input class="switch" type="checkbox" role="switch" data-update-auto aria-label="自动检查新版本" checked={update.auto_check} disabled={disabled} onchange={(event) => { void saveAutoCheck(event.currentTarget.checked); }}>
+        <button type="button" data-update-action="check" disabled={checkPending || update.checking || updating} onclick={checkNow}>{checkPending || update.checking ? "正在检查…" : "立即检查"}</button>
+      </div>
+      <div class="guide-feedback" data-save-row="about.update"><SaveMark state={saveState("about.update")} /></div>
+    </div>
+  {/if}
+
+  <div class="card about-rows" data-project-links>
+    <div class="setting">
+      <span class="setting-copy"><strong>源代码</strong><small>github.com/eiaao/nianlai · 拈来免费开源，觉得好用的话，去 GitHub 点个 Star 吧。</small></span>
+      <button type="button" data-project-link="github" onclick={() => { void openLink("github"); }}>打开</button>
+    </div>
+    <div class="setting">
+      <span class="setting-copy"><strong>作者的 X（Twitter）</strong><small>x.com/aming_ai</small></span>
+      <button type="button" data-project-link="author_x" onclick={() => { void openLink("author_x"); }}>打开</button>
+    </div>
+    {#if linkNotice}<p class="update-line error" role="alert">{linkNotice}</p>{/if}
+  </div>
+
   <div class="card about-rows">
     {#if isMac}
       <div class="setting">
@@ -131,7 +252,7 @@
       </div>
     {/if}
     <div class="setting">
-      <span class="setting-copy"><strong>版本 <span data-about-version>{version}</span></strong><small>东西都存在这台电脑上，不联网。</small></span>
+      <span class="setting-copy"><strong>版本 <span data-about-version>{version}</span></strong><small>东西都存在这台电脑上，不上传。</small></span>
     </div>
     <div class="setting directory-row">
       <span class="setting-copy"><strong>东西存在哪</strong><small class="path" data-about-dir>{dataDir}</small>{#if directoryError}<small class="error" role="alert">{directoryError}</small>{/if}</span>
@@ -192,7 +313,17 @@
   .slogan { margin: 4px 0 0; font-size: 15px; }
   .gloss { display: flex; align-items: center; gap: 8px; margin: 4px 0 0; color: var(--hand-ink-2); font-size: 12px; }
   .gloss strong { width: 28px; height: 28px; display: grid; place-items: center; border-radius: 4px; background: var(--hand-seal); color: var(--hand-on-seal); font: 600 20px var(--font-display); }
-  .about-rows { overflow: hidden; }
+  .about-rows, .update-card { overflow: hidden; }
+  .muted { color: var(--hand-ink-2); font-weight: 400; }
+  .update-actions { display: flex; flex: none; gap: 8px; }
+  button.primary { border-color: var(--update); background: var(--update-bg); color: var(--update); font-weight: 600; }
+  .update-notes { display: grid; gap: 12px; padding: 4px 16px 12px; border-bottom: 1px solid var(--hand-line); }
+  .update-notes h3 { margin: 0 0 4px; font-size: 12px; color: var(--hand-ink-2); font-weight: 600; }
+  .update-notes ul { margin: 0; padding-left: 18px; font-size: 13px; line-height: 1.7; }
+  .update-line { display: flex; align-items: center; gap: 12px; margin: 0; padding: 10px 16px; border-bottom: 1px solid var(--hand-line); font-size: 12px; line-height: 1.6; color: var(--hand-ink-2); }
+  .update-line.error { color: var(--state-critical); }
+  .update-line.error span { flex: 1; }
+  .update-line progress { flex: 1; max-width: 240px; height: 6px; accent-color: var(--update); }
   .setting { min-height: 64px; }
   .setting strong span { font-weight: 400; }
   .path { font-family: var(--font-mono); overflow-wrap: anywhere; user-select: text; }
@@ -200,6 +331,7 @@
   button.link { border-color: transparent; background: transparent; color: var(--hand-seal); text-decoration: underline; }
   button:disabled { opacity: .6; }
   .guide-feedback { padding: 0 16px; }
+  .update-card .guide-feedback:empty { display: none; }
   .guide-feedback p { margin: 8px 0 12px; font-size: 12px; line-height: 1.6; }
   .error { color: var(--state-critical); }
   .notice { color: var(--hand-ink-2); }

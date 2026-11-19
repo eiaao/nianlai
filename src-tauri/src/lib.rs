@@ -17,6 +17,7 @@ mod settings;
 mod settings_window;
 mod shortcut;
 mod tray;
+mod update;
 
 use app::Controller;
 use history::History;
@@ -653,6 +654,8 @@ pub(crate) fn apply_live_settings(settings: &settings::Settings) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // 被更新流程拉起时，先等旧进程退出，再往下初始化（否则单实例插件会误判有旧实例）。
+    update::process::wait_for_predecessor();
     // 守护者在这里就结束，不初始化 Tauri；真正的应用（--child）继续往下走。
     if let Some(code) = recovery::guard() {
         std::process::exit(code);
@@ -732,7 +735,14 @@ pub fn run() {
             tray::guide_open_panel,
             guide_window::guide_copy_sample,
             guide_window::open_guide,
-            guide_window::set_guide_hit_regions
+            guide_window::set_guide_hit_regions,
+            update::get_update_status,
+            update::check_update_now,
+            update::set_update_skipped,
+            update::dismiss_update_banner,
+            update::open_download_page,
+            update::open_project_link,
+            update::start_update
         ])
         .setup(|app| {
             #[cfg(target_os = "macos")]
@@ -766,6 +776,10 @@ pub fn run() {
             for issue in issues.iter().chain(&resolved.issues) {
                 issue.record(&logger);
             }
+            app.manage(update::Updater::new(
+                logger.clone(),
+                store.get().update.state(),
+            ));
             app.manage(store);
             let window = app.get_webview_window("panel").ok_or("panel 窗口不存在")?;
             platform::window::no_activate(&window, true)?;
@@ -791,6 +805,7 @@ pub fn run() {
             std::fs::create_dir_all(&icons)?;
             app.asset_protocol_scope().allow_directory(&icons, false)?;
             tray::setup(app.handle(), &logger)?;
+            update::start(app.handle());
             let handle = app.handle().clone();
             let capture_logger = logger.clone();
             std::thread::Builder::new()

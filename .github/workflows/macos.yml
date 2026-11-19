@@ -2,6 +2,16 @@ name: macOS 检查与 universal 构建
 
 on:
   workflow_call:
+    inputs:
+      release_sign:
+        description: 正式发布：用固定自签名证书签名（缺少 secret 则失败）；其余场景沿用 ad-hoc 签名
+        type: boolean
+        default: false
+    secrets:
+      MAC_SIGN_P12_BASE64:
+        required: false
+      MAC_SIGN_P12_PASSWORD:
+        required: false
 
 permissions:
   contents: read
@@ -91,6 +101,43 @@ jobs:
           cache-on-failure: true
       - name: 安装前端依赖
         run: pnpm install --frozen-lockfile
+      - name: 要求固定签名证书（仅正式发布）
+        if: ${{ inputs.release_sign }}
+        env:
+          MAC_SIGN_P12_BASE64: ${{ secrets.MAC_SIGN_P12_BASE64 }}
+          MAC_SIGN_P12_PASSWORD: ${{ secrets.MAC_SIGN_P12_PASSWORD }}
+        run: |
+          if [[ -z "$MAC_SIGN_P12_BASE64" || -z "$MAC_SIGN_P12_PASSWORD" ]]; then
+            echo "::error::正式发布需要仓库 secrets MAC_SIGN_P12_BASE64 与 MAC_SIGN_P12_PASSWORD"
+            exit 1
+          fi
+      # 固定证书让每个版本的签名身份不变：macOS 的辅助功能授权才不会因更新失效。
+      - name: 导入固定签名证书到临时钥匙串（仅正式发布）
+        if: ${{ inputs.release_sign }}
+        env:
+          MAC_SIGN_P12_BASE64: ${{ secrets.MAC_SIGN_P12_BASE64 }}
+          MAC_SIGN_P12_PASSWORD: ${{ secrets.MAC_SIGN_P12_PASSWORD }}
+          # 证书里的通用名称；可在仓库 Variables 里设置 MAC_SIGN_IDENTITY 覆盖。
+          MAC_SIGN_IDENTITY: ${{ vars.MAC_SIGN_IDENTITY || 'Nianlai Self-Signed' }}
+        run: |
+          set -euo pipefail
+          umask 077
+          keychain="$RUNNER_TEMP/nianlai-release.keychain-db"
+          p12="$RUNNER_TEMP/nianlai-release.p12"
+          password=$(openssl rand -hex 32)
+          printf '::add-mask::%s\n' "$password"
+          security list-keychains -d user > "$RUNNER_TEMP/nianlai-keychains.txt"
+          printf '%s' "$MAC_SIGN_P12_BASE64" | base64 -D > "$p12"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          security import "$p12" -k "$keychain" -P "$MAC_SIGN_P12_PASSWORD" -T /usr/bin/codesign >/dev/null 2>&1
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain" >/dev/null 2>&1
+          security list-keychains -d user -s "$keychain"
+          rm -f "$p12"
+          # 自签名证书不在受信任链里，find-identity -v 看不到，不带 -v 核对身份存在。
+          security find-identity -p codesigning "$keychain" | grep -F "\"$MAC_SIGN_IDENTITY\""
+          echo "APPLE_SIGNING_IDENTITY=$MAC_SIGN_IDENTITY" >> "$GITHUB_ENV"
       - name: 构建 macOS universal
         run: pnpm tauri build --target universal-apple-darwin
       - name: 核对安装包并生成校验值
@@ -113,6 +160,12 @@ jobs:
           test "$(/usr/libexec/PlistBuddy -c 'Print :LSUIElement' "$plist")" = "true"
           lipo "$app/Contents/MacOS/$executable" -verify_arch arm64 x86_64
           codesign --verify --deep --strict "$app"
+          if [[ "${{ inputs.release_sign }}" == "true" ]]; then
+            # 正式发布不能是 ad-hoc：必须带证书身份。
+            if codesign -dv "$app" 2>&1 | grep -q 'Signature=adhoc'; then
+              echo "::error::正式发布的 .app 仍是 ad-hoc 签名"; exit 1
+            fi
+          fi
           hdiutil verify "${images[0]}"
           mkdir -p release
           name="nianlai-${version}-macos-universal.dmg"
@@ -127,3 +180,20 @@ jobs:
             release/nianlai-*-macos-universal.dmg.sha256
           if-no-files-found: error
           retention-days: 30
+      - name: 清理临时签名材料
+        if: ${{ always() && inputs.release_sign }}
+        run: |
+          status=0
+          if [[ -f "$RUNNER_TEMP/nianlai-keychains.txt" ]]; then
+            keychains=()
+            while IFS= read -r line; do
+              line=${line#*\"}; line=${line%\"*}
+              if [[ -n "$line" ]]; then keychains+=("$line"); fi
+            done < "$RUNNER_TEMP/nianlai-keychains.txt" || status=1
+            security list-keychains -d user -s ${keychains[@]+"${keychains[@]}"} || status=1
+          fi
+          if [[ -f "$RUNNER_TEMP/nianlai-release.keychain-db" ]]; then
+            security delete-keychain "$RUNNER_TEMP/nianlai-release.keychain-db" || status=1
+          fi
+          rm -f "$RUNNER_TEMP/nianlai-release.p12" "$RUNNER_TEMP/nianlai-keychains.txt" || status=1
+          exit "$status"

@@ -50,6 +50,20 @@
     return () => { disposed = true; stop?.(); };
   });
 
+  // 新版本状态：后端 update 模块是唯一来源，设置窗口只读它并响应 update:changed。
+  let update = $state<ipc.UpdateStatus | null>(null);
+  onMount(() => {
+    let disposed = false;
+    let stop: ipc.UnlistenFn | undefined;
+    void ipc.getUpdateStatus().then((value) => { if (!disposed) update = value; }).catch(() => {});
+    void ipc.onUpdateChanged((value) => { if (!disposed) update = value; })
+      .then((unlisten) => { if (disposed) unlisten(); else stop = unlisten; }).catch(() => {});
+    return () => { disposed = true; stop?.(); };
+  });
+  const showBanner = $derived(page !== "about" && !!update?.show_banner && !!update.latest_version);
+  const bannerVersion = $derived(update?.latest_version ?? "");
+  function dismissBanner() { void ipc.dismissUpdateBanner().catch(() => {}); }
+
   let preferences = $state<Preferences>({ ...DEFAULT_PREFERENCES });
   let hotkey = $state("Ctrl+`");
   let capture = $state<CaptureSettings | null>(null);
@@ -251,6 +265,7 @@
       {#each pages as entry}
         <button type="button" data-page={entry.id} class:active={page === entry.id} aria-current={page === entry.id ? "page" : undefined} onclick={() => show(entry.id)}>
           <svg viewBox="0 0 20 20" aria-hidden="true">{@html entry.icon}</svg><span>{entry.label}</span>
+          {#if entry.id === "about" && update?.show_dot}<i class="update-dot" data-update-dot role="img" aria-label="有新版本"></i>{/if}
         </button>
       {/each}
     </div>
@@ -262,6 +277,15 @@
       <h1>{pages.find((entry) => entry.id === page)?.label}</h1>
       {#if page === "privacy" || page === "data" || page === "fav"}<div data-save-row={page}><SaveMark state={row(page)} /></div>{/if}
     </header>
+    {#if showBanner}
+      <div class="update-banner" data-update-banner role="status">
+        <span>发现新版本 {bannerVersion}</span>
+        <button type="button" class="banner-link" onclick={() => show("about")}>查看</button>
+        <button type="button" class="banner-close" aria-label="关闭提示" onclick={dismissBanner}>
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5.5 5.5l9 9M14.5 5.5l-9 9"/></svg>
+        </button>
+      </div>
+    {/if}
     {#if loading}<p class="load-status" role="status">正在读取设置…</p>{/if}
     {#if loadError}<p class="load-error" role="alert">{loadError}</p>{/if}
     <div class="content" data-settings-scroll>
@@ -276,7 +300,7 @@
       {:else if page === "habits"}
         <InteractionPage {interaction} {reuseToTop} disabled={loading} onsave={saveInteraction} saveState={row} />
       {:else}
-        <AboutPage {guide} disabled={loading} onsave={save} saveState={row} openRecovery={aboutGuideOpen} onopenguide={openAboutGuide} dealPending={aboutGuideDealPending} ondeal={dealAboutGuide} />
+        <AboutPage {guide} {update} disabled={loading} onsave={save} saveState={row} openRecovery={aboutGuideOpen} onopenguide={openAboutGuide} dealPending={aboutGuideDealPending} ondeal={dealAboutGuide} />
       {/if}
     </div>
   </main>
@@ -295,6 +319,20 @@
   .nav-pages > button:hover { border-color: var(--hand-line); background: var(--hand-paper); }
   .nav-pages > button.active { border-color: var(--hand-line-strong); border-left: 4px solid var(--hand-seal); background: var(--hand-card); color: var(--hand-ink); font-weight: 600; box-shadow: var(--hand-row-shadow); }
   .nav-pages svg { width: 20px; height: 20px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
+  .nav-pages > button { position: relative; }
+  /* 新版本提示点：琥珀色（--update），配一圈缓慢的呼吸光晕；关闭动画或系统减少动画时只保留静止的点。 */
+  .update-dot { width: 7px; height: 7px; margin-left: auto; flex: none; border-radius: 50%; background: var(--update); animation: update-breathe 2.8s ease-in-out infinite; }
+  @keyframes update-breathe {
+    0%, 100% { opacity: .5; box-shadow: 0 0 0 0 color-mix(in srgb, var(--update) 30%, transparent); }
+    50% { opacity: 1; box-shadow: 0 0 0 3px color-mix(in srgb, var(--update) 22%, transparent); }
+  }
+  :global(html[data-motion="none"]) .update-dot, :global(html[data-reduce-motion="true"]) .update-dot { animation: none; opacity: 1; }
+  .update-banner { flex: none; min-height: 36px; display: flex; align-items: center; gap: 8px; padding: 6px 16px 6px 24px; border-bottom: 1px solid var(--hand-line); background: var(--update-bg); color: var(--update); font-size: 13px; }
+  .update-banner > span { font-weight: 600; }
+  .banner-link { min-height: 24px; padding: 0 4px; border: 0; background: transparent; color: inherit; font-size: 13px; text-decoration: underline; box-shadow: none; }
+  .banner-close { width: 24px; height: 24px; margin-left: auto; padding: 0; display: grid; place-items: center; border: 0; border-radius: 4px; background: transparent; color: inherit; box-shadow: none; }
+  .banner-close:hover { background: color-mix(in srgb, currentColor 12%, transparent); }
+  .banner-close svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; }
   .nav-foot { margin-top: auto; padding: 16px 8px 0; border-top: 1px solid var(--hand-line); color: var(--hand-ink-2); font-size: 12px; line-height: 1.6; }
   .main { min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--hand-paper); }
   .main-head { min-height: 64px; flex: none; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 0 24px; border-bottom: 1px solid var(--hand-line); }

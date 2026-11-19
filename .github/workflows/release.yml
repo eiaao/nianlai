@@ -23,6 +23,10 @@ jobs:
     steps:
       - name: 检出代码
         uses: actions/checkout@v7
+      - name: 安装 Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
       - name: 读取并核对版本
         id: version
         shell: bash
@@ -36,6 +40,11 @@ jobs:
           if [[ "${version}" == *-* ]]; then prerelease=true; else prerelease=false; fi
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "prerelease=${prerelease}" >> "$GITHUB_OUTPUT"
+      # 每个版本必须有 release-notes/<版本>.md，缺了就在这里失败，不进入构建。
+      - name: 核对更新说明
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: node tools/release-notes.mjs check --version "$VERSION"
 
   ci:
     name: 检查与构建
@@ -48,6 +57,10 @@ jobs:
     name: macOS 检查与构建
     needs: verify-tag
     uses: ./.github/workflows/macos.yml
+    with:
+      # 正式发布必须用固定自签名证书签名；缺少 secret 时构建失败。
+      release_sign: true
+    secrets: inherit
 
   publish:
     name: 创建 GitHub Release
@@ -56,6 +69,12 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: 检出代码（读取更新说明与生成脚本）
+        uses: actions/checkout@v7
+      - name: 安装 Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
       - name: 下载构建产物
         uses: actions/download-artifact@v8
         with:
@@ -112,8 +131,33 @@ jobs:
           } > notes.md
           flags=()
           if [ "$PRERELEASE" = true ]; then flags+=(--prerelease); fi
-          gh release create "$GITHUB_REF_NAME" "$zip" "$sum" build-info.json \
-            --verify-tag --title "拈来 ${VERSION}" --notes-file notes.md --generate-notes "${flags[@]}"
+          # 重跑幂等：Release 已存在就不再创建，资产逐个核对或补传（与 macOS 任务一致）。
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets[].name' > assets.txt
+            for asset in "$zip" "$sum" build-info.json; do
+              if grep -Fxq "$asset" assets.txt; then
+                mkdir -p existing
+                gh release download "$GITHUB_REF_NAME" --pattern "$asset" --dir existing --clobber
+                cmp "$asset" "existing/$asset"
+              else
+                gh release upload "$GITHUB_REF_NAME" "$asset"
+              fi
+            done
+          else
+            gh release create "$GITHUB_REF_NAME" "$zip" "$sum" build-info.json \
+              --verify-tag --title "拈来 ${VERSION}" --notes-file notes.md --generate-notes "${flags[@]}"
+          fi
+      # 版本文件最后上传：客户端读到它时，Windows 安装包一定已经在 Release 里。
+      - name: 生成并上传 latest-windows.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.verify-tag.outputs.version }}
+        run: |
+          node tools/release-notes.mjs feed --platform windows --version "$VERSION" \
+            --file "dist-release/nianlai-${VERSION}-windows-x64-portable.zip" --out latest-windows.json
+          # 版本文件内容由安装包和更新说明决定，重跑时直接覆盖。
+          gh release upload "$GITHUB_REF_NAME" latest-windows.json --clobber
 
   publish-macos:
     name: 为同一 Release 添加 macOS 安装包
@@ -122,6 +166,12 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: 检出代码（读取更新说明与生成脚本）
+        uses: actions/checkout@v7
+      - name: 安装 Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
       - name: 下载 macOS 安装包
         uses: actions/download-artifact@v8
         with:
@@ -159,7 +209,7 @@ jobs:
               echo '### macOS（Beta）'
               echo
               echo '支持 macOS 13 及更新版本，通用安装包包含 Apple Silicon 与 Intel。打开 DMG 后把 Nianlai 拖入“应用程序”，再打开和启用开机启动。'
-              echo 'Beta 仅使用 ad-hoc 签名，未做 Developer ID 签名或公证。首次打开若被拦截，在“系统设置 › 隐私与安全性”选择“仍要打开”；在“辅助功能”里允许拈来，即可直接粘贴。更新后可能需要重新授权。'
+              echo 'Beta 使用固定的自签名证书签名，未做 Developer ID 签名或公证。首次打开若被拦截，在“系统设置 › 隐私与安全性”选择“仍要打开”；在“辅助功能”里允许拈来，即可直接粘贴。更新后可能需要重新授权。'
               echo 'Beta 不含手动逐张粘贴、原生编辑控件直投、Windows 内存采样与 WebView2 挂起，以及正式签名与公证；已选内容的一起粘贴仍可用。'
               echo
               echo '| 文件 | SHA-256 |'
@@ -168,3 +218,13 @@ jobs:
             } >> notes.md
             gh release edit "$GITHUB_REF_NAME" --notes-file notes.md
           fi
+      # DMG 上传完成后最后上传版本文件，客户端读到它时安装包一定已经就位。
+      - name: 生成并上传 latest-macos.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.verify-tag.outputs.version }}
+        run: |
+          node tools/release-notes.mjs feed --platform macos --version "$VERSION" \
+            --file "dist-macos/nianlai-${VERSION}-macos-universal.dmg" --out latest-macos.json
+          gh release upload "$GITHUB_REF_NAME" latest-macos.json --clobber

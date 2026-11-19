@@ -15,6 +15,8 @@
 
 ## 图标
 
+- `release-notes.mjs` / `test-release-notes.mjs`：从 `release-notes/<版本>.md`（`## 通用`、`## Windows`、`## macOS` 三节）核对更新说明并生成发布附带的 `latest-windows.json` / `latest-macos.json`；`node tools/release-notes.mjs check --version X`，测试 `node tools/test-release-notes.mjs`。
+- `update-feed-sample.json`：预览“新版本”界面用的示例版本文件（9.9.9）。设置环境变量 `NIANLAI_UPDATE_FEED=<这个文件的路径>` 再启动拈来，几秒后即可看到绿点、横幅、更新卡片、托盘项和系统通知；预览模式不写设置文件，也不会替换程序。
 - `build_icons.py`：从 `src-tauri/icons/source/` 的 SVG 源重新生成全部程序图标（ico、png、Square*、StoreLogo、icns）和 `src-tauri/icons/tray/` 的托盘三态资源。只用 Python 标准库和本机 Edge（矢量档的光栅化）；16/24 手绘档逐像素转换，不经缩放；托盘 32 由 16 最近邻放大；ICO 固定为 16/24/32/48/256 五档。`python -X utf8 -I tools/build_icons.py [--output <目录>]`，默认输出 `src-tauri/icons`，自定义输出目录时仍只读取生产 `source/`，重复运行输出逐字节一致。
 - `test_build_icons.py`：核对产物齐全、PNG/ICO/ICNS 结构、ICO 16/24 与手绘源逐像素一致、托盘 32 为 16 的 2 倍最近邻。`python -X utf8 -I tools/test_build_icons.py [目录]`。
 

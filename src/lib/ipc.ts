@@ -72,6 +72,7 @@ export type AppSettings = {
   interaction?: Partial<InteractionSettings>;
   history?: { reuse_to_top?: boolean };
   guide?: GuideSettings;
+  update?: { auto_check?: boolean };
   [key: string]: unknown;
 };
 export type CaptureSettings = {
@@ -92,6 +93,32 @@ export type SnapshotState = {
   relaunch: boolean;
 };
 export type SettingsUpdate = Omit<AppSettings, "guide"> & { guide?: Partial<GuideSettings> };
+
+// 新版本检测与原地更新（后端 update 模块）。
+export type UpdateNote = { version: string; items: string[] };
+export type UpdatePhase = "idle" | "downloading" | "verifying" | "installing" | "restarting" | "failed";
+export type UpdateStatus = {
+  current: string;
+  auto_check: boolean;
+  preview: boolean;
+  has_update: boolean;
+  latest_version: string | null;
+  date: string;
+  notes: UpdateNote[];
+  skipped: boolean;
+  show_dot: boolean;
+  show_banner: boolean;
+  last_check_ms: number | null;
+  last_result: "none" | "latest" | "new" | "failed";
+  check_error: string | null;
+  checking: boolean;
+  phase: UpdatePhase;
+  received: number;
+  total: number | null;
+  error: string | null;
+  install_block: string | null;
+  download_page: string;
+};
 export type HotkeyValidation = {
   hotkey: string; key: string; control: boolean; alt: boolean; shift: boolean; win: boolean;
   warning: string | null;
@@ -237,6 +264,13 @@ export const reportPainted = (session: number) => invoke("report_painted", { ses
 export const reportSearchInput = (session: number, inputType: string, composing: boolean, afterReadyMs: number) =>
   invoke("report_search_input", { session, inputType, composing, afterReadyMs });
 export const appVersion = () => getVersion();
+export const getUpdateStatus = () => invoke<UpdateStatus>("get_update_status");
+export const checkUpdateNow = () => invoke<UpdateStatus>("check_update_now");
+export const setUpdateSkipped = (skipped: boolean) => invoke<void>("set_update_skipped", { skipped });
+export const dismissUpdateBanner = () => invoke<void>("dismiss_update_banner");
+export const openDownloadPage = () => invoke<void>("open_download_page");
+export const openProjectLink = (what: "github" | "author_x") => invoke<void>("open_project_link", { what });
+export const startUpdate = () => invoke<void>("start_update");
 export type LicenseNotices = { nianlai: string; third_party: string };
 export const getDataDir = () => invoke<string>("get_data_dir");
 export const openDataDir = () => invoke<void>("open_data_dir");
@@ -263,6 +297,7 @@ export const onPanelTiming = on<Timing>("panel:timing");
 export const onPanelError = on<PanelError>("panel:error");
 export const onPasteResult = on<PasteResult>("panel:paste-result");
 export const onSettingsChanged = on<AppSettings>("settings:changed");
+export const onUpdateChanged = on<UpdateStatus>("update:changed");
 export const onCaptureChanged = on<{ paused: boolean; ignore_next: boolean }>("capture:changed");
 
 // ---------- M2-4 备份 ----------

@@ -2350,7 +2350,7 @@ checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 
 [[package]]
 name = "nianlai"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "core-graphics",
  "image",
@@ -2362,6 +2362,7 @@ dependencies = [
  "objc2-application-services",
  "objc2-foundation",
  "rfd",
+ "semver",
  "serde",
  "serde_json",
  "sha2",
@@ -2374,6 +2375,7 @@ dependencies = [
  "tauri-plugin-single-instance",
  "webview2-com",
  "windows",
+ "zip",
 ]
 
 [[package]]

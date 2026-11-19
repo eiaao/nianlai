@@ -24,7 +24,7 @@
   <br /><sub>Ctrl+` 呼出 → ← → 换牌 → ↑ 收藏 → ↓ 摊开</sub>
 </p>
 
-> **0.1.1**：支持 Windows x64，以及 macOS 13+（Beta）。数据库格式升级时会自动迁移，升级前自动备份。
+> **0.1.2**：支持 Windows x64，以及 macOS 13+（Beta）。有新版本时会提醒，并可在设置的“关于”页一键更新。数据库格式升级时会自动迁移，升级前自动备份。
 
 ## 特点
 
@@ -35,7 +35,7 @@
 - **收藏**：常用的内容设为收藏后单独一手、顺序固定，可以加标题和备注，不随历史过期。
 - **手牌与摊开**：平时是一手扇面，要找更早的就把牌摊开成一列，连续滚动、按时间分组；深浅主题跟随系统。
 - **保留格式**：文字、富文本、图片、文件都按原格式记录，并显示来源程序的图标。
-- **本地优先**：数据只存在本机，不联网，不上传。
+- **本地优先**：数据只存在本机，不上传。
 
 ## 看一看
 
@@ -99,6 +99,7 @@
 - 需要 Microsoft Edge WebView2 运行时（Windows 11 已自带；Windows 10 若缺失，请安装微软的 WebView2 Evergreen 运行时）。
 - 程序暂未签名。首次运行时 Windows SmartScreen 可能拦截，确认文件来自本仓库后，点“更多信息 → 仍要运行”。每个版本都附有 SHA-256 校验值。
 - 开机自启：在托盘菜单里勾选。
+- 更新：有新版本时会弹一条系统通知，设置的“关于”页可以一键更新（会保留你的设置和历史）。
 
 **macOS（Beta）**：支持 macOS 13 及更新版本，在 Releases 下载 `nianlai-<版本>-macos-universal.dmg`（Apple Silicon 与 Intel 通用）。
 
@@ -146,7 +147,7 @@
 ## 数据与隐私
 
 - 历史记录存在 `%LOCALAPPDATA%\Nianlai\data`，设置在 `%APPDATA%\Nianlai\settings.json`，日志在 `%LOCALAPPDATA%\Nianlai\logs`。
-- 不联网：没有统计、遥测，也不检查更新。
+- 没有统计、遥测。检查更新只从 GitHub 下载一个很小的版本文件，不上传任何数据，可以在设置的“关于”页关闭；点“立即更新”才会下载新版本。
 - 遵守密码管理器等程序设置的“不要记录”标记，这类内容不会进入历史。
 - 日志不记录剪贴板正文和窗口标题。
 - 程序崩溃后会自动重启，24 小时内最多 3 次；数据库升级前自动备份。
@@ -159,7 +160,7 @@
 
 ## English
 
-Nianlai (拈来) is an open-source clipboard history manager for Windows and macOS. Press <kbd>Ctrl</kbd>+<kbd>`</kbd> to open the panel **without stealing focus**, type to search (including Chinese), and press Enter or 1–7 to paste straight into the app you were using. Everything stays on your machine — no network access. Downloads are on [Releases](https://github.com/eiaao/nianlai/releases): a portable zip for Windows x64, and a macOS 13+ Beta as a universal DMG (unsigned; allow it under Accessibility to paste directly). On macOS the default hotkey is <kbd>Control</kbd>+<kbd>`</kbd>.
+Nianlai (拈来) is an open-source clipboard history manager for Windows and macOS. Press <kbd>Ctrl</kbd>+<kbd>`</kbd> to open the panel **without stealing focus**, type to search (including Chinese), and press Enter or 1–7 to paste straight into the app you were using. Everything stays on your machine. The only network request is an optional update check that downloads one small version file from GitHub (can be turned off in Settings > About); nothing is uploaded. Downloads are on [Releases](https://github.com/eiaao/nianlai/releases): a portable zip for Windows x64, and a macOS 13+ Beta as a universal DMG (unsigned; allow it under Accessibility to paste directly). On macOS the default hotkey is <kbd>Control</kbd>+<kbd>`</kbd>.
 
 ## 许可证
 

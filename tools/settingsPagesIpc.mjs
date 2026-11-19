@@ -473,6 +473,16 @@ export async function invoke(command, args = {}) {
       return { mode: args.mode, added_items: 2, added_favorites: 1, relaunch: args.mode === "overwrite", auto_restart: true };
     case "discard_import": return;
     case "open_settings": return;
+    case "get_update_status":
+      // ?update=1 时演示“有新版本”；默认没有更新卡片以外的任何提示。
+      return new URLSearchParams(location.search).get("update") === "1" ? {
+        current: "0.1.1", auto_check: true, preview: true, has_update: true, latest_version: "9.9.9", date: "2026-11-25",
+        notes: [{ version: "9.9.9", items: ["示例更新说明"] }], skipped: false, show_dot: true, show_banner: true,
+        last_check_ms: Date.now(), last_result: "new", check_error: null, checking: false, phase: "idle",
+        received: 0, total: null, error: null, install_block: null, download_page: "https://github.com/eiaao/nianlai/releases/latest",
+      } : null;
+    case "dismiss_update_banner":
+    case "open_project_link": return;
     default:
       // 本骨架不执行清理、删除或备份写入；未覆盖命令保持无副作用。
       return null;

@@ -1,0 +1,10 @@
+{
+  "version": "9.9.9",
+  "date": "2026-11-25",
+  "url": "https://github.com/eiaao/nianlai/releases/download/v9.9.9/nianlai-9.9.9-windows-x64-portable.zip",
+  "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "notes": [
+    { "version": "9.9.9", "items": ["这是预览用的示例更新说明。", "绿点、横幅、托盘项和系统通知都会出现。"] },
+    { "version": "0.1.2", "items": ["新增检查新版本和一键更新。"] }
+  ]
+}
