@@ -14,10 +14,12 @@
 </p>
 
 <p align="center">
-  <a href="#下载">下载</a> · <a href="#使用">使用</a> · <a href="#数据与隐私">数据与隐私</a> · <a href="#反馈与参与">反馈与参与</a> · <a href="#english">English</a>
+  <a href="https://nianlai.top/"><b>官网 nianlai.top</b></a> · <a href="#下载">下载</a> · <a href="#使用">使用</a> · <a href="#数据与隐私">数据与隐私</a> · <a href="#反馈与参与">反馈与参与</a> · <a href="#english">English</a>
 </p>
 
 拈来是一个开源的剪贴板历史工具（Windows，macOS Beta）：复制过的内容都留在本机，按一下快捷键呼出，挑一条直接粘贴到你正在用的程序里。呼出面板时**不抢焦点**，光标还在原来的位置；打字就能搜，中文也能搜。
+
+官网 [nianlai.top](https://nianlai.top/) 本身就是一个小拈来：不用下载，在网页上复制一行、按一下快捷键就能先试一手。
 
 <p align="center">
   <img src="docs/images/demo-hand.gif" width="800" alt="演示：呼出一手牌，左右换牌，↑ 切到收藏，↓ 摊开成一列" />
@@ -160,7 +162,7 @@
 
 ## English
 
-Nianlai (拈来) is an open-source clipboard history manager for Windows and macOS. Press <kbd>Ctrl</kbd>+<kbd>`</kbd> to open the panel **without stealing focus**, type to search (including Chinese), and press Enter or 1–7 to paste straight into the app you were using. Everything stays on your machine. The only network request is an optional update check that downloads one small version file from GitHub (can be turned off in Settings > About); nothing is uploaded. Downloads are on [Releases](https://github.com/eiaao/nianlai/releases): a portable zip for Windows x64, and a macOS 13+ Beta as a universal DMG (unsigned; allow it under Accessibility to paste directly). On macOS the default hotkey is <kbd>Control</kbd>+<kbd>`</kbd>.
+Nianlai (拈来) is an open-source clipboard history manager for Windows and macOS. Press <kbd>Ctrl</kbd>+<kbd>`</kbd> to open the panel **without stealing focus**, type to search (including Chinese), and press Enter or 1–7 to paste straight into the app you were using. Everything stays on your machine. The only network request is an optional update check that downloads one small version file from GitHub (can be turned off in Settings > About); nothing is uploaded. Downloads are on [Releases](https://github.com/eiaao/nianlai/releases): a portable zip for Windows x64, and a macOS 13+ Beta as a universal DMG (unsigned; allow it under Accessibility to paste directly). On macOS the default hotkey is <kbd>Control</kbd>+<kbd>`</kbd>. Website: [nianlai.top](https://nianlai.top/) — try it right in the browser.
 
 ## 许可证
 
