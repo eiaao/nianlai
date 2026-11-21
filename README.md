@@ -22,8 +22,8 @@
 官网 [nianlai.top](https://nianlai.top/) 本身就是一个小拈来：不用下载，在网页上复制一行、按一下快捷键就能先试一手。
 
 <p align="center">
-  <img src="docs/images/demo-hand.gif" width="800" alt="演示：呼出一手牌，左右换牌，↑ 切到收藏，↓ 摊开成一列" />
-  <br /><sub>Ctrl+` 呼出 → ← → 换牌 → ↑ 收藏 → ↓ 摊开</sub>
+  <a href="https://nianlai.top/"><img src="docs/images/promo.gif" width="800" alt="20 秒宣传片：一周复制过的东西攒成一叠牌，按 Ctrl+` 搜到上周的提示词，一键贴回 AI 对话框" /></a>
+  <br /><sub>复制过的，按 Ctrl+` 一键拿回 · 高清版在官网 <a href="https://nianlai.top/">nianlai.top</a></sub>
 </p>
 
 > **0.1.2**：支持 Windows x64，以及 macOS 13+（Beta）。有新版本时会提醒，并可在设置的“关于”页一键更新。数据库格式升级时会自动迁移，升级前自动备份。
@@ -40,6 +40,11 @@
 - **本地优先**：数据只存在本机，不上传。
 
 ## 看一看
+
+<p align="center">
+  <img src="docs/images/demo-hand.gif" width="800" alt="演示：呼出一手牌，左右换牌，↑ 切到收藏，↓ 摊开成一列" />
+  <br /><sub>Ctrl+` 呼出 → ← → 换牌 → ↑ 收藏 → ↓ 摊开</sub>
+</p>
 
 <table>
   <tr>
