@@ -269,7 +269,7 @@ export const checkUpdateNow = () => invoke<UpdateStatus>("check_update_now");
 export const setUpdateSkipped = (skipped: boolean) => invoke<void>("set_update_skipped", { skipped });
 export const dismissUpdateBanner = () => invoke<void>("dismiss_update_banner");
 export const openDownloadPage = () => invoke<void>("open_download_page");
-export const openProjectLink = (what: "github" | "author_x") => invoke<void>("open_project_link", { what });
+export const openProjectLink = (what: "site" | "github" | "author_x") => invoke<void>("open_project_link", { what });
 export const startUpdate = () => invoke<void>("start_update");
 export type LicenseNotices = { nianlai: string; third_party: string };
 export const getDataDir = () => invoke<string>("get_data_dir");

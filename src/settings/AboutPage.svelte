@@ -82,7 +82,7 @@
     catch (value) { updateNotice = `下载页没打开：${message(value)}`; }
   }
   let linkNotice = $state("");
-  async function openLink(what: "github" | "author_x") {
+  async function openLink(what: "site" | "github" | "author_x") {
     linkNotice = "";
     try { await ipc.openProjectLink(what); }
     catch (value) { linkNotice = `链接没打开：${message(value)}`; }
@@ -233,6 +233,10 @@
   {/if}
 
   <div class="card about-rows" data-project-links>
+    <div class="setting">
+      <span class="setting-copy"><strong>官网</strong><small>nianlai.top · 不用下载，在网页上就能先试一手。</small></span>
+      <button type="button" data-project-link="site" onclick={() => { void openLink("site"); }}>打开</button>
+    </div>
     <div class="setting">
       <span class="setting-copy"><strong>源代码</strong><small>github.com/eiaao/nianlai · 拈来免费开源，觉得好用的话，去 GitHub 点个 Star 吧。</small></span>
       <button type="button" data-project-link="github" onclick={() => { void openLink("github"); }}>打开</button>
